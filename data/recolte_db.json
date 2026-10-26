@@ -1,0 +1,91 @@
+{
+  "users": [
+    {
+      "id": "usr_admin",
+      "username": "admin",
+      "nom": "Lahcen (Administrateur)",
+      "role": "admin",
+      "passwordHash": "b61978d5f5026f767bf462b4c46df078be576284c51b29a890d0725178a9d3c6",
+      "salt": "lahcen_salt_admin",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "usr_caporal_1",
+      "username": "caporal1",
+      "nom": "Brahim (Caporal)",
+      "role": "caporal",
+      "passwordHash": "60efbfa0610f5678397a76dcbfbba1f59bc5db9962e4f5e4c4fe995a982943dc",
+      "salt": "lahcen_salt_caporal",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    }
+  ],
+  "serres": [
+    {
+      "id": "serre_1",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S01",
+      "nom": "Serre 1",
+      "actif": true,
+      "ordre": 1
+    },
+    {
+      "id": "serre_2",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S02",
+      "nom": "Serre 2",
+      "actif": true,
+      "ordre": 2
+    },
+    {
+      "id": "serre_3",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S03",
+      "nom": "Serre 3",
+      "actif": true,
+      "ordre": 3
+    },
+    {
+      "id": "serre_4",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S04",
+      "nom": "Serre 4",
+      "actif": true,
+      "ordre": 4
+    },
+    {
+      "id": "serre_5",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S05",
+      "nom": "Serre 5",
+      "actif": true,
+      "ordre": 5
+    },
+    {
+      "id": "serre_6",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S06",
+      "nom": "Serre 6",
+      "actif": true,
+      "ordre": 6
+    },
+    {
+      "id": "serre_7",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S07",
+      "nom": "Serre 7",
+      "actif": true,
+      "ordre": 7
+    },
+    {
+      "id": "serre_8",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "S08",
+      "nom": "Serre 8",
+      "actif": true,
+      "ordre": 8
+    }
+  ],
+  "recoltes": []
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Lahcen Pointeur",
+  "description": "Application mobile de pointage agricole pour domaines agricoles — Lahcen Pointeur.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
