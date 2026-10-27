@@ -1,0 +1,6 @@
+{
+  "summary":  "Non-destructive SQL migration script for Lahcen Pointeur application to synchronize PostgreSQL schema with TypeScript interfaces. This script adds missing columns, renames columns, and ensures proper RLS constraints.",
+  "updatedAt":  "2026-10-27T14:06:48.005798596Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

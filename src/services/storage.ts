@@ -46,6 +46,14 @@ export const STORAGE_KEYS = {
   SYNC_QUEUE: 'agripointage_sync_queue_v1',
 };
 
+export function addToSyncQueue(table: string, data: any) {
+  const raw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
+  const queue: any[] = raw ? JSON.parse(raw) : [];
+  queue.push({ table, data, timestamp: Date.now() });
+  localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(queue));
+}
+
+
 // Serres par défaut (configurables par l'administrateur)
 export const DEFAULT_SERRES: Serre[] = [
   { id: 'serre_1', company_id: 'cie_lahcen_pointeur', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1 },
@@ -58,26 +66,36 @@ export const DEFAULT_SERRES: Serre[] = [
   { id: 'serre_8', company_id: 'cie_lahcen_pointeur', code: 'S08', nom: 'Serre 8', actif: true, ordre: 8 },
 ];
 
-export const DEFAULT_ADMIN_USER: UserAccount = {
-  id: 'usr_admin',
-  username: 'admin',
-  nom: 'Lahcen (Administrateur)',
+// export const DEFAULT_ADMIN_USER: UserAccount = {
+//   id: 'usr_admin',
+//   username: 'admin',
+//   nom: 'Lahcen (Administrateur)',
+//   role: 'admin',
+//   passwordHash: 'b61978d5f5026f767bf462b4c46df078be576284c51b29a890d0725178a9d3c6', // 'admin123'
+//   salt: 'lahcen_salt_admin',
+//   actif: true,
+//   createdAt: '2026-01-01T00:00:00.000Z',
+// };
+//
+// export const DEFAULT_CAPORAL_USER: UserAccount = {
+//   id: 'usr_caporal_1',
+//   username: 'caporal1',
+//   nom: 'Brahim (Caporal)',
+//   role: 'caporal',
+//   passwordHash: '60efbfa0610f5678397a76dcbfbba1f59bc5db9962e4f5e4c4fe995a982943dc', // 'caporal123'
+//   salt: 'lahcen_salt_caporal',
+//   actif: true,
+//   createdAt: '2026-01-01T00:00:00.000Z',
+// };
+export const GUEST_USER: UserAccount = {
+  id: 'usr_guest',
+  username: 'guest',
+  nom: 'Invité',
   role: 'admin',
-  passwordHash: 'b61978d5f5026f767bf462b4c46df078be576284c51b29a890d0725178a9d3c6', // 'admin123'
-  salt: 'lahcen_salt_admin',
+  passwordHash: '',
+  salt: '',
   actif: true,
-  createdAt: '2026-01-01T00:00:00.000Z',
-};
-
-export const DEFAULT_CAPORAL_USER: UserAccount = {
-  id: 'usr_caporal_1',
-  username: 'caporal1',
-  nom: 'Brahim (Caporal)',
-  role: 'caporal',
-  passwordHash: '60efbfa0610f5678397a76dcbfbba1f59bc5db9962e4f5e4c4fe995a982943dc', // 'caporal123'
-  salt: 'lahcen_salt_caporal',
-  actif: true,
-  createdAt: '2026-01-01T00:00:00.000Z',
+  createdAt: new Date().toISOString(),
 };
 
 // Domaines par défaut (Ordre spécifié : D2, D3, D5, D1, D4)
@@ -320,12 +338,12 @@ export function initStorage(): void {
     if (!localStorage.getItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS)) {
       safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, JSON.stringify([]));
     }
-    if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
-      safeSetItem(STORAGE_KEYS.USERS, JSON.stringify([DEFAULT_ADMIN_USER, DEFAULT_CAPORAL_USER]));
-    }
-    if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
-      safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(DEFAULT_ADMIN_USER));
-    }
+    // if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
+    //   safeSetItem(STORAGE_KEYS.USERS, JSON.stringify([DEFAULT_ADMIN_USER, DEFAULT_CAPORAL_USER]));
+    // }
+    // if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
+    //   safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(DEFAULT_ADMIN_USER));
+    // }
     if (!localStorage.getItem(STORAGE_KEYS.SERRES)) {
       safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(DEFAULT_SERRES));
     }
@@ -552,6 +570,7 @@ export function saveOuvrier(
   }
 
   safeSetItem(STORAGE_KEYS.OUVRIERS, JSON.stringify(all));
+  addToSyncQueue('ouvriers', updated);
   notifyListeners();
   return { success: true, ouvrier: updated };
 }
@@ -721,6 +740,7 @@ export function saveTache(
   }
 
   safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify(all));
+  addToSyncQueue('taches', updated);
   notifyListeners();
   return { success: true, tache: updated };
 }
@@ -973,6 +993,7 @@ export function addPointage(
 
   all.push(newPointage);
   safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+  addToSyncQueue('pointages', newPointage);
   notifyListeners();
 
   return { success: true, pointage: newPointage };
@@ -993,6 +1014,7 @@ export function updatePointage(
       all[idx].domaine_id = updates.domaine_id;
     }
     safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+    addToSyncQueue('pointages', all[idx]);
     notifyListeners();
   }
 }
@@ -2145,8 +2167,8 @@ export function clearAllDataPermanently(): void {
   safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify([]));
   safeSetItem(STORAGE_KEYS.GAZOIL_CONFIG, JSON.stringify({}));
   safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, JSON.stringify([]));
-  safeSetItem(STORAGE_KEYS.USERS, JSON.stringify([DEFAULT_ADMIN_USER, DEFAULT_CAPORAL_USER]));
-  safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(DEFAULT_ADMIN_USER));
+  safeSetItem(STORAGE_KEYS.USERS, JSON.stringify([GUEST_USER]));
+  safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(GUEST_USER));
   safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(DEFAULT_SERRES));
   safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify([]));
   safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify([]));
@@ -2161,12 +2183,12 @@ export function getUsers(): UserAccount[] {
     const raw = localStorage.getItem(STORAGE_KEYS.USERS);
     const users: UserAccount[] = raw ? JSON.parse(raw) : [];
     if (users.length === 0) {
-      return [DEFAULT_ADMIN_USER, DEFAULT_CAPORAL_USER];
+      return [GUEST_USER];
     }
     return users;
   } catch (e) {
     console.error('Erreur getUsers:', e);
-    return [DEFAULT_ADMIN_USER, DEFAULT_CAPORAL_USER];
+    return [GUEST_USER];
   }
 }
 
@@ -2314,11 +2336,11 @@ export function getCurrentUser(): UserAccount {
   initStorage();
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (!raw) return DEFAULT_ADMIN_USER;
+    if (!raw) return GUEST_USER;
     const parsed = JSON.parse(raw);
-    return parsed && parsed.id ? parsed : DEFAULT_ADMIN_USER;
+    return parsed && parsed.id ? parsed : GUEST_USER;
   } catch {
-    return DEFAULT_ADMIN_USER;
+    return GUEST_USER;
   }
 }
 
@@ -2329,7 +2351,7 @@ export function setCurrentUser(user: UserAccount): void {
 
 export function logoutUser(): void {
   // Déconnexion : retour au compte invité/admin ou réinitialisation
-  safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(DEFAULT_ADMIN_USER));
+  safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(GUEST_USER));
   notifyListeners();
 }
 

@@ -1,0 +1,6 @@
+{
+  "summary":  "Updated SQL schema to include all tables (serres, heures_supp, gazoil_config, gazoil_mouvements) and RLS policies.",
+  "updatedAt":  "2026-10-27T13:19:11.756049513Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

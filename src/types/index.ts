@@ -138,6 +138,8 @@ export interface UserAccount {
   username: string; // Identifiant de connexion (ex: 'admin', 'caporal_brahim')
   nom: string; // Nom affiché (ex: 'Lahcen (Administrateur)', 'Brahim')
   role: UserRole;
+  company_id: string; // ID de l'entreprise rattachée
+  permissions?: any; // Permissions JSONB
   passwordHash: string; // Hachage salé SHA-256
   salt: string;
   actif: boolean;

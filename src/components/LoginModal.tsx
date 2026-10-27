@@ -4,9 +4,9 @@
  */
 
 import React, { useState } from 'react';
-import { X, Lock, User, ShieldCheck, LogOut, CheckCircle2, AlertCircle } from 'lucide-react';
+import { X, Lock, User, LogOut, CheckCircle2, AlertCircle } from 'lucide-react';
 import { UserAccount } from '../types';
-import * as storage from '../services/storage';
+import { supabase } from '../services/supabaseClient';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -23,7 +23,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLoginSuccess,
   onLogout,
 }) => {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -36,8 +36,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setError(null);
     setSuccessMsg(null);
 
-    if (!username.trim()) {
-      setError("Veuillez saisir votre identifiant.");
+    if (!email.trim()) {
+      setError("Veuillez saisir votre email.");
       return;
     }
     if (!password) {
@@ -47,35 +47,36 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     setLoading(true);
     try {
-      const res = await storage.authenticateUser(username, password);
-      if (!res.success || !res.user) {
-        setError(res.error || "Identifiant ou mot de passe incorrect.");
-      } else {
-        setSuccessMsg(`Connecté avec succès en tant que ${res.user.nom}`);
-        onLoginSuccess(res.user);
-        setTimeout(() => {
-          onClose();
-        }, 800);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Erreur de connexion';
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
-  };
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-  const handleQuickSwitch = async (targetUsername: string, pass: string) => {
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await storage.authenticateUser(targetUsername, pass);
-      if (res.success && res.user) {
-        onLoginSuccess(res.user);
+      if (signInError) throw signInError;
+      
+      // Fetch profile to get role and details
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', data.user.id)
+        .single();
+        
+      if (profileError) throw profileError;
+
+      setSuccessMsg(`Connecté avec succès en tant que ${profile.nom}`);
+      onLoginSuccess({
+        id: profile.id,
+        username: profile.username,
+        nom: profile.nom,
+        role: profile.role as 'admin' | 'caporal',
+        actif: profile.actif,
+      } as UserAccount);
+      
+      setTimeout(() => {
         onClose();
-      } else {
-        setError(res.error || 'Erreur lors du changement de compte.');
-      }
+      }, 800);
+    } catch (err: any) {
+      setError(err.message || 'Erreur de connexion');
     } finally {
       setLoading(false);
     }
@@ -84,7 +85,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 backdrop-blur-xs animate-in fade-in">
       <div className="bg-white rounded-3xl max-w-sm w-full overflow-hidden shadow-2xl border border-slate-200">
-        {/* En-tête */}
         <div className="bg-slate-900 text-white p-4 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-black text-sm">
@@ -92,7 +92,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </div>
             <div>
               <h3 className="font-black text-sm">Compte & Accès</h3>
-              <p className="text-[11px] text-slate-400">Authentification sécurisée</p>
+              <p className="text-[11px] text-slate-400">Authentification Supabase</p>
             </div>
           </div>
           <button
@@ -104,7 +104,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         </div>
 
         <div className="p-4 space-y-4 text-xs">
-          {/* Compte actuellement connecté */}
           <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div
@@ -122,35 +121,33 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </div>
             </div>
 
-            {currentUser.role === 'caporal' && (
-              <button
-                type="button"
-                onClick={() => {
-                  onLogout();
-                  onClose();
-                }}
-                className="flex items-center gap-1 bg-red-50 hover:bg-red-100 text-red-700 font-bold px-2.5 py-1.5 rounded-xl text-[11px] border border-red-200 transition"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Quitter</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={async () => {
+                await supabase.auth.signOut();
+                onLogout();
+                onClose();
+              }}
+              className="flex items-center gap-1 bg-red-50 hover:bg-red-100 text-red-700 font-bold px-2.5 py-1.5 rounded-xl text-[11px] border border-red-200 transition"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Quitter</span>
+            </button>
           </div>
 
-          {/* Formulaire de connexion */}
           <form onSubmit={handleSubmit} className="space-y-3">
-            <h4 className="font-bold text-slate-800 text-xs">Se connecter à un autre compte :</h4>
+            <h4 className="font-bold text-slate-800 text-xs">Se connecter :</h4>
 
             <div>
               <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                Identifiant / Nom d'utilisateur :
+                Email :
               </label>
               <div className="relative">
                 <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="ex: admin ou caporal1"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="votre.email@exemple.com"
                   autoCapitalize="none"
                   autoCorrect="off"
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 pl-8 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600 focus:bg-white transition"
@@ -197,31 +194,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               {loading ? 'Connexion en cours...' : 'Se connecter'}
             </button>
           </form>
-
-          {/* Raccourcis de test rapides */}
-          <div className="pt-2 border-t border-slate-200 space-y-1.5">
-            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">
-              Accès rapides de test :
-            </span>
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleQuickSwitch('admin', 'admin123')}
-                className="p-2 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl text-[11px] font-bold text-amber-900 text-left transition"
-              >
-                👑 Compte Admin
-                <span className="block text-[9px] text-amber-700 font-mono">admin / admin123</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickSwitch('caporal1', 'caporal123')}
-                className="p-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl text-[11px] font-bold text-emerald-900 text-left transition"
-              >
-                🌾 Compte Caporal
-                <span className="block text-[9px] text-emerald-700 font-mono">caporal1 / caporal123</span>
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>
