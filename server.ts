@@ -187,8 +187,9 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
     });
 
     if (createError) {
-      console.error('Auth User creation error:', createError);
-      throw createError;
+      console.error('API Error /api/create-caporal: Auth User creation failed:', createError);
+      res.status(500).json({ success: false, error: 'Échec création Auth: ' + (createError as any).message });
+      return;
     }
 
     // 4. Création profile dans public
@@ -204,16 +205,17 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
       });
 
     if (profileInsertError) {
-      console.error('Profile creation error:', profileInsertError);
+      console.error('API Error /api/create-caporal: Profile creation failed:', profileInsertError);
       // Cleanup: delete auth user if profile creation fails
       await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
-      throw profileInsertError;
+      res.status(500).json({ success: false, error: 'Échec création Profil: ' + profileInsertError.message });
+      return;
     }
 
     res.json({ success: true, user: authData.user });
   } catch (err: any) {
-    console.error('API Error /api/create-caporal:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('API Error /api/create-caporal (Unexpected):', err);
+    res.status(500).json({ success: false, error: 'Erreur interne: ' + err.message });
   }
 });
 

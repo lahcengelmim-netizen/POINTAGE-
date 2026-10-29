@@ -92,6 +92,7 @@ export const GUEST_USER: UserAccount = {
   username: 'guest',
   nom: 'Invité',
   role: 'admin',
+  company_id: 'cie_lahcen_pointeur',
   passwordHash: '',
   salt: '',
   actif: true,

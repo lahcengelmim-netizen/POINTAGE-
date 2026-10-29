@@ -72,8 +72,16 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     if (error) {
-      console.error('Login error:', error);
-      throw error;
+      console.error('Login auth error:', error);
+      throw new Error(`Identifiant ou mot de passe incorrect (${error.message})`);
+    }
+
+    // Explicitly verify profile after successful auth
+    if (data.session) {
+      const profile = await fetchProfile(data.session.user.id);
+      if (!profile) {
+        throw new Error("Authentification réussie, mais profil utilisateur introuvable.");
+      }
     }
   };
 
