@@ -36,11 +36,58 @@ export const AdminDashboard: React.FC = () => {
     setLoading(false);
   };
 
+  const checkConfig = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch('/api/debug-config', {
+        headers: { 'Authorization': `Bearer ${session?.access_token}` }
+      });
+      const data = await response.json();
+      
+      const frontendUrl = import.meta.env.VITE_SUPABASE_URL || '';
+      const frontendId = frontendUrl ? new URL(frontendUrl).hostname.split('.')[0] : 'non-défini';
+      
+      const match = data.projectId === frontendId;
+      alert(`Backend: ${data.projectId}\nFrontend: ${frontendId}\n\nRésultat: ${match ? 'Identiques' : 'Différents'}`);
+    } catch (err) {
+      alert('Erreur de diagnostic');
+    }
+  };
+
   const createUser = async () => {
-    // Note: This would typically call a secure Edge Function or server route
-    // to create the user in auth and profile table safely.
-    // For now, implementing as a placeholder to be refined.
-    alert('Fonctionnalité à implémenter : Appel sécurisé pour création utilisateur.');
+    const trimmedUsername = newUsername.trim();
+    if (!trimmedUsername || !newNom || !newPassword) {
+      alert('Veuillez remplir tous les champs.');
+      return;
+    }
+    
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      const response = await fetch('/api/create-caporal', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`
+        },
+        body: JSON.stringify({
+          username: trimmedUsername,
+          nom: newNom,
+          password: newPassword
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (!data.success) {
+        throw new Error(data.error);
+      }
+      
+      alert('Compte créé avec succès !');
+      fetchUsers();
+    } catch (err: any) {
+      alert('Erreur: ' + err.message);
+    }
   };
 
   const toggleUserStatus = async (userId: string, currentStatus: boolean) => {
@@ -52,7 +99,10 @@ export const AdminDashboard: React.FC = () => {
 
   return (
     <div className="p-4">
-      <h2 className="text-xl font-bold mb-4">Administration des Caporaux</h2>
+      <div className="bg-gray-100 p-4 mb-4 rounded flex justify-between items-center">
+        <h2 className="text-xl font-bold">Administration des Caporaux</h2>
+        <button onClick={checkConfig} className="bg-yellow-500 text-white px-4 py-2 rounded">Vérifier la configuration</button>
+      </div>
       
       <div className="bg-gray-100 p-4 mb-4 rounded">
         <h3 className="font-bold mb-2">Créer un nouveau compte</h3>

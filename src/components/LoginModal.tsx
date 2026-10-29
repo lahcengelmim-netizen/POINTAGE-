@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { X, Lock, User, LogOut, CheckCircle2, AlertCircle } from 'lucide-react';
 import { UserAccount } from '../types';
 import { supabase } from '../services/supabaseClient';
+import { useUser } from '../context/UserContext';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -23,7 +24,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onLoginSuccess,
   onLogout,
 }) => {
-  const [email, setEmail] = useState('');
+  const { login } = useUser();
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -36,8 +38,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setError(null);
     setSuccessMsg(null);
 
-    if (!email.trim()) {
-      setError("Veuillez saisir votre email.");
+    if (!username.trim()) {
+      setError("Veuillez saisir votre identifiant.");
       return;
     }
     if (!password) {
@@ -47,36 +49,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     setLoading(true);
     try {
-      const { data, error: signInError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (signInError) throw signInError;
+      await login(username, password);
       
-      // Fetch profile to get role and details
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', data.user.id)
-        .single();
-        
-      if (profileError) throw profileError;
-
-      setSuccessMsg(`Connecté avec succès en tant que ${profile.nom}`);
-      onLoginSuccess({
-        id: profile.id,
-        username: profile.username,
-        nom: profile.nom,
-        role: profile.role as 'admin' | 'caporal',
-        actif: profile.actif,
-      } as UserAccount);
+      setSuccessMsg(`Connecté avec succès !`);
       
       setTimeout(() => {
         onClose();
+        // Trigger a refresh or navigation if needed
+        window.location.reload(); 
       }, 800);
     } catch (err: any) {
-      setError(err.message || 'Erreur de connexion');
+      console.error('Login error:', err);
+      setError(err.message || 'Identifiant ou mot de passe incorrect.');
     } finally {
       setLoading(false);
     }
@@ -92,7 +76,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </div>
             <div>
               <h3 className="font-black text-sm">Compte & Accès</h3>
-              <p className="text-[11px] text-slate-400">Authentification Supabase</p>
+              <p className="text-[11px] text-slate-400">Connexion</p>
             </div>
           </div>
           <button
@@ -140,14 +124,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
             <div>
               <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                Email :
+                Nom d'utilisateur :
               </label>
               <div className="relative">
                 <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="votre.email@exemple.com"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value.trim())}
+                  placeholder="ex: caporal_brahim"
                   autoCapitalize="none"
                   autoCorrect="off"
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 pl-8 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600 focus:bg-white transition"

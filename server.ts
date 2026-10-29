@@ -11,9 +11,14 @@ import express, { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAdmin = supabaseUrl && serviceRoleKey ? createClient(supabaseUrl, serviceRoleKey) : null;
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -133,6 +138,120 @@ function writeDB(data: ServerDB): void {
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', app: 'Lahcen Pointeur', timestamp: new Date().toISOString() });
 });
+
+// Création sécurisée d'utilisateur Caporal
+app.post('/api/create-caporal', async (req: Request, res: Response) => {
+  if (!supabaseAdmin) {
+    return res.status(500).json({ success: false, error: 'Serveur non configuré pour Supabase.' });
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ success: false, error: 'Non autorisé.' });
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+
+  try {
+    // 1. Vérifier la session admin
+    const { data: { user: adminUser }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !adminUser) {
+      return res.status(401).json({ success: false, error: 'Session invalide.' });
+    }
+
+    // 2. Vérifier que l'utilisateur est admin et actif
+    const { data: adminProfile, error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .select('company_id, role, actif')
+      .eq('id', adminUser.id)
+      .single();
+
+    if (profileError || !adminProfile || adminProfile.role !== 'admin' || !adminProfile.actif) {
+      return res.status(403).json({ success: false, error: 'Action interdite : Admin requis.' });
+    }
+
+    const { username, nom, password } = req.body;
+
+    // Validation simple
+    if (!username || !nom || !password) {
+      return res.status(400).json({ success: false, error: 'Données incomplètes.' });
+    }
+
+    // 3. Création utilisateur Auth (forcé en caporal, société de l'admin)
+    const email = `${username.toLowerCase()}@agripointage.local`;
+    const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { username, nom, role: 'caporal', company_id: adminProfile.company_id }
+    });
+
+    if (createError) {
+      console.error('Auth User creation error:', createError);
+      throw createError;
+    }
+
+    // 4. Création profile dans public
+    const { error: profileInsertError } = await supabaseAdmin
+      .from('profiles')
+      .insert({
+        id: authData.user.id,
+        username,
+        nom,
+        role: 'caporal',
+        company_id: adminProfile.company_id,
+        actif: true
+      });
+
+    if (profileInsertError) {
+      console.error('Profile creation error:', profileInsertError);
+      // Cleanup: delete auth user if profile creation fails
+      await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
+      throw profileInsertError;
+    }
+
+    res.json({ success: true, user: authData.user });
+  } catch (err: any) {
+    console.error('API Error /api/create-caporal:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Diagnostic sécurisé de configuration
+app.get('/api/debug-config', async (req: Request, res: Response) => {
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Non configuré' });
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Non autorisé' });
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  try {
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token);
+    if (!user) return res.status(401).json({ error: 'Session invalide' });
+
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (!profile || profile.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin requis' });
+    }
+
+    const backendUrl = process.env.SUPABASE_URL || '';
+    const projectId = backendUrl ? new URL(backendUrl).hostname.split('.')[0] : 'non-défini';
+
+    res.json({ projectId });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur diagnostic' });
+  }
+});
+
 
 // Synchronisation multi-appareils (Caporal <-> Admin)
 app.post('/api/recolte/sync', (req: Request, res: Response) => {
@@ -290,7 +409,8 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Serveur Lahcen Pointeur prêt sur http://0.0.0.0:${PORT}`);
+    const projectId = process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).hostname.split('.')[0] : 'non-défini';
+    console.log(`Serveur Lahcen Pointeur prêt sur http://0.0.0.0:${PORT}. Projet Supabase backend : ${projectId}`);
   });
 }
 
