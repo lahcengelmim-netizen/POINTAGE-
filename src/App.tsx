@@ -19,6 +19,7 @@ import { HelpModal } from './components/HelpModal';
 import { HeuresSupplementairesModal } from './components/HeuresSupplementairesModal';
 import { RecolteCaporal } from './components/RecolteCaporal';
 import { RecolteAdminDashboard } from './components/RecolteAdminDashboard';
+import { StockProDashboard } from './components/StockPro/StockProDashboard';
 import { LoginModal } from './components/LoginModal';
 import { HelpCircle, AlertTriangle, ShieldAlert } from 'lucide-react';
 
@@ -40,6 +41,7 @@ export default function App() {
     affectations,
     pointesDetails,
     heuresSupplementaires,
+    allHeuresSupplementaires,
     heuresSuppDetails,
     stats,
     recapWhatsAppText,
@@ -262,8 +264,8 @@ export default function App() {
                 onUpdateTask={updateTask}
                 onRemovePointage={removePointage}
                 selectedDate={selectedDate}
-                onOpenHeuresSupp={() => setShowHeuresSuppModal(true)}
-                heuresSuppCount={heuresSupplementaires.length}
+                onOpenHeuresSupp={!isCaporal ? () => setShowHeuresSuppModal(true) : undefined}
+                heuresSuppCount={!isCaporal ? heuresSupplementaires.length : 0}
                 gazoilStatus={gazoilStatus}
                 onNavigateGazoil={() => setActiveScreen('gazoil')}
                 onNavigateGestion={() => setActiveScreen('gestion')}
@@ -304,6 +306,18 @@ export default function App() {
                 onPointWorker={pointWorker}
                 onUpdateTask={updateTask}
                 selectedDate={selectedDate}
+              />
+            )
+          )}
+
+          {/* ===================== ÉCRAN STOCK PRO (RÉSERVÉ ADMIN) ===================== */}
+          {activeScreen === 'stock' && (
+            isCaporal ? (
+              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            ) : (
+              <StockProDashboard
+                currentUser={currentUser}
+                domaines={domaines}
               />
             )
           )}
@@ -381,8 +395,13 @@ export default function App() {
             isOpen={showHeuresSuppModal}
             onClose={() => setShowHeuresSuppModal(false)}
             activeOuvriers={activeOuvriers}
+            allOuvriers={allOuvriers}
             taches={taches}
+            domaines={domaines}
+            serres={serres}
+            currentUser={currentUser}
             heuresSuppDetails={heuresSuppDetails}
+            allHeuresSupplementaires={allHeuresSupplementaires}
             checkWorkerForHeuresSupp={checkWorkerForHeuresSupp}
             onSaveHeureSupp={saveHeureSupp}
             onRemoveHeureSupp={removeHeureSupp}

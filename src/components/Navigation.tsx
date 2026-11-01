@@ -15,10 +15,11 @@ import {
   Grape,
   User,
   LogOut,
+  Package,
 } from 'lucide-react';
 import { UserRole } from '../types';
 
-export type ActiveScreen = 'pointage' | 'taches' | 'absences' | 'recolte' | 'gazoil' | 'recap' | 'gestion';
+export type ActiveScreen = 'pointage' | 'taches' | 'absences' | 'recolte' | 'stock' | 'gazoil' | 'recap' | 'gestion';
 
 interface NavigationProps {
   activeScreen: ActiveScreen;
@@ -73,7 +74,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   // Navigation complète pour l'Administrateur
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-lg px-1 py-1.5 pb-safe">
-      <div className="max-w-md mx-auto grid grid-cols-7 gap-0.5">
+      <div className="max-w-md mx-auto grid grid-cols-8 gap-0.5">
         {/* ÉCRAN 1 : POINTAGE */}
         <button
           type="button"
@@ -135,7 +136,7 @@ export const Navigation: React.FC<NavigationProps> = ({
           <span className="text-[8px] mt-0.5 tracking-tight truncate">Absents</span>
         </button>
 
-        {/* ÉCRAN 4 : RÉCOLTE (NOUVEAU) */}
+        {/* ÉCRAN 4 : RÉCOLTE */}
         <button
           type="button"
           onClick={() => onSelectScreen('recolte')}
@@ -153,7 +154,25 @@ export const Navigation: React.FC<NavigationProps> = ({
           <span className="text-[8px] mt-0.5 tracking-tight truncate">Récolte</span>
         </button>
 
-        {/* ÉCRAN 5 : GAZOIL */}
+        {/* ÉCRAN 5 : STOCK PRO (NOUVEAU) */}
+        <button
+          type="button"
+          onClick={() => onSelectScreen('stock')}
+          className={`flex flex-col items-center justify-center py-1 px-0.5 rounded-xl transition active:scale-95 ${
+            activeScreen === 'stock'
+              ? 'text-indigo-800 bg-indigo-100 font-black'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <Package
+            className={`w-4 h-4 ${
+              activeScreen === 'stock' ? 'text-indigo-700 stroke-[2.5]' : 'text-slate-500'
+            }`}
+          />
+          <span className="text-[8px] mt-0.5 tracking-tight truncate">Stock</span>
+        </button>
+
+        {/* ÉCRAN 6 : GAZOIL */}
         <button
           type="button"
           onClick={() => onSelectScreen('gazoil')}

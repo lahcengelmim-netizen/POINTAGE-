@@ -85,9 +85,18 @@ export interface HeureSupplementaire {
   date: string; // Format ISO YYYY-MM-DD
   type?: TypeSupplementaire; // 'heures' | 'tache' (par défaut 'heures')
   tache_id?: string | null; // Tâche associée si type === 'tache'
+  nom_tache?: string | null; // Nom ou libellé de la tâche
   quantite?: number | null; // Quantité (obligatoire si type === 'tache', ou nb d'heures)
   unite?: string; // 'ruban' | 'forfait' | 'heure' ou texte personnalisé
   heures?: number | null; // Rétro-compatibilité si type === 'heures'
+  domaine_id?: string | null; // Domaine optionnel
+  serre_id?: string | null; // Serre optionnelle
+  observation?: string | null; // Remarque / détail
+  created_by_id?: string | null; // ID Administrateur créateur
+  created_by_nom?: string | null; // Nom Administrateur créateur
+  updated_at?: string | null; // Horodatage dernière modification
+  updated_by_id?: string | null; // ID Administrateur modificateur
+  updated_by_nom?: string | null; // Nom Administrateur modificateur
   heure_enregistrement: string; // HH:MM:SS
   timestamp: number;
 }
@@ -140,13 +149,15 @@ export interface UserAccount {
   role: UserRole;
   company_id: string; // ID de l'entreprise rattachée
   permissions?: any; // Permissions JSONB
-  passwordHash: string; // Hachage salé SHA-256
-  salt: string;
+  passwordHash?: string; // Hachage salé (local dev)
+  salt?: string;
   actif: boolean;
   telephone?: string;
   createdAt: string;
   lastLogin?: string;
 }
+
+export type User = UserAccount;
 
 // ------------------------- MODULE RÉCOLTE & SERRES -------------------------
 
@@ -192,5 +203,71 @@ export interface RecolteStats {
   totalOuvriersDistincts: number;
   totalSerres: number;
   totalOperations: number;
+}
+
+// ------------------------- MODULE STOCK PRO -------------------------
+
+export type StockMouvementType = 'INITIAL' | 'ENTREE' | 'SORTIE' | 'CORRECTION';
+export type StockEtat = 'DISPONIBLE' | 'STOCK_FAIBLE' | 'RUPTURE';
+
+export interface StockProduit {
+  id: string;
+  company_id: string;
+  nom: string;
+  unite: string;
+  seuil_minimum: number;
+  actif: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StockMouvement {
+  id: string;
+  idempotency_key: string;
+  company_id: string;
+  produit_id: string;
+  produit_nom: string;
+  unite: string;
+  type: StockMouvementType;
+  quantite: number;
+  date: string;
+  domaine_id?: string;
+  serre_id?: string;
+  tiers?: string; // Fournisseur (entrée) ou Bénéficiaire (sortie)
+  reference_document?: string;
+  motif?: string;
+  observation?: string;
+  created_by_id: string;
+  created_by_nom: string;
+  created_at: string;
+}
+
+export interface StockProduitSynthese {
+  produit: StockProduit;
+  stock_initial: number;
+  total_entrees: number;
+  total_sorties: number;
+  stock_actuel: number;
+  etat: StockEtat;
+  derniere_activite?: string;
+}
+
+export interface StockKPIs {
+  totalProduits: number;
+  totalEntrees: number;
+  totalSorties: number;
+  produitsStockFaible: number;
+  produitsRupture: number;
+}
+
+export interface StockFilter {
+  searchQuery?: string;
+  unite?: string;
+  produit_id?: string;
+  etat?: StockEtat | 'ALL';
+  domaine_id?: string;
+  startDate?: string;
+  endDate?: string;
+  type?: StockMouvementType | 'ALL';
 }
 

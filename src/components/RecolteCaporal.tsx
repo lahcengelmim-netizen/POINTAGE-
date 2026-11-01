@@ -1,14 +1,15 @@
 /**
- * Module Récolte dédié au Caporal (et accessible par l'administrateur)
- * Interface mobile optimisée à une seule main :
- * 1. Sélection Date & Serre
- * 2. Recherche rapide et sélection des ouvriers
- * 3. Saisie du nombre de caisses par ouvrier avec validation stricte (> 0)
- * 4. Synthèse journalière par serre et pour la journée
- * 5. Correction et modification de ses propres saisies
+ * Module RÉCOLTE — Lahcen Pointeur (Reconstruction complète)
+ * Interface tactile, très visuelle et ultra-simple conçue pour un Caporal agricole sur le terrain.
+ *
+ * SÉQUENCE D'UTILISATION :
+ * ÉTape 1 : Pointage de présence à la récolte (Sélection des ouvriers présents)
+ * Étape 2 : Choix des serres dans lesquelles les ouvriers récoltent
+ * Étape 3 : Saisie intuitive des caisses par ouvrier et par serre (Boutons + / - géants)
+ * Étape 4 : Calculs automatiques, Enregistrement et Historique du jour
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Calendar,
   Search,
@@ -20,10 +21,17 @@ import {
   Edit2,
   Trash2,
   Cloud,
-  CloudOff,
-  Filter,
   Layers,
+  UserCheck,
+  X,
+  Clock,
+  ArrowRight,
+  ArrowLeft,
+  RotateCcw,
+  CheckSquare,
+  Square,
   Sparkles,
+  Save,
 } from 'lucide-react';
 import { Ouvrier, Serre, RecolteEntry, UserAccount } from '../types';
 
@@ -68,96 +76,220 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
   onDeleteRecolte,
   onSync,
 }) => {
-  // Onglet actif : 'saisie' ou 'synthese'
-  const [activeTab, setActiveTab] = useState<'saisie' | 'synthese'>('saisie');
+  // Mode d'affichage principal : 'saisie' (Assistant 3 étapes) ou 'historique' (Mes Saisies du jour)
+  const [mainView, setMainView] = useState<'saisie' | 'historique'>('saisie');
 
-  // Sélection de la serre pour la saisie
-  const activeSerres = useMemo(() => serres.filter((s) => s.actif), [serres]);
-  const [selectedSerreId, setSelectedSerreId] = useState<string>(() => {
-    return activeSerres[0]?.id || 'serre_1';
-  });
+  // Assistant de Saisie : Étape actuelle (1: Ouvriers, 2: Serres, 3: Caisses)
+  const [step, setStep] = useState<1 | 2 | 3>(1);
 
-  // Recherche d'ouvriers
-  const [searchQuery, setSearchQuery] = useState('');
+  // --------------------------------------------------------------------------
+  // ÉTAPE 1 : SÉLECTION DES OUVRIERS PRÉSENTS À LA RÉCOLTE
+  // --------------------------------------------------------------------------
+  const [searchWorkerQuery, setSearchWorkerQuery] = useState('');
+  const [selectedWorkerIds, setSelectedWorkerIds] = useState<Set<string>>(new Set());
 
-  // Ouvriers sélectionnés et leurs caisses : Map<ouvrierId, { caisses: number; notes: string }>
-  const [selectedWorkersMap, setSelectedWorkersMap] = useState<
-    Map<string, { caisses: number; notes: string }>
-  >(new Map());
+  // Liste des ouvriers triés par numéro
+  const sortedWorkers = useMemo(() => {
+    return [...activeOuvriers].sort((a, b) => a.numero - b.numero);
+  }, [activeOuvriers]);
 
-  // Message d'erreur et de succès
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [syncing, setSyncing] = useState(false);
-
-  // Édition d'une entrée existante
-  const [editingEntry, setEditingEntry] = useState<RecolteEntry | null>(null);
-  const [editCaissesInput, setEditCaissesInput] = useState('');
-  const [editNotesInput, setEditNotesInput] = useState('');
-
-  // Filtre pour la synthèse
-  const [syntheseSerreFilter, setSyntheseSerreFilter] = useState<string>('all');
-
-  // Serre sélectionnée courante
-  const currentSerre = useMemo(() => {
-    return serres.find((s) => s.id === selectedSerreId) || serres[0] || {
-      id: 'serre_1',
-      code: 'S01',
-      nom: 'Serre 1',
-      actif: true,
-      ordre: 1,
-    };
-  }, [serres, selectedSerreId]);
-
-  // Filtrage des ouvriers selon la recherche
-  const filteredOuvriers = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return activeOuvriers;
-    return activeOuvriers.filter(
-      (o) => o.numero.toString().includes(q) || o.nom.toLowerCase().includes(q)
+  // Ouvriers filtrés selon la recherche rapide
+  const filteredWorkers = useMemo(() => {
+    const q = searchWorkerQuery.trim().toLowerCase();
+    if (!q) return sortedWorkers;
+    return sortedWorkers.filter(
+      (w) => w.numero.toString().includes(q) || w.nom.toLowerCase().includes(q)
     );
-  }, [activeOuvriers, searchQuery]);
+  }, [sortedWorkers, searchWorkerQuery]);
 
-  // Gestion de la sélection / désélection d'un ouvrier
-  const handleToggleWorker = (worker: Ouvrier) => {
-    const nextMap = new Map(selectedWorkersMap);
-    if (nextMap.has(worker.id)) {
-      nextMap.delete(worker.id);
-    } else {
-      nextMap.set(worker.id, { caisses: 1, notes: '' });
+  // Actions de sélection globale
+  const handleSelectAllWorkers = () => {
+    const allIds = new Set(sortedWorkers.map((w) => w.id));
+    setSelectedWorkerIds(allIds);
+  };
+
+  const handleDeselectAllWorkers = () => {
+    setSelectedWorkerIds(new Set());
+  };
+
+  const handleToggleWorker = (workerId: string) => {
+    setSelectedWorkerIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(workerId)) {
+        next.delete(workerId);
+      } else {
+        next.add(workerId);
+      }
+      return next;
+    });
+  };
+
+  // --------------------------------------------------------------------------
+  // ÉTAPE 2 : CHOIX DES SERRES
+  // --------------------------------------------------------------------------
+  const activeSerres = useMemo(() => {
+    const list = serres.filter((s) => s.actif);
+    return list.length > 0
+      ? list
+      : [
+          { id: 'serre_1', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1 },
+          { id: 'serre_2', code: 'S02', nom: 'Serre 2', actif: true, ordre: 2 },
+        ];
+  }, [serres]);
+
+  const [selectedSerreIds, setSelectedSerreIds] = useState<Set<string>>(new Set());
+
+  // Sélectionner la première serre par défaut lors du premier chargement des serres
+  useEffect(() => {
+    if (selectedSerreIds.size === 0 && activeSerres.length > 0) {
+      setSelectedSerreIds(new Set([activeSerres[0].id]));
     }
-    setSelectedWorkersMap(nextMap);
+  }, [activeSerres]);
+
+  const handleToggleSerre = (serreId: string) => {
+    setSelectedSerreIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(serreId)) {
+        if (next.size > 1) {
+          next.delete(serreId);
+        }
+      } else {
+        next.add(serreId);
+      }
+      return next;
+    });
   };
 
-  // Modification du nombre de caisses d'un ouvrier
-  const handleChangeCaisses = (workerId: string, delta: number) => {
-    const current = selectedWorkersMap.get(workerId);
-    if (!current) return;
-    const newQty = Math.max(0.5, Math.round((current.caisses + delta) * 10) / 10);
-    const nextMap = new Map(selectedWorkersMap);
-    nextMap.set(workerId, { ...current, caisses: newQty });
-    setSelectedWorkersMap(nextMap);
-  };
+  // Serre active sélectionnée pour l'affichage de la saisie à l'Étape 3
+  const [activeSerreForEntry, setActiveSerreForEntry] = useState<string>('');
 
-  const handleSetCaissesDirect = (workerId: string, valStr: string) => {
-    const parsed = parseFloat(valStr.replace(',', '.'));
-    const nextMap = new Map(selectedWorkersMap);
-    const current = nextMap.get(workerId) || { caisses: 1, notes: '' };
-    nextMap.set(workerId, { ...current, caisses: isNaN(parsed) ? 0 : parsed });
-    setSelectedWorkersMap(nextMap);
-  };
+  useEffect(() => {
+    const firstSerre = Array.from(selectedSerreIds)[0];
+    if (firstSerre) {
+      setActiveSerreForEntry(firstSerre);
+    } else if (activeSerres[0]) {
+      setActiveSerreForEntry(activeSerres[0].id);
+    }
+  }, [selectedSerreIds, activeSerres]);
 
-  // Validation et enregistrement de la session de récolte
-  const handleSaveRecolte = () => {
-    setMessage(null);
+  // --------------------------------------------------------------------------
+  // ÉTAPE 3 : MATRICE DES CAISSES (OUVRIER x SERRE)
+  // Structure : { [workerId]: { [serreId]: number } }
+  // --------------------------------------------------------------------------
+  const [caissesMap, setCaissesMap] = useState<Record<string, Record<string, number>>>({});
 
-    if (selectedWorkersMap.size === 0) {
-      setMessage({
-        type: 'error',
-        text: 'Veuillez sélectionner au moins un ouvrier pour cette serre.',
+  // Initialiser la matrice des caisses lorsque l'utilisateur accède à l'Étape 3
+  const handleProceedToStep3 = () => {
+    if (selectedWorkerIds.size === 0) return;
+    if (selectedSerreIds.size === 0) return;
+
+    // Conserver les valeurs déjà saisies si l'utilisateur revient en arrière, sinon initialiser à 0
+    const newMap: Record<string, Record<string, number>> = { ...caissesMap };
+    selectedWorkerIds.forEach((wId) => {
+      if (!newMap[wId]) newMap[wId] = {};
+      selectedSerreIds.forEach((sId) => {
+        if (newMap[wId][sId] === undefined) {
+          newMap[wId][sId] = 0;
+        }
       });
-      return;
-    }
+    });
 
+    setCaissesMap(newMap);
+    setStep(3);
+  };
+
+  // Ajustement de quantité par bouton + ou -
+  const handleDeltaCaisses = (workerId: string, serreId: string, delta: number) => {
+    setCaissesMap((prev) => {
+      const workerData = { ...(prev[workerId] || {}) };
+      const current = Number(workerData[serreId] || 0);
+      const updated = Math.max(0, Math.round((current + delta) * 10) / 10);
+      return {
+        ...prev,
+        [workerId]: {
+          ...workerData,
+          [serreId]: updated,
+        },
+      };
+    });
+  };
+
+  // Saisie directe de la quantité
+  const handleSetCaissesDirect = (workerId: string, serreId: string, valStr: string) => {
+    const parsed = parseFloat(valStr.replace(',', '.'));
+    const qty = isNaN(parsed) || parsed < 0 ? 0 : parsed;
+    setCaissesMap((prev) => ({
+      ...prev,
+      [workerId]: {
+        ...(prev[workerId] || {}),
+        [serreId]: qty,
+      },
+    }));
+  };
+
+  // --------------------------------------------------------------------------
+  // CALCULS AUTOMATIQUES
+  // --------------------------------------------------------------------------
+  // Liste des objets ouvriers sélectionnés
+  const selectedWorkersList = useMemo(() => {
+    return sortedWorkers.filter((w) => selectedWorkerIds.has(w.id));
+  }, [sortedWorkers, selectedWorkerIds]);
+
+  // Liste des objets serres sélectionnées
+  const selectedSerresList = useMemo(() => {
+    return activeSerres.filter((s) => selectedSerreIds.has(s.id));
+  }, [activeSerres, selectedSerreIds]);
+
+  // Cumul des caisses par ouvrier (toutes serres confondues)
+  const totalByWorker = useMemo(() => {
+    const totals: Record<string, number> = {};
+    selectedWorkerIds.forEach((wId) => {
+      let sum = 0;
+      selectedSerreIds.forEach((sId) => {
+        sum += Number(caissesMap[wId]?.[sId] || 0);
+      });
+      totals[wId] = Math.round(sum * 10) / 10;
+    });
+    return totals;
+  }, [caissesMap, selectedWorkerIds, selectedSerreIds]);
+
+  // Cumul des caisses par serre
+  const totalBySerre = useMemo(() => {
+    const totals: Record<string, number> = {};
+    selectedSerreIds.forEach((sId) => {
+      let sum = 0;
+      selectedWorkerIds.forEach((wId) => {
+        sum += Number(caissesMap[wId]?.[sId] || 0);
+      });
+      totals[sId] = Math.round(sum * 10) / 10;
+    });
+    return totals;
+  }, [caissesMap, selectedWorkerIds, selectedSerreIds]);
+
+  // Grand Total Général
+  const grandTotalCaisses = useMemo(() => {
+    let grandTotal = 0;
+    Object.values(totalBySerre).forEach((sTotal) => {
+      grandTotal += sTotal;
+    });
+    return Math.round(grandTotal * 10) / 10;
+  }, [totalBySerre]);
+
+  // --------------------------------------------------------------------------
+  // ENREGISTREMENT ET CONFIRMATION
+  // --------------------------------------------------------------------------
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+
+  const handleSaveAllRecolte = async () => {
+    if (isSubmitting) return;
+    setFeedback(null);
+
+    // Préparer les enregistrements uniquement pour les quantités > 0
     const entriesToSave: Array<{
       date: string;
       serre_id: string;
@@ -166,96 +298,140 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
       numero_ouvrier: number;
       nom_ouvrier: string;
       caisses: number;
-      notes?: string;
     }> = [];
 
-    for (const [workerId, data] of selectedWorkersMap.entries()) {
-      const worker = activeOuvriers.find((o) => o.id === workerId);
-      if (!worker) continue;
-
-      if (!data.caisses || data.caisses <= 0) {
-        setMessage({
-          type: 'error',
-          text: `Quantité invalide pour l'ouvrier #${worker.numero} ${worker.nom}. Veuillez entrer un nombre supérieur à 0.`,
-        });
-        return;
-      }
-
-      entriesToSave.push({
-        date: selectedDate,
-        serre_id: currentSerre.id,
-        serre_nom: currentSerre.nom,
-        ouvrier_id: worker.id,
-        numero_ouvrier: worker.numero,
-        nom_ouvrier: worker.nom,
-        caisses: data.caisses,
-        notes: data.notes,
+    selectedWorkersList.forEach((worker) => {
+      selectedSerresList.forEach((serre) => {
+        const qty = Number(caissesMap[worker.id]?.[serre.id] || 0);
+        if (qty > 0) {
+          entriesToSave.push({
+            date: selectedDate,
+            serre_id: serre.id,
+            serre_nom: serre.nom,
+            ouvrier_id: worker.id,
+            numero_ouvrier: worker.numero,
+            nom_ouvrier: worker.nom,
+            caisses: qty,
+          });
+        }
       });
-    }
-
-    const res = onAddRecolte(entriesToSave, {
-      id: currentUser.id,
-      nom: currentUser.nom,
     });
 
-    if (!res.success) {
-      setMessage({ type: 'error', text: res.error || 'Erreur lors de l’enregistrement.' });
+    if (entriesToSave.length === 0) {
+      setFeedback({
+        type: 'error',
+        text: 'Veuillez saisir au moins une caisse (> 0) avant d\'enregistrer.',
+      });
       return;
     }
 
-    // Réinitialiser la sélection et basculer sur la synthèse
-    setSelectedWorkersMap(new Map());
-    setSearchQuery('');
-    setMessage({
-      type: 'success',
-      text: `✓ ${res.count} enregistrement(s) sauvegardé(s) pour la ${currentSerre.nom} !`,
-    });
-    setActiveTab('synthese');
-    setTimeout(() => setMessage(null), 4000);
+    setIsSubmitting(true);
+
+    try {
+      const res = onAddRecolte(entriesToSave, {
+        id: currentUser.id,
+        nom: currentUser.nom,
+      });
+
+      if (!res.success) {
+        throw new Error(res.error || "Erreur lors de l'enregistrement de la récolte.");
+      }
+
+      // Synchronisation réseau automatique si connecté
+      let serverOk = false;
+      if (onSync && typeof navigator !== 'undefined' && navigator.onLine) {
+        try {
+          const syncRes = await onSync();
+          if (syncRes.success) serverOk = true;
+        } catch {
+          serverOk = false;
+        }
+      }
+
+      const totalSaved = grandTotalCaisses;
+      setFeedback({
+        type: 'success',
+        text: serverOk
+          ? `✓ RÉCOLTE ENREGISTRÉE AVEC SUCCÈS ! (${totalSaved} caisses)`
+          : `✓ Enregistré en local (${totalSaved} caisses) — synchronisation dès connexion.`,
+      });
+
+      // Réinitialiser la saisie et revenir à l'Étape 1
+      setCaissesMap({});
+      setSelectedWorkerIds(new Set());
+      setStep(1);
+
+      setTimeout(() => {
+        setFeedback(null);
+      }, 5000);
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        text: err.message || 'Erreur lors de la sauvegarde.',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  // Récoltes du jour filtrées
-  const dailyRecoltes = useMemo(() => {
-    let list = recoltes.filter((r) => r.date === selectedDate);
-    if (syntheseSerreFilter !== 'all') {
-      list = list.filter((r) => r.serre_id === syntheseSerreFilter);
-    }
-    return list;
-  }, [recoltes, selectedDate, syntheseSerreFilter]);
+  // --------------------------------------------------------------------------
+  // HISTORIQUE DU JOUR DU CAPORAL (CONSULTATION & CORRECTION)
+  // --------------------------------------------------------------------------
+  const myDailyRecoltes = useMemo(() => {
+    return recoltes
+      .filter((r) => {
+        if (r.date !== selectedDate) return false;
+        if (currentUser.role === 'admin') return true;
+        return r.created_by_id === currentUser.id;
+      })
+      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  }, [recoltes, selectedDate, currentUser]);
 
-  // Totaux calculés
-  const dailyTotals = useMemo(() => {
-    const allForDay = recoltes.filter((r) => r.date === selectedDate);
-    const totalCaissesDay = allForDay.reduce((acc, r) => acc + (r.caisses || 0), 0);
-    const distinctWorkersDay = new Set(allForDay.map((r) => r.ouvrier_id)).size;
-
-    const filteredCaisses = dailyRecoltes.reduce((acc, r) => acc + (r.caisses || 0), 0);
-    const filteredWorkers = new Set(dailyRecoltes.map((r) => r.ouvrier_id)).size;
-
+  const myTotals = useMemo(() => {
+    const totalCaisses = myDailyRecoltes.reduce((acc, r) => acc + (Number(r.caisses) || 0), 0);
+    const distinctWorkers = new Set(myDailyRecoltes.map((r) => r.ouvrier_id)).size;
+    const distinctSerres = new Set(myDailyRecoltes.map((r) => r.serre_id)).size;
     return {
-      totalCaissesDay: Math.round(totalCaissesDay * 10) / 10,
-      distinctWorkersDay,
-      filteredCaisses: Math.round(filteredCaisses * 10) / 10,
-      filteredWorkers,
+      totalCaisses: Math.round(totalCaisses * 10) / 10,
+      distinctWorkers,
+      distinctSerres,
+      countOperations: myDailyRecoltes.length,
     };
-  }, [recoltes, selectedDate, dailyRecoltes]);
+  }, [myDailyRecoltes]);
 
-  // Sauvegarder modification
-  const handleConfirmEdit = (e: React.FormEvent) => {
+  // Édition / Correction d'une entrée d'historique
+  const [editingEntry, setEditingEntry] = useState<RecolteEntry | null>(null);
+  const [editCaissesValue, setEditCaissesValue] = useState('');
+  const [editSerreIdValue, setEditSerreIdValue] = useState('');
+
+  const handleOpenEditEntry = (entry: RecolteEntry) => {
+    if (currentUser.role !== 'admin' && entry.created_by_id !== currentUser.id) {
+      alert('Vous ne pouvez modifier que vos propres enregistrements.');
+      return;
+    }
+    setEditingEntry(entry);
+    setEditCaissesValue(entry.caisses.toString());
+    setEditSerreIdValue(entry.serre_id);
+  };
+
+  const handleSaveEditedEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingEntry) return;
 
-    const parsedCaisses = parseFloat(editCaissesInput.replace(',', '.'));
-    if (isNaN(parsedCaisses) || parsedCaisses <= 0) {
-      alert('Veuillez saisir un nombre de caisses valide et supérieur à 0.');
+    const parsed = parseFloat(editCaissesValue.replace(',', '.'));
+    if (isNaN(parsed) || parsed <= 0) {
+      alert('Nombre de caisses invalide (doit être > 0).');
       return;
     }
+
+    const targetSerreObj = activeSerres.find((s) => s.id === editSerreIdValue);
 
     const res = onUpdateRecolte(
       editingEntry.id,
       {
-        caisses: parsedCaisses,
-        notes: editNotesInput,
+        caisses: parsed,
+        serre_id: editSerreIdValue,
+        serre_nom: targetSerreObj?.nom || editingEntry.serre_nom,
       },
       { id: currentUser.id, nom: currentUser.nom }
     );
@@ -265,471 +441,720 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
       return;
     }
 
+    if (onSync) onSync().catch(() => {});
+
     setEditingEntry(null);
-    setMessage({ type: 'success', text: '✓ Saisie de récolte mise à jour avec succès.' });
-    setTimeout(() => setMessage(null), 3000);
+    setFeedback({ type: 'success', text: '✓ Saisie modifiée avec succès.' });
+    setTimeout(() => setFeedback(null), 3000);
   };
 
-  // Supprimer une entrée
   const handleDeleteEntry = (entry: RecolteEntry) => {
+    if (currentUser.role !== 'admin' && entry.created_by_id !== currentUser.id) {
+      alert('Vous ne pouvez supprimer que vos propres enregistrements.');
+      return;
+    }
+
     if (
       window.confirm(
-        `Supprimer la saisie de ${entry.caisses} caisse(s) pour ${entry.nom_ouvrier} (${entry.serre_nom}) ?`
+        `Supprimer la saisie de ${entry.caisses} caisse(s) pour #${entry.numero_ouvrier} ${entry.nom_ouvrier} (${entry.serre_nom}) ?`
       )
     ) {
       onDeleteRecolte(entry.id);
-      setMessage({ type: 'success', text: 'Saisie supprimée.' });
-      setTimeout(() => setMessage(null), 2500);
+      if (onSync) onSync().catch(() => {});
+      setFeedback({ type: 'info', text: 'Saisie supprimée.' });
+      setTimeout(() => setFeedback(null), 3000);
     }
   };
 
   const handleTriggerSync = async () => {
-    if (!onSync) return;
+    if (!onSync || syncing) return;
     setSyncing(true);
     try {
       const res = await onSync();
       if (res.success) {
-        setMessage({
+        setFeedback({
           type: 'success',
-          text: `✓ Synchronisé : ${res.syncedCount} envoyée(s), ${res.receivedCount} reçue(s).`,
+          text: `✓ Synchronisé (${res.syncedCount} envoyée(s), ${res.receivedCount} reçue(s))`,
         });
       } else {
-        setMessage({ type: 'error', text: res.error || 'Erreur synchronisation' });
+        setFeedback({ type: 'error', text: res.error || 'Erreur synchronisation' });
       }
     } finally {
       setSyncing(false);
-      setTimeout(() => setMessage(null), 3500);
+      setTimeout(() => setFeedback(null), 3500);
     }
   };
 
   return (
-    <div className="space-y-3 pb-24 animate-in fade-in">
-      {/* Barre d'en-tête Récolte avec sélecteur de Date et statut de synchronisation */}
-      <div className="bg-white rounded-2xl p-3 border border-slate-200 shadow-xs flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-black">
+    <div className="space-y-3 pb-28 select-none animate-in fade-in">
+      {/* ---------------------------------------------------------------- shadow-xs Header Caporal ---------------------------------------------------------------- */}
+      <div className="bg-white rounded-3xl p-3 border border-slate-200 shadow-xs flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <div className="w-11 h-11 rounded-2xl bg-emerald-600 text-white flex items-center justify-center font-black text-lg shadow-sm">
             🌾
           </div>
           <div>
-            <h2 className="text-xs font-black text-slate-900 flex items-center gap-1.5">
-              <span>Gestion Récolte</span>
-              <span className="text-[10px] text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full font-bold">
+            <h2 className="text-sm font-black text-slate-900 flex items-center gap-1.5">
+              <span>RÉCOLTE</span>
+              <span className="text-[10px] text-emerald-950 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-full font-bold">
                 {currentUser.nom}
               </span>
             </h2>
-            <p className="text-[10px] text-slate-500">Saisie des caisses par serre</p>
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500 mt-0.5">
+              <Calendar className="w-3.5 h-3.5 text-slate-400" />
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => onSelectDate(e.target.value)}
+                className="bg-slate-100 border border-slate-300 rounded-lg px-2 py-0.5 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600"
+              />
+            </div>
           </div>
         </div>
 
-        {/* Bouton de synchronisation réseau */}
+        {/* Bouton de Synchronisation */}
         {onSync && (
           <button
             type="button"
             onClick={handleTriggerSync}
             disabled={syncing}
-            className="flex items-center gap-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold px-2 py-1.5 rounded-xl transition"
-            title="Synchroniser avec le serveur"
+            className="flex items-center gap-1 bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 text-xs font-bold px-3 py-2 rounded-2xl border border-slate-300 transition"
           >
-            {syncing ? (
-              <span className="animate-spin">⏳</span>
-            ) : (
-              <Cloud className="w-3.5 h-3.5 text-blue-600" />
-            )}
-            <span>Sync</span>
+            <Cloud className={`w-4 h-4 text-emerald-600 ${syncing ? 'animate-spin' : ''}`} />
+            <span>{syncing ? 'Sync...' : 'Sync'}</span>
           </button>
         )}
       </div>
 
       {/* Messages de retour */}
-      {message && (
+      {feedback && (
         <div
-          className={`p-3 rounded-2xl text-xs font-black flex items-center gap-2 transition animate-in fade-in ${
-            message.type === 'success'
-              ? 'bg-emerald-50 border border-emerald-300 text-emerald-950'
-              : 'bg-red-50 border border-red-300 text-red-950'
+          className={`p-3.5 rounded-2xl text-xs font-black flex items-center gap-2.5 shadow-md animate-in fade-in ${
+            feedback.type === 'success'
+              ? 'bg-emerald-600 text-white border border-emerald-700'
+              : feedback.type === 'error'
+              ? 'bg-red-600 text-white border border-red-700'
+              : 'bg-blue-600 text-white border border-blue-700'
           }`}
         >
-          {message.type === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          {feedback.type === 'success' ? (
+            <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-200" />
+          ) : feedback.type === 'error' ? (
+            <AlertCircle className="w-5 h-5 shrink-0 text-red-200" />
           ) : (
-            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <Cloud className="w-5 h-5 shrink-0 text-blue-200" />
           )}
-          <span>{message.text}</span>
+          <span>{feedback.text}</span>
         </div>
       )}
 
-      {/* Onglets navigation interne : Saisie vs Synthèse */}
-      <div className="grid grid-cols-2 gap-1 bg-slate-200/80 p-1 rounded-2xl">
+      {/* Navigation Principale : Saisie vs Historique */}
+      <div className="grid grid-cols-2 gap-1.5 bg-slate-200 p-1.5 rounded-2xl">
         <button
           type="button"
-          onClick={() => setActiveTab('saisie')}
-          className={`py-2 text-xs font-black rounded-xl transition active:scale-98 ${
-            activeTab === 'saisie'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900'
+          onClick={() => setMainView('saisie')}
+          className={`py-2.5 text-xs font-black rounded-xl transition active:scale-95 flex items-center justify-center gap-1.5 ${
+            mainView === 'saisie'
+              ? 'bg-emerald-700 text-white shadow-sm'
+              : 'text-slate-700 hover:text-slate-900'
           }`}
         >
-          ✍️ Nouvelle Saisie
+          <span>✍️ Nouvelle Saisie</span>
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('synthese')}
-          className={`py-2 text-xs font-black rounded-xl transition active:scale-98 relative ${
-            activeTab === 'synthese'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900'
+          onClick={() => setMainView('historique')}
+          className={`py-2.5 text-xs font-black rounded-xl transition active:scale-95 flex items-center justify-center gap-1.5 ${
+            mainView === 'historique'
+              ? 'bg-emerald-700 text-white shadow-sm'
+              : 'text-slate-700 hover:text-slate-900'
           }`}
         >
-          📊 Synthèse ({dailyTotals.totalCaissesDay} caisses)
+          <span>📋 Mes Saisies ({myTotals.totalCaisses} c.)</span>
         </button>
       </div>
 
-      {/* ===================== ONGLET 1 : SAISIE ===================== */}
-      {activeTab === 'saisie' && (
+      {/* ========================================================================================= */}
+      {/* VUE PRINCIPALE 1 : ASSISTANT DE SAISIE EN 3 ÉTAPES                                      */}
+      {/* ========================================================================================= */}
+      {mainView === 'saisie' && (
         <div className="space-y-3">
-          {/* Sélection Date et Serre */}
-          <div className="bg-white rounded-2xl p-3 border border-slate-200 shadow-xs space-y-2.5">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Date de récolte :
-                </label>
+          {/* BARRE D'AVANCEMENT EN 3 ÉTAPES CLAIRES */}
+          <div className="bg-white rounded-2xl p-2 border border-slate-200 shadow-xs grid grid-cols-3 gap-1 text-center">
+            <button
+              type="button"
+              onClick={() => setStep(1)}
+              className={`py-2 px-1 rounded-xl transition flex flex-col items-center justify-center ${
+                step === 1
+                  ? 'bg-emerald-600 text-white shadow-sm font-black'
+                  : selectedWorkerIds.size > 0
+                  ? 'bg-emerald-50 text-emerald-900 font-bold border border-emerald-200'
+                  : 'bg-slate-100 text-slate-500 font-medium'
+              }`}
+            >
+              <span className="text-[10px] uppercase tracking-wider block">Étape 1</span>
+              <span className="text-xs font-black truncate">1. OUVRIERS ({selectedWorkerIds.size})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedWorkerIds.size > 0) setStep(2);
+              }}
+              disabled={selectedWorkerIds.size === 0}
+              className={`py-2 px-1 rounded-xl transition flex flex-col items-center justify-center ${
+                step === 2
+                  ? 'bg-emerald-600 text-white shadow-sm font-black'
+                  : selectedSerreIds.size > 0 && step === 3
+                  ? 'bg-emerald-50 text-emerald-900 font-bold border border-emerald-200'
+                  : 'bg-slate-100 text-slate-400 font-medium disabled:opacity-50'
+              }`}
+            >
+              <span className="text-[10px] uppercase tracking-wider block">Étape 2</span>
+              <span className="text-xs font-black truncate">2. SERRES ({selectedSerreIds.size})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedWorkerIds.size > 0 && selectedSerreIds.size > 0) handleProceedToStep3();
+              }}
+              disabled={selectedWorkerIds.size === 0 || selectedSerreIds.size === 0}
+              className={`py-2 px-1 rounded-xl transition flex flex-col items-center justify-center ${
+                step === 3
+                  ? 'bg-emerald-600 text-white shadow-sm font-black'
+                  : 'bg-slate-100 text-slate-400 font-medium disabled:opacity-50'
+              }`}
+            >
+              <span className="text-[10px] uppercase tracking-wider block">Étape 3</span>
+              <span className="text-xs font-black truncate">3. CAISSES</span>
+            </button>
+          </div>
+
+          {/* ------------------------------------------------------------------------------------- */}
+          {/* ÉTAPE 1 : SELECTION DES OUVRIERS PRÉSENTS À LA RÉCOLTE                               */}
+          {/* ------------------------------------------------------------------------------------- */}
+          {step === 1 && (
+            <div className="bg-white rounded-3xl p-3.5 border border-slate-200 shadow-sm space-y-3">
+              <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                <div>
+                  <h3 className="font-black text-slate-900 text-sm flex items-center gap-1.5">
+                    <span className="w-6 h-6 rounded-lg bg-emerald-600 text-white flex items-center justify-center text-xs">
+                      1
+                    </span>
+                    <span>Pointer les ouvriers présents :</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                    Cochez uniquement les ouvriers qui récoltent aujourd'hui.
+                  </p>
+                </div>
+
+                <span className="bg-emerald-100 text-emerald-950 border border-emerald-300 text-xs font-black px-3 py-1.5 rounded-2xl shrink-0">
+                  {selectedWorkerIds.size} sélectionné(s)
+                </span>
+              </div>
+
+              {/* Barre de Recherche rapide + Boutons Tout Sélectionner / Tout Désélectionner */}
+              <div className="space-y-2">
                 <div className="relative">
                   <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={(e) => onSelectDate(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600"
+                    type="text"
+                    value={searchWorkerQuery}
+                    onChange={(e) => setSearchWorkerQuery(e.target.value)}
+                    placeholder="🔎 Saisissez le n° ou le nom..."
+                    className="w-full bg-slate-50 border border-slate-300 rounded-2xl p-3 pl-9 text-xs font-black text-slate-900 outline-none focus:border-emerald-600 focus:bg-white transition"
                   />
-                  <Calendar className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
+                  {searchWorkerQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchWorkerQuery('')}
+                      className="absolute right-3 top-3 text-slate-400 font-black text-xs p-1"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSelectAllWorkers}
+                    className="flex-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-950 font-black py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 transition active:scale-95"
+                  >
+                    <CheckSquare className="w-4 h-4 text-emerald-700" />
+                    <span>SÉLECTIONNER TOUS</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeselectAllWorkers}
+                    className="flex-1 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 transition active:scale-95"
+                  >
+                    <Square className="w-4 h-4 text-slate-400" />
+                    <span>DÉSÉLECTIONNER</span>
+                  </button>
                 </div>
               </div>
 
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Serre récoltée :
-                </label>
-                <select
-                  value={selectedSerreId}
-                  onChange={(e) => setSelectedSerreId(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-black text-slate-900 outline-none focus:border-emerald-600"
-                >
-                  {activeSerres.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.nom} ({s.code})
-                    </option>
-                  ))}
-                </select>
+              {/* LISTE DES OUVRIERS AVEC GROS BOUTONS COCHABLES (48px+ touch target) */}
+              <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
+                {filteredWorkers.length === 0 ? (
+                  <p className="text-center text-slate-400 text-xs py-8 font-bold">
+                    Aucun ouvrier ne correspond à cette recherche.
+                  </p>
+                ) : (
+                  filteredWorkers.map((worker) => {
+                    const isChecked = selectedWorkerIds.has(worker.id);
+                    return (
+                      <div
+                        key={worker.id}
+                        onClick={() => handleToggleWorker(worker.id)}
+                        className={`w-full p-3 rounded-2xl border transition cursor-pointer flex items-center justify-between gap-3 active:scale-[0.99] ${
+                          isChecked
+                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-md'
+                            : 'bg-slate-50 hover:bg-slate-100 text-slate-900 border-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div
+                            className={`w-10 h-10 rounded-xl font-mono font-black text-sm flex items-center justify-center shrink-0 ${
+                              isChecked
+                                ? 'bg-white text-emerald-900 shadow-xs'
+                                : 'bg-emerald-100 text-emerald-950'
+                            }`}
+                          >
+                            #{worker.numero}
+                          </div>
+                          <div>
+                            <p className={`font-black text-sm ${isChecked ? 'text-white' : 'text-slate-900'}`}>
+                              {worker.nom}
+                            </p>
+                            <p className={`text-[11px] font-medium ${isChecked ? 'text-emerald-100' : 'text-slate-500'}`}>
+                              Ouvrier #{worker.numero}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Gros bouton visuel cocher / décocher */}
+                        <div
+                          className={`w-8 h-8 rounded-xl flex items-center justify-center font-black transition ${
+                            isChecked
+                              ? 'bg-white text-emerald-700 shadow-xs'
+                              : 'border-2 border-slate-300 text-transparent'
+                          }`}
+                        >
+                          ✓
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
-            </div>
 
-            {/* Pastille récapitulative de la serre */}
-            <div className="bg-emerald-50/80 border border-emerald-200 rounded-xl p-2 flex items-center justify-between text-xs text-emerald-900 font-bold">
-              <span>Serre active : {currentSerre.nom}</span>
-              <span className="text-[11px] text-emerald-700 font-mono">
-                {selectedWorkersMap.size} ouvrier(s) sélectionné(s)
-              </span>
+              {/* BOUTON CONTINUER VERS ÉTAPE 2 */}
+              <button
+                type="button"
+                onClick={() => setStep(2)}
+                disabled={selectedWorkerIds.size === 0}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-500 text-white font-black py-4 rounded-2xl text-xs uppercase tracking-wider shadow-lg transition active:scale-98 flex items-center justify-center gap-2 mt-2"
+              >
+                <span>VALIDER LES OUVRIERS ({selectedWorkerIds.size}) ➔</span>
+              </button>
             </div>
-          </div>
+          )}
 
-          {/* Recherche rapide d'ouvriers */}
-          <div className="bg-white rounded-2xl p-3 border border-slate-200 shadow-xs space-y-2.5">
-            <div className="relative">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Rechercher par n° ou nom d'ouvrier..."
-                className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 pl-8 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600 focus:bg-white"
-              />
-              <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-3" />
-              {searchQuery && (
+          {/* ------------------------------------------------------------------------------------- */}
+          {/* ÉTAPE 2 : CHOIX DES SERRES D'EXPLOITATION                                             */}
+          {/* ------------------------------------------------------------------------------------- */}
+          {step === 2 && (
+            <div className="bg-white rounded-3xl p-3.5 border border-slate-200 shadow-sm space-y-3">
+              <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                <div>
+                  <h3 className="font-black text-slate-900 text-sm flex items-center gap-1.5">
+                    <span className="w-6 h-6 rounded-lg bg-emerald-600 text-white flex items-center justify-center text-xs">
+                      2
+                    </span>
+                    <span>Choisir les serres récoltées :</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                    Appuyez sur les serres où la récolte a eu lieu aujourd'hui.
+                  </p>
+                </div>
+
+                <span className="bg-emerald-100 text-emerald-950 border border-emerald-300 text-xs font-black px-3 py-1.5 rounded-2xl shrink-0">
+                  {selectedSerreIds.size} serre(s)
+                </span>
+              </div>
+
+              {/* GRILLE DES SERRES AVEC GROS BOUTONS ÉLÉGANTS */}
+              <div className="grid grid-cols-2 gap-2.5">
+                {activeSerres.map((serre) => {
+                  const isSelected = selectedSerreIds.has(serre.id);
+                  return (
+                    <button
+                      key={serre.id}
+                      type="button"
+                      onClick={() => handleToggleSerre(serre.id)}
+                      className={`p-4 rounded-2xl border-2 font-black text-left transition flex flex-col justify-between gap-2 active:scale-95 ${
+                        isSelected
+                          ? 'bg-emerald-600 text-white border-emerald-700 shadow-md'
+                          : 'bg-slate-50 hover:bg-slate-100 text-slate-900 border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span
+                          className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${
+                            isSelected ? 'bg-emerald-800 text-emerald-100' : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {serre.code}
+                        </span>
+                        <span
+                          className={`w-6 h-6 rounded-lg flex items-center justify-center font-black text-xs ${
+                            isSelected ? 'bg-white text-emerald-700' : 'border border-slate-300 text-transparent'
+                          }`}
+                        >
+                          ✓
+                        </span>
+                      </div>
+
+                      <span className="text-sm font-black truncate">{serre.nom}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* BOUTONS NAVIGATION RETOUR / VALIDER ET ALLER À L'ÉTAPE 3 */}
+              <div className="flex gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2.5 top-2.5 text-slate-400 text-xs font-bold p-0.5"
+                  onClick={() => setStep(1)}
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3.5 rounded-2xl text-xs transition flex items-center justify-center gap-1"
                 >
-                  ✕
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>RETOUR OUVRIERS</span>
                 </button>
-              )}
-            </div>
 
-            {/* Liste des ouvriers */}
-            <div className="max-h-60 overflow-y-auto space-y-1.5 pr-0.5">
-              {filteredOuvriers.length === 0 ? (
-                <p className="text-center text-slate-400 text-xs py-4 font-medium">
-                  Aucun ouvrier trouvé.
-                </p>
-              ) : (
-                filteredOuvriers.map((worker) => {
-                  const isSelected = selectedWorkersMap.has(worker.id);
-                  const entryData = selectedWorkersMap.get(worker.id);
+                <button
+                  type="button"
+                  onClick={handleProceedToStep3}
+                  disabled={selectedSerreIds.size === 0}
+                  className="flex-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-black py-3.5 rounded-2xl text-xs uppercase tracking-wider shadow-lg transition active:scale-98 flex items-center justify-center gap-1.5"
+                >
+                  <span>SAISIR LES CAISSES ➔</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ------------------------------------------------------------------------------------- */}
+          {/* ÉTAPE 3 : SAISIE DES CAISSES (BOUTONS + ET - GÉANTS SANS CLAVIER)                    */}
+          {/* ------------------------------------------------------------------------------------- */}
+          {step === 3 && (
+            <div className="space-y-3">
+              {/* SÉLECTEUR DE SERRE SI PLUSIEURS SERRES ONT ÉTÉ CHOISIES */}
+              {selectedSerresList.length > 1 && (
+                <div className="bg-white rounded-2xl p-2 border border-slate-200 shadow-xs space-y-1.5">
+                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider block px-1">
+                    Afficher la serre :
+                  </label>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+                    {selectedSerresList.map((serre) => {
+                      const isActive = serre.id === activeSerreForEntry;
+                      const sTotal = totalBySerre[serre.id] || 0;
+                      return (
+                        <button
+                          key={serre.id}
+                          type="button"
+                          onClick={() => setActiveSerreForEntry(serre.id)}
+                          className={`px-3 py-2 rounded-xl text-xs font-black shrink-0 transition active:scale-95 flex items-center gap-1.5 ${
+                            isActive
+                              ? 'bg-emerald-700 text-white shadow-sm'
+                              : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          <span>{serre.nom}</span>
+                          <span className={`px-1.5 py-0.2 rounded-md font-mono text-[10px] ${
+                            isActive ? 'bg-emerald-900 text-emerald-100' : 'bg-slate-200 text-slate-800'
+                          }`}>
+                            {sTotal} c.
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* LISTE DES CARTE OUVRIERS POUR LA SAISIE DES CAISSES */}
+              <div className="space-y-2.5">
+                {selectedWorkersList.map((worker) => {
+                  const currentSerreObj =
+                    selectedSerresList.find((s) => s.id === activeSerreForEntry) ||
+                    selectedSerresList[0];
+                  const currentQty = caissesMap[worker.id]?.[currentSerreObj.id] || 0;
+                  const workerTotalAllSerres = totalByWorker[worker.id] || 0;
 
                   return (
                     <div
                       key={worker.id}
-                      className={`p-2 rounded-xl border transition flex items-center justify-between gap-2 ${
-                        isSelected
-                          ? 'bg-emerald-50/90 border-emerald-400 shadow-2xs'
-                          : 'bg-white border-slate-200 hover:border-slate-300'
-                      }`}
+                      className="bg-white rounded-3xl p-3.5 border border-slate-200 shadow-xs space-y-3"
                     >
-                      {/* Case à cocher et identité */}
-                      <div
-                        onClick={() => handleToggleWorker(worker)}
-                        className="flex items-center gap-2 flex-1 cursor-pointer select-none"
-                      >
-                        <div
-                          className={`w-5 h-5 rounded-lg border flex items-center justify-center transition shrink-0 ${
-                            isSelected
-                              ? 'bg-emerald-600 border-emerald-600 text-white'
-                              : 'border-slate-300 bg-white'
-                          }`}
-                        >
-                          {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                        </div>
-                        <div>
-                          <span className="font-mono font-black text-xs text-emerald-900 mr-1.5">
+                      {/* En-tête Carte Ouvrier */}
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-9 h-9 rounded-xl bg-emerald-600 text-white font-mono font-black text-xs flex items-center justify-center shadow-xs shrink-0">
                             #{worker.numero}
                           </span>
-                          <span className="font-bold text-slate-800 text-xs">
-                            {worker.nom}
-                          </span>
+                          <div>
+                            <h4 className="font-black text-slate-900 text-sm">{worker.nom}</h4>
+                            <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                              {currentSerreObj.nom}
+                            </span>
+                          </div>
                         </div>
+
+                        {/* Cumul total pour cet ouvrier si plusieurs serres */}
+                        {selectedSerresList.length > 1 && (
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-400 font-bold uppercase block">Total Ouvrier</span>
+                            <span className="font-mono font-black text-slate-900 text-xs">
+                              {workerTotalAllSerres} c.
+                            </span>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Contrôle de quantité si sélectionné */}
-                      {isSelected && entryData && (
-                        <div className="flex items-center gap-1 shrink-0">
+                      {/* BLOC BOUTONS + ET - GÉANTS SANS CLAVIER (PAVÉ TACTILE D'EXPLOITATION) */}
+                      <div className="bg-slate-50 p-2 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+                        {/* Boutons déduction -1 et -5 */}
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleChangeCaisses(worker.id, -1)}
-                            className="w-7 h-7 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg flex items-center justify-center text-slate-700 font-black active:scale-90"
+                            onClick={() => handleDeltaCaisses(worker.id, currentSerreObj.id, -5)}
+                            className="h-12 px-2.5 bg-slate-200 hover:bg-slate-300 text-slate-800 font-black text-xs rounded-xl active:scale-90 transition"
+                            title="-5 caisses"
                           >
-                            <Minus className="w-3.5 h-3.5" />
+                            -5
                           </button>
-                          <input
-                            type="number"
-                            min="0.5"
-                            step="0.5"
-                            value={entryData.caisses || ''}
-                            onChange={(e) => handleSetCaissesDirect(worker.id, e.target.value)}
-                            className="w-12 text-center bg-white border border-emerald-400 rounded-lg p-1 text-xs font-black text-emerald-950 outline-none focus:ring-1 focus:ring-emerald-500"
-                          />
                           <button
                             type="button"
-                            onClick={() => handleChangeCaisses(worker.id, 1)}
-                            className="w-7 h-7 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg flex items-center justify-center font-black active:scale-90 shadow-xs"
+                            onClick={() => handleDeltaCaisses(worker.id, currentSerreObj.id, -1)}
+                            className="w-12 h-12 bg-red-100 hover:bg-red-200 text-red-700 flex items-center justify-center font-black rounded-xl active:scale-90 transition shadow-xs text-lg"
+                            title="-1 caisse"
                           >
-                            <Plus className="w-3.5 h-3.5" />
+                            -
                           </button>
                         </div>
-                      )}
+
+                        {/* Affichage Quantité Centré avec saisie directe possible */}
+                        <div className="flex-1 flex flex-col items-center justify-center">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.5"
+                            value={currentQty === 0 ? '' : currentQty}
+                            placeholder="0"
+                            onChange={(e) =>
+                              handleSetCaissesDirect(worker.id, currentSerreObj.id, e.target.value)
+                            }
+                            className="w-20 text-center text-2xl font-black text-emerald-950 bg-white border-2 border-emerald-400 rounded-xl py-1 outline-none focus:ring-2 focus:ring-emerald-500 font-mono shadow-xs"
+                          />
+                          <span className="text-[10px] font-bold text-slate-500 mt-0.5">CAISSES</span>
+                        </div>
+
+                        {/* Boutons ajout +1 et +5 */}
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleDeltaCaisses(worker.id, currentSerreObj.id, 1)}
+                            className="w-12 h-12 bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center font-black rounded-xl active:scale-90 transition shadow-xs text-lg"
+                            title="+1 caisse"
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeltaCaisses(worker.id, currentSerreObj.id, 5)}
+                            className="h-12 px-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs rounded-xl active:scale-90 transition shadow-xs"
+                            title="+5 caisses"
+                          >
+                            +5
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   );
-                })
-              )}
-            </div>
-          </div>
-
-          {/* Récapitulatif sélection & Validation finale */}
-          {selectedWorkersMap.size > 0 && (
-            <div className="bg-slate-900 text-white rounded-2xl p-3 shadow-lg space-y-2.5 animate-in slide-in-from-bottom-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-300 font-medium">
-                  {selectedWorkersMap.size} ouvrier(s) sélectionné(s) :
-                </span>
-                <span className="font-black text-emerald-400 text-sm">
-                  {Array.from(selectedWorkersMap.values()).reduce(
-                    (acc, item) => acc + (item.caisses || 0),
-                    0
-                  )}{' '}
-                  caisses
-                </span>
+                })}
               </div>
 
-              <button
-                type="button"
-                onClick={handleSaveRecolte}
-                className="w-full bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black py-3 rounded-xl text-xs uppercase tracking-wider shadow-md transition active:scale-98 flex items-center justify-center gap-2"
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Enregistrer la récolte ({currentSerre.nom})</span>
-              </button>
+              {/* RÉCAPITULATIF AUTOMATIQUE DU TOTAL GÉNÉRAL ET BOUTON D'ENREGISTREMENT */}
+              <div className="bg-slate-900 text-white rounded-3xl p-4 shadow-xl space-y-3">
+                <div className="space-y-1 border-b border-slate-800 pb-2.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-medium">Ouvriers présents :</span>
+                    <span className="font-bold text-white font-mono">{selectedWorkersList.length}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-medium">Serres utilisées :</span>
+                    <span className="font-bold text-white font-mono">{selectedSerresList.length}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm pt-1">
+                    <span className="text-slate-200 font-bold uppercase">TOTAL GÉNÉRAL :</span>
+                    <span className="font-black text-emerald-400 text-xl font-mono">
+                      {grandTotalCaisses} CAISSES
+                    </span>
+                  </div>
+                </div>
+
+                {/* GROS BOUTON ENREGISTRER LA RÉCOLTE */}
+                <button
+                  type="button"
+                  onClick={handleSaveAllRecolte}
+                  disabled={isSubmitting || grandTotalCaisses <= 0}
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-600 text-slate-950 font-black py-4 rounded-2xl text-xs uppercase tracking-wider shadow-lg transition active:scale-98 flex items-center justify-center gap-2"
+                >
+                  {isSubmitting ? (
+                    <span>Enregistrement en cours...</span>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-5 h-5" />
+                      <span>ENREGISTRER LA RÉCOLTE ({grandTotalCaisses} c.)</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStep(2)}
+                  className="w-full text-center text-slate-400 hover:text-white text-xs font-bold py-1"
+                >
+                  ← Revenir au choix des serres
+                </button>
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* ===================== ONGLET 2 : SYNTHÈSE DU JOUR ===================== */}
-      {activeTab === 'synthese' && (
+      {/* ========================================================================================= */}
+      {/* VUE PRINCIPALE 2 : HISTORIQUE ET CONSULTATION DES SAISIES DU JOUR                         */}
+      {/* ========================================================================================= */}
+      {mainView === 'historique' && (
         <div className="space-y-3">
-          {/* Cartes de totaux */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-center shadow-2xs">
-              <span className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider block">
-                Total Journée
+          {/* Métriques synthétiques du jour */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-2.5 text-center shadow-2xs">
+              <span className="text-[10px] text-emerald-700 font-bold uppercase block truncate">
+                Total Caisses
               </span>
-              <span className="text-xl font-black text-emerald-950">
-                {dailyTotals.totalCaissesDay}
-              </span>
-              <span className="text-[10px] text-emerald-700 block">
-                caisses ({dailyTotals.distinctWorkersDay} ouvriers)
+              <span className="text-lg font-black text-emerald-950 font-mono">
+                {myTotals.totalCaisses}
               </span>
             </div>
 
-            <div className="bg-blue-50 border border-blue-200 rounded-2xl p-3 text-center shadow-2xs">
-              <span className="text-[10px] text-blue-700 font-bold uppercase tracking-wider block">
-                Filtre sélectionné
+            <div className="bg-blue-50 border border-blue-200 rounded-2xl p-2.5 text-center shadow-2xs">
+              <span className="text-[10px] text-blue-700 font-bold uppercase block truncate">
+                Ouvriers
               </span>
-              <span className="text-xl font-black text-blue-950">
-                {dailyTotals.filteredCaisses}
-              </span>
-              <span className="text-[10px] text-blue-700 block">
-                caisses ({dailyTotals.filteredWorkers} ouvriers)
+              <span className="text-lg font-black text-blue-950 font-mono">
+                {myTotals.distinctWorkers}
               </span>
             </div>
-          </div>
 
-          {/* Filtres de la synthèse */}
-          <div className="bg-white rounded-2xl p-3 border border-slate-200 shadow-xs space-y-2">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Changer la date :
-                </label>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => onSelectDate(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-bold text-slate-800 outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Filtrer par serre :
-                </label>
-                <select
-                  value={syntheseSerreFilter}
-                  onChange={(e) => setSyntheseSerreFilter(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-bold text-slate-800 outline-none"
-                >
-                  <option value="all">Toutes les serres</option>
-                  {serres.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.nom} ({s.code})
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <div className="bg-purple-50 border border-purple-200 rounded-2xl p-2.5 text-center shadow-2xs">
+              <span className="text-[10px] text-purple-700 font-bold uppercase block truncate">
+                Serres
+              </span>
+              <span className="text-lg font-black text-purple-950 font-mono">
+                {myTotals.distinctSerres}
+              </span>
             </div>
           </div>
 
-          {/* Liste détaillée des saisies */}
-          <div className="space-y-2">
-            <h3 className="font-bold text-slate-800 text-xs px-1 flex items-center justify-between">
-              <span>Saisies de récolte ({dailyRecoltes.length}) :</span>
-              <span className="text-[10px] text-slate-500 font-normal">
-                Modifiables par l'auteur
+          {/* Liste des saisies de la journée */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="p-3.5 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="font-black text-slate-900 text-xs flex items-center gap-1.5">
+                <Clock className="w-4 h-4 text-slate-500" />
+                <span>Mes enregistrements d'aujourd'hui :</span>
+              </h3>
+              <span className="text-[10px] text-slate-400 font-bold">
+                {myDailyRecoltes.length} saisie(s)
               </span>
-            </h3>
+            </div>
 
-            {dailyRecoltes.length === 0 ? (
-              <div className="bg-white rounded-2xl p-6 text-center border border-slate-200 space-y-1">
-                <span className="text-2xl block">🌾</span>
-                <p className="text-xs text-slate-600 font-bold">Aucune récolte enregistrée</p>
+            {myDailyRecoltes.length === 0 ? (
+              <div className="p-8 text-center space-y-1.5">
+                <span className="text-3xl block">🌾</span>
+                <p className="text-xs text-slate-700 font-black">Aucune récolte enregistrée aujourd'hui</p>
                 <p className="text-[11px] text-slate-400">
-                  Passez sur l'onglet "Nouvelle Saisie" pour enregistrer les caisses de cette journée.
+                  Utilisez l'onglet "Nouvelle Saisie" pour enregistrer la récolte des ouvriers.
                 </p>
               </div>
             ) : (
-              dailyRecoltes.map((entry) => {
-                const isOwnRecord =
-                  entry.created_by_id === currentUser.id || currentUser.role === 'admin';
-
-                return (
+              <div className="divide-y divide-slate-100">
+                {myDailyRecoltes.map((entry) => (
                   <div
                     key={entry.id}
-                    className="bg-white rounded-2xl p-3 border border-slate-200 shadow-2xs space-y-1.5"
+                    className="p-3 flex items-center justify-between gap-2 hover:bg-slate-50 transition text-xs"
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="bg-emerald-100 text-emerald-900 font-black text-xs px-2 py-0.5 rounded-lg font-mono">
-                          #{entry.numero_ouvrier}
-                        </span>
-                        <div>
-                          <p className="font-black text-slate-900 text-xs">{entry.nom_ouvrier}</p>
-                          <p className="text-[10px] text-slate-500">
-                            {entry.serre_nom} • Saisie par {entry.created_by_nom}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-xl">
-                          {entry.caisses} caisses
-                        </span>
-
-                        {isOwnRecord && (
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingEntry(entry);
-                                setEditCaissesInput(entry.caisses.toString());
-                                setEditNotesInput(entry.notes || '');
-                              }}
-                              className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-slate-100 rounded-lg transition"
-                              title="Corriger"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteEntry(entry)}
-                              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                              title="Supprimer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {entry.notes && (
-                      <p className="text-[11px] text-slate-600 bg-slate-50 p-1.5 rounded-lg font-medium italic">
-                        "{entry.notes}"
-                      </p>
-                    )}
-
-                    <div className="flex items-center justify-between text-[9px] text-slate-400 pt-1 border-t border-slate-100 font-mono">
-                      <span>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="text-[10px] text-slate-400 font-mono shrink-0 font-bold">
                         {new Date(entry.created_at).toLocaleTimeString('fr-FR', {
                           hour: '2-digit',
                           minute: '2-digit',
                         })}
-                        {entry.updated_at && ' (modifié)'}
                       </span>
-                      <span>
-                        {entry.sync_status === 'synced' ? '☁️ Synchronisé' : '🕒 En attente'}
+                      <span className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-950 font-mono font-black text-xs flex items-center justify-center shrink-0">
+                        #{entry.numero_ouvrier}
                       </span>
+                      <div className="min-w-0">
+                        <p className="font-black text-slate-900 truncate">{entry.nom_ouvrier}</p>
+                        <p className="text-[10px] text-slate-500 truncate font-medium">
+                          {entry.serre_nom}
+                          {entry.notes ? ` • "${entry.notes}"` : ''}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs font-black text-emerald-950 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-xl font-mono">
+                        {entry.caisses} c.
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditEntry(entry)}
+                        className="p-2 text-slate-400 hover:text-emerald-700 hover:bg-slate-100 rounded-lg transition"
+                        title="Corriger"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteEntry(entry)}
+                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                        title="Supprimer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                );
-              })
+                ))}
+              </div>
             )}
           </div>
         </div>
       )}
 
-      {/* Modale de modification d'une saisie */}
+      {/* MODALE DE CORRECTION D'UNE SAISIE D'HISTORIQUE */}
       {editingEntry && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-xs w-full p-4 shadow-2xl space-y-3 border border-slate-200 animate-in fade-in">
             <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-              <h4 className="font-black text-slate-900 text-xs">Corriger la saisie</h4>
+              <h4 className="font-black text-slate-900 text-xs">Corriger la quantite</h4>
               <button
                 type="button"
                 onClick={() => setEditingEntry(null)}
@@ -741,12 +1166,31 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
 
             <div className="text-xs text-slate-700 font-medium">
               <p>
-                Ouvrier : <strong>#{editingEntry.numero_ouvrier} {editingEntry.nom_ouvrier}</strong>
+                Ouvrier :{' '}
+                <strong>
+                  #{editingEntry.numero_ouvrier} {editingEntry.nom_ouvrier}
+                </strong>
               </p>
-              <p className="text-[11px] text-slate-500">Serre : {editingEntry.serre_nom}</p>
             </div>
 
-            <form onSubmit={handleConfirmEdit} className="space-y-3">
+            <form onSubmit={handleSaveEditedEntry} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                  Serre :
+                </label>
+                <select
+                  value={editSerreIdValue}
+                  onChange={(e) => setEditSerreIdValue(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-black text-slate-900 outline-none focus:border-emerald-600"
+                >
+                  {activeSerres.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.nom} ({s.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="text-[11px] font-bold text-slate-700 block mb-1">
                   Nombre de caisses :
@@ -755,23 +1199,10 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
                   type="number"
                   step="0.5"
                   min="0.5"
-                  value={editCaissesInput}
-                  onChange={(e) => setEditCaissesInput(e.target.value)}
+                  value={editCaissesValue}
+                  onChange={(e) => setEditCaissesValue(e.target.value)}
                   required
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 text-xs font-black text-slate-900 outline-none focus:border-emerald-600"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Remarque (optionnelle) :
-                </label>
-                <input
-                  type="text"
-                  value={editNotesInput}
-                  onChange={(e) => setEditNotesInput(e.target.value)}
-                  placeholder="ex: Bonne qualité"
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-medium text-slate-900 outline-none focus:border-emerald-600"
                 />
               </div>
 

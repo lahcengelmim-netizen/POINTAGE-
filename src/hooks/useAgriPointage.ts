@@ -100,6 +100,12 @@ export function useAgriPointage() {
     return storage.getHeuresSupplementaires(activeCompanyId, selectedDate);
   }, [activeCompanyId, selectedDate, updateTick]);
 
+  // Toutes les heures et tâches supplémentaires de la société (historique multi-dates)
+  const allHeuresSupplementaires = useMemo(() => {
+    void updateTick;
+    return storage.getAllHeuresSupplementaires(activeCompanyId);
+  }, [activeCompanyId, updateTick]);
+
   // Affectations de tâches pour la société et la date sélectionnée
   const affectations = useMemo(() => {
     void updateTick;
@@ -393,20 +399,30 @@ export function useAgriPointage() {
       ouvrierId: string,
       data: {
         id?: string;
+        date?: string;
         type: TypeSupplementaire;
         tache_id?: string | null;
+        nom_tache?: string | null;
         quantite?: number | null;
         unite?: string;
         heures?: number | null;
+        domaine_id?: string | null;
+        serre_id?: string | null;
+        observation?: string | null;
+        created_by_id?: string | null;
+        created_by_nom?: string | null;
+        updated_by_id?: string | null;
+        updated_by_nom?: string | null;
       }
     ): { success: boolean; message?: string; item?: HeureSupplementaire; isUpdated?: boolean } => {
-      const res = storage.saveHeureSupplementaire(activeCompanyId, ouvrierId, selectedDate, data);
+      const targetDate = data.date || selectedDate;
+      const res = storage.saveHeureSupplementaire(activeCompanyId, ouvrierId, targetDate, data);
       if (res.success) {
         return {
           success: true,
           item: res.item,
           isUpdated: res.isUpdated,
-          message: res.isUpdated ? 'Entrée mise à jour avec succès !' : 'Enregistrement réussi !',
+          message: res.isUpdated ? 'Opération mise à jour avec succès !' : 'Opération enregistrée avec succès !',
         };
       }
       return { success: false, message: res.error || 'Erreur lors de l\'enregistrement.' };
@@ -600,6 +616,7 @@ export function useAgriPointage() {
     pointesDetails,
     pointesOuvrierIds,
     heuresSupplementaires,
+    allHeuresSupplementaires,
     heuresSuppDetails,
     stats,
     recapWhatsAppText,

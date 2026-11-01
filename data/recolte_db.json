@@ -87,5 +87,7 @@
       "ordre": 8
     }
   ],
-  "recoltes": []
+  "recoltes": [],
+  "stock_produits": [],
+  "stock_mouvements": []
 }

@@ -1382,6 +1382,19 @@ export interface AddHeureSuppResult {
   isUpdated?: boolean;
 }
 
+export function getAllHeuresSupplementaires(companyId: string): HeureSupplementaire[] {
+  initStorage();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.HEURES_SUPP);
+    const all: HeureSupplementaire[] = raw ? JSON.parse(raw) : [];
+    return all
+      .filter((h) => h.company_id === companyId)
+      .sort((a, b) => b.timestamp - a.timestamp);
+  } catch {
+    return [];
+  }
+}
+
 export function saveHeureSupplementaire(
   companyId: string,
   ouvrierId: string,
@@ -1390,9 +1403,17 @@ export function saveHeureSupplementaire(
     id?: string;
     type: TypeSupplementaire;
     tache_id?: string | null;
+    nom_tache?: string | null;
     quantite?: number | null;
     unite?: string;
     heures?: number | null;
+    domaine_id?: string | null;
+    serre_id?: string | null;
+    observation?: string | null;
+    created_by_id?: string | null;
+    created_by_nom?: string | null;
+    updated_by_id?: string | null;
+    updated_by_nom?: string | null;
   }
 ): AddHeureSuppResult {
   initStorage();
@@ -1400,12 +1421,12 @@ export function saveHeureSupplementaire(
   const all: HeureSupplementaire[] = allRaw ? JSON.parse(allRaw) : [];
 
   const ouvriers = getActiveOuvriers(companyId);
-  const ouvrier = ouvriers.find((o) => o.id === ouvrierId);
+  const ouvrier = ouvriers.find((o) => o.id === ouvrierId) || getOuvriers(companyId).find((o: Ouvrier) => o.id === ouvrierId);
 
   if (!ouvrier) {
     return {
       success: false,
-      error: 'Ouvrier introuvable ou inactif dans cette exploitation.',
+      error: 'Ouvrier introuvable dans cette exploitation.',
     };
   }
 
@@ -1416,7 +1437,7 @@ export function saveHeureSupplementaire(
     second: '2-digit',
   });
 
-  // Si un ID est fourni pour modification explicite
+  // Si un ID est fourni pour modification explicite d'une opération existante
   if (data.id) {
     const idx = all.findIndex((h) => h.id === data.id);
     if (idx >= 0) {
@@ -1424,77 +1445,51 @@ export function saveHeureSupplementaire(
         ...all[idx],
         type: data.type,
         tache_id: data.type === 'tache' ? data.tache_id : null,
+        nom_tache: data.nom_tache !== undefined ? data.nom_tache : all[idx].nom_tache,
         quantite: data.quantite,
-        unite: data.unite,
+        unite: data.unite || (data.type === 'tache' ? 'ruban' : 'heure'),
         heures: data.type === 'heures' ? (data.quantite !== undefined ? data.quantite : data.heures) : null,
+        domaine_id: data.domaine_id !== undefined ? data.domaine_id : all[idx].domaine_id,
+        serre_id: data.serre_id !== undefined ? data.serre_id : all[idx].serre_id,
+        observation: data.observation !== undefined ? data.observation : all[idx].observation,
+        updated_at: now.toISOString(),
+        updated_by_id: data.updated_by_id !== undefined ? data.updated_by_id : all[idx].updated_by_id,
+        updated_by_nom: data.updated_by_nom !== undefined ? data.updated_by_nom : all[idx].updated_by_nom,
         timestamp: now.getTime(),
       };
       safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(all));
+      addToSyncQueue('heures_supplementaires', all[idx]);
       notifyListeners();
       return { success: true, item: all[idx], isUpdated: true };
     }
   }
 
-  // RÈGLE : Un ouvrier peut avoir plusieurs entrées supplémentaires le même jour
-  // mais pas deux fois la même tâche le même jour : dans ce cas, mettre à jour la quantité au lieu de créer un doublon.
-  if (data.type === 'tache') {
-    const existingIdx = all.findIndex(
-      (h) =>
-        h.company_id === companyId &&
-        h.date === date &&
-        h.ouvrier_id === ouvrierId &&
-        h.type === 'tache' &&
-        h.tache_id === data.tache_id
-    );
-
-    if (existingIdx >= 0) {
-      all[existingIdx].quantite = data.quantite;
-      if (data.unite) all[existingIdx].unite = data.unite;
-      all[existingIdx].timestamp = now.getTime();
-      safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(all));
-      notifyListeners();
-      return { success: true, item: all[existingIdx], isUpdated: true };
-    }
-  } else {
-    // Type 'heures'
-    const existingIdx = all.findIndex(
-      (h) =>
-        h.company_id === companyId &&
-        h.date === date &&
-        h.ouvrier_id === ouvrierId &&
-        (h.type === 'heures' || !h.type)
-    );
-
-    if (existingIdx >= 0) {
-      all[existingIdx].type = 'heures';
-      all[existingIdx].quantite = data.quantite;
-      all[existingIdx].heures = data.quantite !== undefined ? data.quantite : data.heures;
-      if (data.unite) all[existingIdx].unite = data.unite;
-      all[existingIdx].timestamp = now.getTime();
-      safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(all));
-      notifyListeners();
-      return { success: true, item: all[existingIdx], isUpdated: true };
-    }
-  }
-
-  // Nouvelle entrée
+  // NOUVELLE ENTRÉE : Toujours enregistrée individuellement avec son propre ID et horodatage
+  // Un ouvrier peut avoir plusieurs opérations supplémentaires le même jour sans écrasement
   const newEntry: HeureSupplementaire = {
-    id: `hsup_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    id: `hsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     company_id: companyId,
     ouvrier_id: ouvrierId,
     numero_ouvrier: ouvrier.numero,
     date,
     type: data.type,
     tache_id: data.type === 'tache' ? data.tache_id : null,
+    nom_tache: data.nom_tache || null,
     quantite: data.quantite,
     unite: data.unite || (data.type === 'tache' ? 'ruban' : 'heure'),
     heures: data.type === 'heures' ? (data.quantite !== undefined ? data.quantite : data.heures) : null,
+    domaine_id: data.domaine_id || null,
+    serre_id: data.serre_id || null,
+    observation: data.observation || null,
+    created_by_id: data.created_by_id || null,
+    created_by_nom: data.created_by_nom || null,
     heure_enregistrement: heureStr,
     timestamp: now.getTime(),
   };
 
   all.push(newEntry);
   safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(all));
+  addToSyncQueue('heures_supplementaires', newEntry);
   notifyListeners();
 
   return { success: true, item: newEntry };
@@ -2266,6 +2261,7 @@ export async function saveUser(data: {
       username: usernameClean,
       nom: nomClean,
       role: data.role,
+      company_id: (data as any).company_id || getActiveCompanyId(),
       passwordHash,
       salt,
       actif: data.actif ?? true,
@@ -2321,7 +2317,7 @@ export async function authenticateUser(
     return { success: false, error: 'Ce compte a été désactivé par l’administrateur.' };
   }
 
-  const isValid = await verifyPassword(passwordPlain.trim(), user.salt, user.passwordHash);
+  const isValid = await verifyPassword(passwordPlain.trim(), user.salt || '', user.passwordHash || '');
   if (!isValid) {
     return { success: false, error: 'Identifiant ou mot de passe incorrect.' };
   }
