@@ -257,7 +257,11 @@ export async function parseStockInitialExcel(file: File): Promise<{
     reader.onload = (e) => {
       try {
         const buffer = e.target?.result;
-        const workbook = XLSX.read(buffer, { type: 'binary' });
+        if (!buffer) {
+          return resolve({ validItems: [], errors: ['Fichier Excel vide ou illisible.'] });
+        }
+        const dataArray = new Uint8Array(buffer as ArrayBuffer);
+        const workbook = XLSX.read(dataArray, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
         if (!sheetName) {
           return resolve({ validItems: [], errors: ['Le classeur Excel est vide.'] });
@@ -267,15 +271,19 @@ export async function parseStockInitialExcel(file: File): Promise<{
         // Lecture sous forme de tableau de tableaux
         const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
-        if (rows.length < 2) {
+        if (rows.length < 1) {
           return resolve({
             validItems: [],
-            errors: ['Le fichier ne contient aucune ligne de données exploitable.'],
+            errors: ['Le fichier ne contient aucune ligne exploitable.'],
           });
         }
 
+        // Normalisation pour supprimer les accents (ex: UNITÉ -> UNITE, QUANTITÉ -> QUANTITE)
+        const normalizeStr = (str: string) =>
+          str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase();
+
         // Détection des en-têtes dans la première ligne
-        const headerRow = rows[0].map((c) => String(c || '').trim().toUpperCase());
+        const headerRow = rows[0].map((c) => normalizeStr(String(c || '')));
         let nomIdx = -1;
         let uniteIdx = -1;
         let qteIdx = -1;
@@ -283,10 +291,12 @@ export async function parseStockInitialExcel(file: File): Promise<{
         headerRow.forEach((col, idx) => {
           if (col.includes('PRODUIT') || col.includes('NOM') || col === 'ARTICLE') nomIdx = idx;
           else if (col.includes('UNITE') || col === 'UNIT' || col === 'U') uniteIdx = idx;
-          else if (col.includes('QTE') || col.includes('QUANT') || col === 'STOCK') qteIdx = idx;
+          else if (col.includes('QTE') || col.includes('QUANT') || col.includes('STOCK') || col.includes('INITIAL')) qteIdx = idx;
         });
 
         // Si non trouvé par nom, considérer l'ordre strict des 3 colonnes : Col 0 = Nom, Col 1 = Unité, Col 2 = Quantité
+        // Si le fichier n'a pas d'en-tête (la première ligne est directement un produit), on commence à l'index 0
+        const hasHeader = nomIdx !== -1 || uniteIdx !== -1 || qteIdx !== -1;
         if (nomIdx === -1) nomIdx = 0;
         if (uniteIdx === -1) uniteIdx = 1;
         if (qteIdx === -1) qteIdx = 2;
@@ -295,7 +305,9 @@ export async function parseStockInitialExcel(file: File): Promise<{
         const errors: string[] = [];
         const seenNames = new Set<string>();
 
-        for (let i = 1; i < rows.length; i++) {
+        const startIndex = hasHeader ? 1 : 0;
+
+        for (let i = startIndex; i < rows.length; i++) {
           const row = rows[i];
           if (!row || row.length === 0) continue;
 
@@ -347,7 +359,7 @@ export async function parseStockInitialExcel(file: File): Promise<{
     };
 
     reader.onerror = () => reject(new Error('Échec de la lecture du fichier.'));
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
   });
 }
 

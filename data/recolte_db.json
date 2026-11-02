@@ -88,6 +88,88 @@
     }
   ],
   "recoltes": [],
-  "stock_produits": [],
-  "stock_mouvements": []
+  "stock_produits": [
+    {
+      "id": "prod_1793617355212_950ic",
+      "company_id": "cie_lahcen_pointeur",
+      "nom": "ENGRAIS NPK 15-15-15",
+      "unite": "KG",
+      "seuil_minimum": 5,
+      "actif": true,
+      "created_at": "2026-11-02T11:02:35.211Z"
+    },
+    {
+      "id": "prod_1793617355213_yal3g",
+      "company_id": "cie_lahcen_pointeur",
+      "nom": "ACIDE NITRIQUE",
+      "unite": "L",
+      "seuil_minimum": 5,
+      "actif": true,
+      "created_at": "2026-11-02T11:02:35.211Z"
+    },
+    {
+      "id": "prod_1793617355213_fo9lf",
+      "company_id": "cie_lahcen_pointeur",
+      "nom": "CAISSE PLASTIQUE",
+      "unite": "UNITE",
+      "seuil_minimum": 5,
+      "actif": true,
+      "created_at": "2026-11-02T11:02:35.211Z"
+    }
+  ],
+  "stock_mouvements": [
+    {
+      "id": "mvt_init_1793617355212_o6id2",
+      "idempotency_key": "idem_init_1793617355126_prod_1793617355212_950ic",
+      "company_id": "cie_lahcen_pointeur",
+      "produit_id": "prod_1793617355212_950ic",
+      "produit_nom": "ENGRAIS NPK 15-15-15",
+      "unite": "KG",
+      "type": "INITIAL",
+      "quantite": 500,
+      "date": "2026-11-02",
+      "motif": "Stock initial ouverture Excel",
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-02T11:02:35.211Z"
+    },
+    {
+      "id": "mvt_init_1793617355213_jqxwk",
+      "idempotency_key": "idem_init_1793617355126_prod_1793617355213_yal3g",
+      "company_id": "cie_lahcen_pointeur",
+      "produit_id": "prod_1793617355213_yal3g",
+      "produit_nom": "ACIDE NITRIQUE",
+      "unite": "L",
+      "type": "INITIAL",
+      "quantite": 200,
+      "date": "2026-11-02",
+      "motif": "Stock initial ouverture Excel",
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-02T11:02:35.211Z"
+    },
+    {
+      "id": "mvt_init_1793617355213_ke9fk",
+      "idempotency_key": "idem_init_1793617355126_prod_1793617355213_fo9lf",
+      "company_id": "cie_lahcen_pointeur",
+      "produit_id": "prod_1793617355213_fo9lf",
+      "produit_nom": "CAISSE PLASTIQUE",
+      "unite": "UNITE",
+      "type": "INITIAL",
+      "quantite": 1000,
+      "date": "2026-11-02",
+      "motif": "Stock initial ouverture Excel",
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-02T11:02:35.211Z"
+    }
+  ],
+  "companies": [
+    {
+      "id": "cie_lahcen_pointeur",
+      "nom": "Exploitation Agricole Lahcen Pointeur",
+      "code": "LAH",
+      "actif": true
+    }
+  ]
 }
