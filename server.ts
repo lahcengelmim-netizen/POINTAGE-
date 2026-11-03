@@ -95,6 +95,8 @@ interface ServerDB {
     created_at: string;
     updated_at?: string;
     updated_by_id?: string;
+    type_operation?: 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT';
+    domaine_id?: string;
   }>;
   stock_produits?: Array<{
     id: string;
@@ -125,6 +127,50 @@ interface ServerDB {
     created_by_id: string;
     created_by_nom: string;
     created_at: string;
+  }>;
+  heures_supplementaires?: Array<{
+    id: string;
+    company_id: string;
+    ouvrier_id: string;
+    numero_ouvrier: number;
+    date: string;
+    tache_id?: string | null;
+    nom_tache?: string | null;
+    heure_debut?: string | null;
+    heure_fin?: string | null;
+    duree_heures: number;
+    domaine_id?: string | null;
+    serre_id?: string | null;
+    observation?: string | null;
+    created_by_id: string;
+    created_by_nom: string;
+    created_by_role?: string;
+    created_at: string;
+    updated_at?: string;
+    updated_by_id?: string;
+    updated_by_nom?: string;
+  }>;
+  taches_supplementaires?: Array<{
+    id: string;
+    company_id: string;
+    ouvrier_id: string;
+    numero_ouvrier: number;
+    date: string;
+    tache_id?: string | null;
+    nom_tache: string;
+    description?: string | null;
+    quantite: number;
+    unite: string;
+    domaine_id?: string | null;
+    serre_id?: string | null;
+    observation?: string | null;
+    created_by_id: string;
+    created_by_nom: string;
+    created_by_role?: string;
+    created_at: string;
+    updated_at?: string;
+    updated_by_id?: string;
+    updated_by_nom?: string;
   }>;
 }
 
@@ -164,6 +210,8 @@ const DEFAULT_DB: ServerDB = {
   recoltes: [],
   stock_produits: [],
   stock_mouvements: [],
+  heures_supplementaires: [],
+  taches_supplementaires: [],
   companies: [
     {
       id: 'cie_lahcen_pointeur',
@@ -540,7 +588,178 @@ function saveIdempotency(key: string, response: any): void {
   idempotencyStore.set(key, { timestamp: Date.now(), response });
 }
 
-// Vérification stricte du rôle ADMIN via Supabase PostgreSQL
+// Moteur de requêtes local pour le mode développement ou les tests automatisés
+function createLocalDbClient() {
+  const createQueryBuilder = (table: string, filterFn: (x: any) => boolean = () => true) => {
+    const q: any = {
+      eq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] === val2),
+      neq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] !== val2),
+      gte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] >= val2),
+      lte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] <= val2),
+      order: (_col2: string, _opts?: any) => q,
+      limit: (n: number) => ({
+        then: (cb: any) => {
+          const db = readDB();
+          const items = ((db[table as keyof ServerDB] as any[]) || []).filter(filterFn).slice(0, n);
+          return Promise.resolve({ data: items, error: null }).then(cb);
+        }
+      }),
+      maybeSingle: () => {
+        const db = readDB();
+        const items = (db[table as keyof ServerDB] as any[]) || [];
+        const found = items.find(filterFn);
+        return Promise.resolve({ data: found || null, error: null });
+      },
+      single: () => {
+        const db = readDB();
+        const items = (db[table as keyof ServerDB] as any[]) || [];
+        const found = items.find(filterFn);
+        return Promise.resolve({ data: found || null, error: null });
+      },
+      delete: () => {
+        const db = readDB();
+        const items = (db[table as keyof ServerDB] as any[]) || [];
+        (db as any)[table] = items.filter((x: any) => !filterFn(x));
+        writeDB(db);
+        return Promise.resolve({ error: null });
+      },
+      then: (cb: any, rej?: any) => {
+        const db = readDB();
+        const items = ((db[table as keyof ServerDB] as any[]) || []).filter(filterFn);
+        return Promise.resolve({ data: items, error: null }).then(cb, rej);
+      }
+    };
+    return q;
+  };
+
+  return {
+    from: (table: string) => ({
+      select: (_fields?: string) => createQueryBuilder(table),
+      update: (updates: any) => {
+        let filter: (x: any) => boolean = () => true;
+        const builder: any = {
+          eq: (col: string, val: any) => {
+            const prev = filter;
+            filter = (x: any) => prev(x) && x[col] === val;
+            return builder;
+          },
+          neq: (col: string, val: any) => {
+            const prev = filter;
+            filter = (x: any) => prev(x) && x[col] !== val;
+            return builder;
+          },
+          select: () => builder,
+          single: () => {
+            const db = readDB();
+            if (!db[table as keyof ServerDB]) (db as any)[table] = [];
+            const items = (db[table as keyof ServerDB] as any[]) || [];
+            let updatedItem: any = null;
+            for (let i = 0; i < items.length; i++) {
+              if (filter(items[i])) {
+                items[i] = { ...items[i], ...updates };
+                updatedItem = items[i];
+              }
+            }
+            writeDB(db);
+            return Promise.resolve({ data: updatedItem, error: null });
+          },
+          then: (cb: any, rej?: any) => {
+            const db = readDB();
+            if (!db[table as keyof ServerDB]) (db as any)[table] = [];
+            const items = (db[table as keyof ServerDB] as any[]) || [];
+            let updatedItem: any = null;
+            for (let i = 0; i < items.length; i++) {
+              if (filter(items[i])) {
+                items[i] = { ...items[i], ...updates };
+                updatedItem = items[i];
+              }
+            }
+            writeDB(db);
+            return Promise.resolve({ data: updatedItem, error: null }).then(cb, rej);
+          },
+        };
+        return builder;
+      },
+      delete: () => {
+        let filter: (x: any) => boolean = () => true;
+        const builder: any = {
+          eq: (col: string, val: any) => {
+            const prev = filter;
+            filter = (x: any) => prev(x) && x[col] === val;
+            return builder;
+          },
+          neq: (col: string, val: any) => {
+            const prev = filter;
+            filter = (x: any) => prev(x) && x[col] !== val;
+            return builder;
+          },
+          then: (cb: any, rej?: any) => {
+            const db = readDB();
+            const items = (db[table as keyof ServerDB] as any[]) || [];
+            (db as any)[table] = items.filter((x: any) => !filter(x));
+            writeDB(db);
+            return Promise.resolve({ error: null }).then(cb, rej);
+          },
+        };
+        return builder;
+      },
+      upsert: (record: any, _options?: any) => {
+        const db = readDB();
+        if (!db[table as keyof ServerDB]) (db as any)[table] = [];
+        const list = db[table as keyof ServerDB] as any[];
+        const idx = list.findIndex((x: any) => x.id === record.id);
+        if (idx >= 0) {
+          list[idx] = { ...list[idx], ...record };
+        } else {
+          list.push(record);
+        }
+        writeDB(db);
+        return Promise.resolve({ data: record, error: null });
+      },
+      insert: (recordOrList: any) => {
+        const db = readDB();
+        const items = Array.isArray(recordOrList) ? recordOrList : [recordOrList];
+        if (table === 'stock_produits' || table === 'stock_mouvements') {
+          const companies = db.companies || [];
+          for (const item of items) {
+            if (!companies.some((c: any) => c.id === item.company_id)) {
+              const fkErr = new Error(`insert or update on table "${table}" violates foreign key constraint "${table}_company_id_fkey"`);
+              return {
+                select: () => ({
+                  single: () => Promise.resolve({ data: null, error: fkErr }),
+                  then: (_cb: any, rej?: any) => Promise.resolve({ data: null, error: fkErr }).then(_cb, rej)
+                }),
+                then: (_onFulfilled: any, onRejected?: any) => {
+                  return Promise.resolve({ data: null, error: fkErr }).then(_onFulfilled, onRejected);
+                }
+              };
+            }
+          }
+        }
+
+        if (!db[table as keyof ServerDB]) (db as any)[table] = [];
+        for (const item of items) {
+          (db[table as keyof ServerDB] as any[]).push(item);
+        }
+        writeDB(db);
+
+        const singleData = items[0];
+        const resData = Array.isArray(recordOrList) ? items : singleData;
+        return {
+          select: () => ({
+            single: () => Promise.resolve({ data: singleData, error: null }),
+            then: (cb: any, rej?: any) => Promise.resolve({ data: resData, error: null }).then(cb, rej)
+          }),
+          then: (onFulfilled: any, onRejected?: any) => {
+            return Promise.resolve({ data: resData, error: null }).then(onFulfilled, onRejected);
+          }
+        };
+      }
+    })
+  };
+}
+
+// Vérification stricte du rôle ADMIN (Réservé aux modules critiques, ex: Stock Pro)
 async function authenticateAdmin(req: Request): Promise<{
   authenticated: boolean;
   error?: string;
@@ -558,93 +777,47 @@ async function authenticateAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Contrôle des rôles non-admin (ex: Caporal)
+  // Contrôle strict des rôles non-admin (ex: Caporal)
   if (token.includes('caporal') || token === 'usr_caporal_brahim') {
     return {
       authenticated: false,
-      error: 'Action interdite : rôle Administrateur actif requis. Le rôle Caporal n\'est pas autorisé sur ce module de gestion (Stock, Supplémentaires).',
+      error: 'Action interdite : rôle Administrateur actif requis. Le rôle Caporal n\'est pas autorisé sur ce module.',
       statusCode: 403,
     };
   }
 
   // Mode développement local ou suite de tests automatisés (ou absence de configuration Supabase)
   if (token === 'dev_admin_token' || !supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
-    const localDbClient = {
-      from: (table: string) => ({
-        select: (fields?: string) => ({
-          eq: (col: string, val: any) => {
-            const queryObj: any = {
-              eq: (col2: string, val2: any) => queryObj,
-              maybeSingle: () => {
-                const db = readDB();
-                const items = (db[table as keyof ServerDB] as any[]) || [];
-                const found = items.find((x: any) => x[col] === val);
-                return Promise.resolve({ data: found || null, error: null });
-              },
-              single: () => {
-                const db = readDB();
-                const items = (db[table as keyof ServerDB] as any[]) || [];
-                const found = items.find((x: any) => x[col] === val);
-                return Promise.resolve({ data: found || null, error: null });
-              },
-              then: (cb: any) => {
-                const db = readDB();
-                const items = (db[table as keyof ServerDB] as any[]) || [];
-                const filtered = items.filter((x: any) => x[col] === val);
-                cb({ data: filtered, error: null });
-              }
-            };
-            return queryObj;
-          },
-          then: (cb: any) => {
-            const db = readDB();
-            cb({ data: db[table as keyof ServerDB] || [], error: null });
-          }
-        }),
-        upsert: (record: any, options?: any) => {
-          const db = readDB();
-          if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-          const list = db[table as keyof ServerDB] as any[];
-          const idx = list.findIndex((x: any) => x.id === record.id);
-          if (idx >= 0) {
-            list[idx] = { ...list[idx], ...record };
-          } else {
-            list.push(record);
-          }
-          writeDB(db);
-          return Promise.resolve({ data: record, error: null });
-        },
-        insert: (record: any) => {
-          return {
-            select: () => ({
-              single: () => {
-                const db = readDB();
-                if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-                (db[table as keyof ServerDB] as any[]).push(record);
-                writeDB(db);
-                return Promise.resolve({ data: record, error: null });
-              }
-            }),
-            then: (onFulfilled: any, onRejected?: any) => {
-              const db = readDB();
-              if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-              (db[table as keyof ServerDB] as any[]).push(record);
-              writeDB(db);
-              return Promise.resolve({ data: record, error: null }).then(onFulfilled, onRejected);
-            }
-          };
-        }
-      })
-    };
+    const db = readDB();
+    const companies = db.companies || [];
+    const profileCompanyId = 'cie_lahcen_pointeur';
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+
+    const compFound = companies.find((c: any) => c.id === profileCompanyId);
+    if (!compFound) {
+      return {
+        authenticated: false,
+        error: `L'entreprise associée au profil ("${profileCompanyId}") est introuvable dans la table "companies". Accès bloqué.`,
+        statusCode: 400,
+      };
+    }
 
     return {
       authenticated: true,
       admin: {
         id: 'usr_admin',
         nom: 'Lahcen (Administrateur)',
-        company_id: 'cie_lahcen_pointeur',
+        company_id: profileCompanyId,
       },
-      supabaseClient: localDbClient,
+      supabaseClient: createLocalDbClient(),
     };
   }
 
@@ -690,17 +863,41 @@ async function authenticateAdmin(req: Request): Promise<{
       return { authenticated: false, error: 'Action interdite : rôle Administrateur actif requis.', statusCode: 403 };
     }
 
-    if (!profile.company_id) {
-      profile.company_id = 'cie_lahcen_pointeur';
+    const adminDb = supabaseAdmin || client;
+
+    // 1. Le company_id DOIT provenir strictement du profil authentifié côté serveur
+    const profileCompanyId = (profile.company_id || '').trim();
+    if (!profileCompanyId) {
+      return {
+        authenticated: false,
+        error: 'Profil administrateur non rattaché à une entreprise (company_id manquant). Accès bloqué.',
+        statusCode: 400,
+      };
     }
 
-    if (supabaseAdmin) {
-      await supabaseAdmin.from('companies').upsert({
-        id: profile.company_id,
-        nom: 'Exploitation Agricole Lahcen Pointeur',
-        code: 'LAH',
-        actif: true,
-      }, { onConflict: 'id' }).catch(() => {});
+    // 2. Sécurité multi-tenant : ne jamais permettre à x-company-id de remplacer l'identifiant vérifié du profil
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+
+    // 3. Vérifier que l'entreprise référencée existe réellement dans public.companies
+    const { data: compCheck, error: compErr } = await adminDb
+      .from('companies')
+      .select('id, nom, code')
+      .eq('id', profileCompanyId)
+      .maybeSingle();
+
+    if (compErr || !compCheck || !compCheck.id) {
+      return {
+        authenticated: false,
+        error: `L'entreprise associée à votre profil ("${profileCompanyId}") est absente de la table "companies". Requête bloquée avec succès pour préserver l'intégrité référentielle.`,
+        statusCode: 400,
+      };
     }
 
     return {
@@ -708,7 +905,153 @@ async function authenticateAdmin(req: Request): Promise<{
       admin: {
         id: profile.id,
         nom: profile.nom || 'Administrateur',
-        company_id: profile.company_id, // Toujours le company_id issu du profil authentifié serveur
+        company_id: compCheck.id,
+      },
+      supabaseClient: client,
+    };
+  } catch (err: any) {
+    return { authenticated: false, error: 'Erreur vérification Supabase: ' + err.message, statusCode: 500 };
+  }
+}
+
+// Vérification ciblée des rôles CAPORAL ou ADMIN pour les modules autorisés (Heures Sup, Tâches Sup, Récolte)
+async function authenticateCaporalOrAdmin(req: Request): Promise<{
+  authenticated: boolean;
+  error?: string;
+  statusCode?: number;
+  user?: { id: string; nom: string; role: 'admin' | 'caporal'; company_id: string };
+  supabaseClient?: any;
+}> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return { authenticated: false, error: 'Authentification requise (en-tête manquant).', statusCode: 401 };
+  }
+
+  const token = authHeader.replace('Bearer ', '').trim();
+  if (!token || token === 'none') {
+    return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
+  }
+
+  // Mode développement local ou suite de tests automatisés (ou absence de configuration Supabase)
+  if (token === 'dev_admin_token' || token === 'dev_caporal_token' || token.includes('caporal') || token === 'usr_caporal_brahim' || !supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
+    const isCaporal = token === 'dev_caporal_token' || token.includes('caporal') || token === 'usr_caporal_brahim';
+    const role: 'admin' | 'caporal' = isCaporal ? 'caporal' : 'admin';
+    const nom = isCaporal ? 'Brahim (Caporal)' : 'Lahcen (Administrateur)';
+    const userId = isCaporal ? 'usr_caporal_1' : 'usr_admin';
+
+    const db = readDB();
+    const companies = db.companies || [];
+    const profileCompanyId = 'cie_lahcen_pointeur';
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+
+    const compFound = companies.find((c: any) => c.id === profileCompanyId);
+    if (!compFound) {
+      return {
+        authenticated: false,
+        error: `L'entreprise associée au profil ("${profileCompanyId}") est introuvable dans la table "companies". Accès bloqué.`,
+        statusCode: 400,
+      };
+    }
+
+    return {
+      authenticated: true,
+      user: {
+        id: userId,
+        nom,
+        role,
+        company_id: profileCompanyId,
+      },
+      supabaseClient: createLocalDbClient(),
+    };
+  }
+
+  try {
+    const client = getSupabaseClientForRequest(token);
+    const { data: { user }, error: authError } = await client.auth.getUser(token);
+    if (authError || !user) {
+      return { authenticated: false, error: 'Session invalide ou expirée: ' + (authError?.message || 'Utilisateur non trouvé'), statusCode: 401 };
+    }
+
+    let { data: profile, error: profileError } = await client
+      .from('profiles')
+      .select('id, company_id, role, actif, nom')
+      .eq('id', user.id)
+      .single();
+
+    const userEmail = (user.email || '').toLowerCase();
+    const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
+
+    if (profileError || !profile) {
+      if (isAdminEmail || supabaseAdmin) {
+        const newProfile = {
+          id: user.id,
+          username: userEmail.split('@')[0] || 'admin',
+          nom: 'Lahcen (Administrateur)',
+          role: 'admin',
+          company_id: 'cie_lahcen_pointeur',
+          actif: true,
+        };
+        const adminClient = supabaseAdmin || client;
+        await adminClient.from('profiles').upsert(newProfile, { onConflict: 'id' });
+        profile = newProfile;
+      } else {
+        return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
+      }
+    }
+
+    const actualRole: 'admin' | 'caporal' = (profile.role === 'admin' || isAdminEmail) ? 'admin' : (profile.role === 'caporal' ? 'caporal' : 'caporal');
+    if (!profile.actif) {
+      return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
+    }
+
+    const adminDb = supabaseAdmin || client;
+    const profileCompanyId = (profile.company_id || '').trim();
+    if (!profileCompanyId) {
+      return {
+        authenticated: false,
+        error: 'Profil utilisateur non rattaché à une entreprise (company_id manquant). Accès bloqué.',
+        statusCode: 400,
+      };
+    }
+
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+
+    const { data: compCheck, error: compErr } = await adminDb
+      .from('companies')
+      .select('id, nom, code')
+      .eq('id', profileCompanyId)
+      .maybeSingle();
+
+    if (compErr || !compCheck || !compCheck.id) {
+      return {
+        authenticated: false,
+        error: `L'entreprise associée à votre profil ("${profileCompanyId}") est absente de la table "companies". Requête bloquée avec succès.`,
+        statusCode: 400,
+      };
+    }
+
+    return {
+      authenticated: true,
+      user: {
+        id: profile.id,
+        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : 'Caporal'),
+        role: actualRole,
+        company_id: compCheck.id,
       },
       supabaseClient: client,
     };
@@ -824,23 +1167,36 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
   }
 
   try {
-    const companyId = auth.admin.company_id;
+    let companyId = auth.admin.company_id;
     const now = new Date().toISOString();
     const today = now.slice(0, 10);
     const dbClient = auth.supabaseClient;
 
-    // S'assurer que l'entreprise existe dans public.companies pour satisfaire la clé étrangère
-    await dbClient.from('companies').upsert({
-      id: companyId,
-      nom: 'Exploitation Agricole Lahcen Pointeur',
-      code: 'LAH',
-      actif: true,
-    }, { onConflict: 'id' }).catch(() => {});
+    // 1. Validation préalable stricte de l'existence de la société dans la table "companies"
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Aucune société valide associée à votre profil. Veuillez configurer votre entreprise avant d\'importer le stock initial.',
+      });
+    }
+
+    const { data: compRecord, error: compCheckErr } = await dbClient
+      .from('companies')
+      .select('id, nom')
+      .eq('id', companyId)
+      .maybeSingle();
+
+    if (compCheckErr || !compRecord) {
+      return res.status(400).json({
+        success: false,
+        error: `La société associée ("${companyId}") est introuvable dans la table "companies". Importation refusée pour éviter une violation de clé étrangère (stock_produits_company_id_fkey).`,
+      });
+    }
 
     const alreadyInitialized: string[] = [];
     let importedCount = 0;
 
-    // Récupération des produits et mouvements existants depuis Supabase PostgreSQL
+    // Récupération des produits et mouvements existants depuis Supabase PostgreSQL / DB
     const { data: existingProds, error: pErr } = await dbClient
       .from('stock_produits')
       .select('*')
@@ -858,6 +1214,9 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
     const prodsList = existingProds || [];
     const mvtsList = existingMvts || [];
 
+    // Déduplication intra-fichier Excel : préserver la 1ère occurrence d'une même paire (nom, unite)
+    const seenExcelKeys = new Set<string>();
+
     for (const item of items) {
       const nom = String(item.nom || '').trim().toUpperCase();
       const unite = String(item.unite || '').trim().toUpperCase();
@@ -866,7 +1225,14 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
       // Validation stricte : ignorer nom vide, unité vide, non numérique ou négative
       if (!nom || !unite || isNaN(qte) || qte < 0) continue;
 
-      // Chercher produit existant dans PostgreSQL
+      const itemKey = `${nom}_${unite}`;
+      if (seenExcelKeys.has(itemKey)) {
+        // Ligne doublon dans le fichier : on conserve la 1ère occurrence et on ignore la suivante
+        continue;
+      }
+      seenExcelKeys.add(itemKey);
+
+      // Chercher produit existant dans le catalogue
       let produit = prodsList.find((p: any) => p.nom === nom && p.unite === unite);
 
       if (!produit) {
@@ -892,7 +1258,7 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
         prodsList.push(produit);
       }
 
-      // Vérifier si un mouvement INITIAL existe déjà pour ce produit dans PostgreSQL
+      // Vérifier si un mouvement INITIAL existe déjà pour ce produit
       const hasInitial = mvtsList.some(
         (m: any) => m.produit_id === produit.id && m.type === 'INITIAL'
       );
@@ -902,8 +1268,8 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
         continue;
       }
 
-      // Enregistrer le mouvement INITIAL uniquement si qte > 0
-      if (qte > 0) {
+      // Enregistrer le mouvement INITIAL
+      if (qte >= 0) {
         const mvtId = `mvt_init_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const mvtKey = `${idempotencyKey || 'imp'}_${produit.id}`;
 
@@ -929,7 +1295,7 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
           throw new Error(`Erreur initialisation stock ${nom}: ${mvtErr.message}`);
         }
 
-        mvtsList.push({ produit_id: produit.id, type: 'INITIAL' });
+        mvtsList.push({ produit_id: produit.id, type: 'INITIAL', company_id: companyId });
       }
 
       importedCount++;
@@ -939,7 +1305,7 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
       success: true,
       importedCount,
       alreadyInitialized,
-      message: `${importedCount} produit(s) initialisé(s) avec succès dans PostgreSQL.`,
+      message: `${importedCount} produit(s) initialisé(s) avec succès.`,
     };
 
     if (idempotencyKey) saveIdempotency(idempotencyKey, result);
@@ -1391,19 +1757,19 @@ app.get('/api/stock/mouvements', async (req: Request, res: Response) => {
 });
 
 // =========================================================================
-// MODULE SUPPLÉMENTAIRES — API REST SÉCURISÉE ADMIN (POSTGRESQL / RLS)
+// MODULE 1 : HEURES SUPPLÉMENTAIRES (Suivi du temps de travail en heures)
 // =========================================================================
 
-// 1. GET /api/supplementaires : Récupération filtrable des heures & tâches sup
-app.get('/api/supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
-  if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
+// 1. GET /api/heures-supplementaires : Consultation filtrée des heures sup
+app.get('/api/heures-supplementaires', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
   try {
-    const { date, startDate, endDate, ouvrierId, domaineId, type } = req.query;
-    const companyId = auth.admin.company_id;
+    const { date, startDate, endDate, ouvrierId, domaineId, serreId } = req.query;
+    const companyId = auth.user.company_id;
     const dbClient = auth.supabaseClient;
 
     let query = dbClient
@@ -1418,51 +1784,48 @@ app.get('/api/supplementaires', async (req: Request, res: Response) => {
     }
     if (ouvrierId) query = query.eq('ouvrier_id', String(ouvrierId));
     if (domaineId && domaineId !== 'ALL') query = query.eq('domaine_id', String(domaineId));
-    if (type && type !== 'ALL') query = query.eq('type', String(type));
+    if (serreId && serreId !== 'ALL') query = query.eq('serre_id', String(serreId));
 
-    query = query.order('timestamp', { ascending: false });
+    query = query.order('created_at', { ascending: false });
 
     const { data, error } = await query;
     if (error) throw new Error('Erreur lecture heures_supplementaires: ' + error.message);
 
-    return res.json({ success: true, supplementaires: data || [] });
+    return res.json({ success: true, heures_supplementaires: data || [] });
   } catch (err: any) {
-    console.error('Erreur GET /api/supplementaires:', err);
+    console.error('Erreur GET /api/heures-supplementaires:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 2. POST /api/supplementaires : Enregistrement individuel d'une opération supplémentaire
-app.post('/api/supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
-  if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
+// 2. POST /api/heures-supplementaires : Enregistrement d'une heure supplémentaire
+app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
   try {
     const {
-      type,
       ouvrier_id,
       numero_ouvrier,
       date,
-      tache_id,
-      quantite,
-      unite,
+      heure_debut,
+      heure_fin,
+      duree_heures,
       heures,
+      tache_id,
+      nom_tache,
       domaine_id,
       serre_id,
       observation,
     } = req.body;
 
-    if (!ouvrier_id || numero_ouvrier === undefined || !date || !type) {
+    if (!ouvrier_id || numero_ouvrier === undefined || !date) {
       return res.status(400).json({
         success: false,
-        error: 'Champs obligatoires manquants (ouvrier_id, numero_ouvrier, date, type).',
+        error: 'Champs obligatoires manquants (ouvrier_id, numero_ouvrier, date).',
       });
-    }
-
-    if (type !== 'heures' && type !== 'tache') {
-      return res.status(400).json({ success: false, error: 'Type invalide (doit être "heures" ou "tache").' });
     }
 
     const numOuvrier = parseInt(String(numero_ouvrier), 10);
@@ -1470,61 +1833,59 @@ app.post('/api/supplementaires', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Numéro d\'ouvrier invalide.' });
     }
 
-    let parsedQuantite: number | null = null;
-    let parsedHeures: number | null = null;
-
-    if (type === 'heures') {
-      const h = Number(heures !== undefined && heures !== null ? heures : quantite);
-      if (isNaN(h) || h <= 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'Le nombre d\'heures supplémentaires doit être obligatoire et strictement supérieur à 0.',
-        });
+    // Calcul automatique de la durée si heure_debut et heure_fin sont renseignées
+    let calculatedDuration: number | null = null;
+    if (heure_debut && heure_fin && String(heure_debut).includes(':') && String(heure_fin).includes(':')) {
+      const [h1, m1] = String(heure_debut).split(':').map((v) => parseInt(v, 10));
+      const [h2, m2] = String(heure_fin).split(':').map((v) => parseInt(v, 10));
+      if (!isNaN(h1) && !isNaN(m1) && !isNaN(h2) && !isNaN(m2)) {
+        let diffMinutes = (h2 * 60 + m2) - (h1 * 60 + m1);
+        if (diffMinutes < 0) diffMinutes += 24 * 60; // franchissement minuit
+        calculatedDuration = Math.round((diffMinutes / 60) * 100) / 100;
       }
-      parsedHeures = h;
-      parsedQuantite = h;
-    } else {
-      const q = Number(quantite);
-      if (isNaN(q) || q <= 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'La quantité de tâche supplémentaire doit être obligatoire et strictement supérieure à 0.',
-        });
-      }
-      parsedQuantite = q;
     }
 
-    const companyId = auth.admin.company_id;
-    const dbClient = auth.supabaseClient;
+    const finalDuration = Number(
+      duree_heures !== undefined && duree_heures !== null && duree_heures !== ''
+        ? duree_heures
+        : (heures !== undefined && heures !== null && heures !== '' ? heures : calculatedDuration)
+    );
 
+    if (isNaN(finalDuration) || finalDuration <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'La durée en heures doit être un nombre strictement supérieur à 0.',
+      });
+    }
+
+    const companyId = auth.user.company_id;
+    const dbClient = auth.supabaseClient;
     const now = new Date();
-    const heureStr = now.toLocaleTimeString('fr-FR', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
 
     const newRecordId = `hsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
     const newRecord = {
       id: newRecordId,
       company_id: companyId,
       ouvrier_id: String(ouvrier_id),
       numero_ouvrier: numOuvrier,
       date: String(date),
-      type,
-      tache_id: type === 'tache' ? (tache_id ? String(tache_id) : null) : null,
-      quantite: parsedQuantite,
-      unite: unite ? String(unite).trim() : (type === 'tache' ? 'ruban' : 'heure'),
-      heures: parsedHeures,
+      tache_id: tache_id ? String(tache_id) : null,
+      nom_tache: nom_tache ? String(nom_tache).trim() : null,
+      heure_debut: heure_debut ? String(heure_debut).trim() : null,
+      heure_fin: heure_fin ? String(heure_fin).trim() : null,
+      duree_heures: Math.round(finalDuration * 100) / 100,
+      heures: Math.round(finalDuration * 100) / 100,
+      quantite: Math.round(finalDuration * 100) / 100,
+      unite: 'heure',
+      type: 'heures',
       domaine_id: domaine_id ? String(domaine_id) : null,
       serre_id: serre_id ? String(serre_id) : null,
       observation: observation ? String(observation).trim() : null,
-      created_by_id: auth.admin.id,
-      created_by_nom: auth.admin.nom,
-      heure_enregistrement: heureStr,
-      timestamp: now.getTime(),
+      created_by_id: auth.user.id,
+      created_by_nom: auth.user.nom,
+      created_by_role: auth.user.role,
       created_at: now.toISOString(),
+      timestamp: now.getTime(),
     };
 
     const { data, error } = await dbClient
@@ -1540,15 +1901,15 @@ app.post('/api/supplementaires', async (req: Request, res: Response) => {
 
     return res.json({ success: true, item: data || newRecord });
   } catch (err: any) {
-    console.error('Erreur POST /api/supplementaires:', err);
+    console.error('Erreur POST /api/heures-supplementaires:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 3. PUT /api/supplementaires/:id : Modification d'une opération existante
-app.put('/api/supplementaires/:id', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
-  if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
+// 3. PUT /api/heures-supplementaires/:id : Modification ciblée
+app.put('/api/heures-supplementaires/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
@@ -1556,50 +1917,44 @@ app.put('/api/supplementaires/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ success: false, error: 'Identifiant d\'opération requis.' });
 
-    const companyId = auth.admin.company_id;
+    const companyId = auth.user.company_id;
     const dbClient = auth.supabaseClient;
-
     const {
-      type,
-      quantite,
-      unite,
+      date,
+      heure_debut,
+      heure_fin,
+      duree_heures,
       heures,
+      tache_id,
+      nom_tache,
       domaine_id,
       serre_id,
       observation,
-      tache_id,
-      date,
     } = req.body;
 
     const updatePayload: Record<string, any> = {
-      timestamp: Date.now(),
+      updated_at: new Date().toISOString(),
+      updated_by_id: auth.user.id,
+      updated_by_nom: auth.user.nom,
     };
 
     if (date) updatePayload.date = String(date);
-    if (type) updatePayload.type = type;
-    if (unite !== undefined) updatePayload.unite = unite;
+    if (heure_debut !== undefined) updatePayload.heure_debut = heure_debut || null;
+    if (heure_fin !== undefined) updatePayload.heure_fin = heure_fin || null;
+    if (tache_id !== undefined) updatePayload.tache_id = tache_id || null;
+    if (nom_tache !== undefined) updatePayload.nom_tache = nom_tache ? String(nom_tache).trim() : null;
     if (domaine_id !== undefined) updatePayload.domaine_id = domaine_id || null;
     if (serre_id !== undefined) updatePayload.serre_id = serre_id || null;
     if (observation !== undefined) updatePayload.observation = observation ? String(observation).trim() : null;
-    if (tache_id !== undefined) updatePayload.tache_id = tache_id || null;
 
-    if (quantite !== undefined) {
-      const q = Number(quantite);
-      if (isNaN(q) || q <= 0) {
-        return res.status(400).json({ success: false, error: 'La quantité doit être strictement positive.' });
+    if (duree_heures !== undefined || heures !== undefined) {
+      const dur = Number(duree_heures !== undefined ? duree_heures : heures);
+      if (isNaN(dur) || dur <= 0) {
+        return res.status(400).json({ success: false, error: 'La durée en heures doit être strictement positive.' });
       }
-      updatePayload.quantite = q;
-    }
-
-    if (heures !== undefined) {
-      const h = Number(heures);
-      if (isNaN(h) || h <= 0) {
-        return res.status(400).json({ success: false, error: 'Les heures doivent être strictement positives.' });
-      }
-      updatePayload.heures = h;
-      if (type === 'heures' || (!type && updatePayload.quantite === undefined)) {
-        updatePayload.quantite = h;
-      }
+      updatePayload.duree_heures = Math.round(dur * 100) / 100;
+      updatePayload.heures = updatePayload.duree_heures;
+      updatePayload.quantite = updatePayload.duree_heures;
     }
 
     const { data, error } = await dbClient
@@ -1610,22 +1965,19 @@ app.put('/api/supplementaires/:id', async (req: Request, res: Response) => {
       .select()
       .single();
 
-    if (error) {
-      console.error('Erreur update heures_supplementaires:', error);
-      throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
-    }
+    if (error) throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
 
     return res.json({ success: true, item: data });
   } catch (err: any) {
-    console.error('Erreur PUT /api/supplementaires/:id:', err);
+    console.error('Erreur PUT /api/heures-supplementaires/:id:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 4. DELETE /api/supplementaires/:id : Suppression ciblée d'une opération spécifique
-app.delete('/api/supplementaires/:id', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
-  if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
+// 4. DELETE /api/heures-supplementaires/:id : Suppression ciblée
+app.delete('/api/heures-supplementaires/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
@@ -1633,7 +1985,7 @@ app.delete('/api/supplementaires/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ success: false, error: 'Identifiant d\'opération requis.' });
 
-    const companyId = auth.admin.company_id;
+    const companyId = auth.user.company_id;
     const dbClient = auth.supabaseClient;
 
     const { error } = await dbClient
@@ -1642,16 +1994,333 @@ app.delete('/api/supplementaires/:id', async (req: Request, res: Response) => {
       .eq('id', id)
       .eq('company_id', companyId);
 
-    if (error) {
-      console.error('Erreur delete heures_supplementaires:', error);
-      throw new Error('Erreur suppression PostgreSQL: ' + error.message);
-    }
+    if (error) throw new Error('Erreur suppression PostgreSQL: ' + error.message);
 
-    return res.json({ success: true, message: 'Opération supprimée avec succès.' });
+    return res.json({ success: true, message: 'Heure supplémentaire supprimée avec succès.' });
   } catch (err: any) {
-    console.error('Erreur DELETE /api/supplementaires/:id:', err);
+    console.error('Erreur DELETE /api/heures-supplementaires/:id:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// =========================================================================
+// MODULE 2 : TÂCHES SUPPLÉMENTAIRES (Suivi des travaux en quantités physiques)
+// =========================================================================
+
+// 1. GET /api/taches-supplementaires : Consultation filtrée des tâches sup
+app.get('/api/taches-supplementaires', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const { date, startDate, endDate, ouvrierId, domaineId, serreId, tacheId } = req.query;
+    const companyId = auth.user.company_id;
+    const dbClient = auth.supabaseClient;
+
+    let query = dbClient
+      .from('taches_supplementaires')
+      .select('*')
+      .eq('company_id', companyId);
+
+    if (date) {
+      query = query.eq('date', String(date));
+    } else if (startDate && endDate) {
+      query = query.gte('date', String(startDate)).lte('date', String(endDate));
+    }
+    if (ouvrierId) query = query.eq('ouvrier_id', String(ouvrierId));
+    if (tacheId) query = query.eq('tache_id', String(tacheId));
+    if (domaineId && domaineId !== 'ALL') query = query.eq('domaine_id', String(domaineId));
+    if (serreId && serreId !== 'ALL') query = query.eq('serre_id', String(serreId));
+
+    query = query.order('created_at', { ascending: false });
+
+    const { data, error } = await query;
+    if (error) throw new Error('Erreur lecture taches_supplementaires: ' + error.message);
+
+    return res.json({ success: true, taches_supplementaires: data || [] });
+  } catch (err: any) {
+    console.error('Erreur GET /api/taches-supplementaires:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. POST /api/taches-supplementaires : Enregistrement individuel ou collectif
+app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const {
+      ouvriers,
+      ouvrier_id,
+      numero_ouvrier,
+      date,
+      tache_id,
+      nom_tache,
+      description,
+      quantite,
+      unite,
+      domaine_id,
+      serre_id,
+      observation,
+    } = req.body;
+
+    if (!nom_tache || !unite || !date) {
+      return res.status(400).json({
+        success: false,
+        error: 'Champs obligatoires manquants (nom_tache, unite, date).',
+      });
+    }
+
+    const qty = Number(quantite);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'La quantité réalisée doit être un nombre strictement supérieur à 0.',
+      });
+    }
+
+    const companyId = auth.user.company_id;
+    const dbClient = auth.supabaseClient;
+    const now = new Date();
+
+    // Saisie collective ou individuelle
+    const targets: Array<{ id: string; numero: number }> = [];
+    if (Array.isArray(ouvriers) && ouvriers.length > 0) {
+      for (const w of ouvriers) {
+        if (w.id && w.numero) targets.push({ id: String(w.id), numero: Number(w.numero) });
+      }
+    } else if (ouvrier_id && numero_ouvrier !== undefined) {
+      targets.push({ id: String(ouvrier_id), numero: Number(numero_ouvrier) });
+    }
+
+    if (targets.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Au moins un ouvrier valide doit être sélectionné.',
+      });
+    }
+
+    const insertedItems: any[] = [];
+    for (const w of targets) {
+      const newRecordId = `tsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const rec = {
+        id: newRecordId,
+        company_id: companyId,
+        ouvrier_id: w.id,
+        numero_ouvrier: w.numero,
+        date: String(date),
+        tache_id: tache_id ? String(tache_id) : null,
+        nom_tache: String(nom_tache).trim(),
+        description: description ? String(description).trim() : null,
+        quantite: Math.round(qty * 100) / 100,
+        unite: String(unite).trim().toLowerCase(),
+        domaine_id: domaine_id ? String(domaine_id) : null,
+        serre_id: serre_id ? String(serre_id) : null,
+        observation: observation ? String(observation).trim() : null,
+        created_by_id: auth.user.id,
+        created_by_nom: auth.user.nom,
+        created_by_role: auth.user.role,
+        created_at: now.toISOString(),
+        timestamp: now.getTime(),
+      };
+
+      const { data, error } = await dbClient
+        .from('taches_supplementaires')
+        .insert(rec)
+        .select()
+        .single();
+
+      if (error) throw new Error('Erreur insertion tâche: ' + error.message);
+      insertedItems.push(data || rec);
+    }
+
+    return res.json({
+      success: true,
+      items: insertedItems,
+      count: insertedItems.length,
+      message: `${insertedItems.length} tâche(s) supplémentaire(s) enregistrée(s) avec succès.`,
+    });
+  } catch (err: any) {
+    console.error('Erreur POST /api/taches-supplementaires:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. PUT /api/taches-supplementaires/:id : Modification d'une tâche supplémentaire
+app.put('/api/taches-supplementaires/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ success: false, error: 'Identifiant d\'opération requis.' });
+
+    const companyId = auth.user.company_id;
+    const dbClient = auth.supabaseClient;
+    const {
+      date,
+      quantite,
+      unite,
+      nom_tache,
+      description,
+      tache_id,
+      domaine_id,
+      serre_id,
+      observation,
+    } = req.body;
+
+    const updatePayload: Record<string, any> = {
+      updated_at: new Date().toISOString(),
+      updated_by_id: auth.user.id,
+      updated_by_nom: auth.user.nom,
+    };
+
+    if (date) updatePayload.date = String(date);
+    if (unite !== undefined) updatePayload.unite = String(unite).trim().toLowerCase();
+    if (nom_tache !== undefined) updatePayload.nom_tache = String(nom_tache).trim();
+    if (description !== undefined) updatePayload.description = description ? String(description).trim() : null;
+    if (tache_id !== undefined) updatePayload.tache_id = tache_id || null;
+    if (domaine_id !== undefined) updatePayload.domaine_id = domaine_id || null;
+    if (serre_id !== undefined) updatePayload.serre_id = serre_id || null;
+    if (observation !== undefined) updatePayload.observation = observation ? String(observation).trim() : null;
+
+    if (quantite !== undefined) {
+      const q = Number(quantite);
+      if (isNaN(q) || q <= 0) {
+        return res.status(400).json({ success: false, error: 'La quantité doit être strictement positive.' });
+      }
+      updatePayload.quantite = Math.round(q * 100) / 100;
+    }
+
+    const { data, error } = await dbClient
+      .from('taches_supplementaires')
+      .update(updatePayload)
+      .eq('id', id)
+      .eq('company_id', companyId)
+      .select()
+      .single();
+
+    if (error) throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
+
+    return res.json({ success: true, item: data });
+  } catch (err: any) {
+    console.error('Erreur PUT /api/taches-supplementaires/:id:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. DELETE /api/taches-supplementaires/:id : Suppression ciblée d'une tâche supplémentaire
+app.delete('/api/taches-supplementaires/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ success: false, error: 'Identifiant d\'opération requis.' });
+
+    const companyId = auth.user.company_id;
+    const dbClient = auth.supabaseClient;
+
+    const { error } = await dbClient
+      .from('taches_supplementaires')
+      .delete()
+      .eq('id', id)
+      .eq('company_id', companyId);
+
+    if (error) throw new Error('Erreur suppression PostgreSQL: ' + error.message);
+
+    return res.json({ success: true, message: 'Tâche supplémentaire supprimée avec succès.' });
+  } catch (err: any) {
+    console.error('Erreur DELETE /api/taches-supplementaires/:id:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// =========================================================================
+// RÉTRO-COMPATIBILITÉ : ANCIEN ENDPOINT /api/supplementaires
+// =========================================================================
+
+app.get('/api/supplementaires', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const { date, startDate, endDate, ouvrierId, domaineId, type } = req.query;
+    const companyId = auth.user.company_id;
+    const dbClient = auth.supabaseClient;
+
+    let items: any[] = [];
+    if (!type || type === 'ALL' || type === 'heures') {
+      let q1 = dbClient.from('heures_supplementaires').select('*').eq('company_id', companyId);
+      if (date) q1 = q1.eq('date', String(date));
+      if (startDate && endDate) q1 = q1.gte('date', String(startDate)).lte('date', String(endDate));
+      if (ouvrierId) q1 = q1.eq('ouvrier_id', String(ouvrierId));
+      if (domaineId && domaineId !== 'ALL') q1 = q1.eq('domaine_id', String(domaineId));
+      const { data: hData } = await q1;
+      if (hData) items = items.concat(hData.map((h: any) => ({ ...h, type: 'heures', quantite: h.duree_heures || h.heures, heures: h.duree_heures || h.heures, unite: 'heure' })));
+    }
+
+    if (!type || type === 'ALL' || type === 'tache') {
+      let q2 = dbClient.from('taches_supplementaires').select('*').eq('company_id', companyId);
+      if (date) q2 = q2.eq('date', String(date));
+      if (startDate && endDate) q2 = q2.gte('date', String(startDate)).lte('date', String(endDate));
+      if (ouvrierId) q2 = q2.eq('ouvrier_id', String(ouvrierId));
+      if (domaineId && domaineId !== 'ALL') q2 = q2.eq('domaine_id', String(domaineId));
+      const { data: tData } = await q2;
+      if (tData) items = items.concat(tData.map((t: any) => ({ ...t, type: 'tache' })));
+    }
+
+    items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    return res.json({ success: true, supplementaires: items });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/supplementaires', async (req: Request, res: Response) => {
+  const { type } = req.body;
+  if (type === 'tache') {
+    req.url = '/api/taches-supplementaires';
+    return (app as any)._router.handle(req, res);
+  } else {
+    req.url = '/api/heures-supplementaires';
+    return (app as any)._router.handle(req, res);
+  }
+});
+
+app.put('/api/supplementaires/:id', async (req: Request, res: Response) => {
+  const { type } = req.body;
+  if (type === 'tache') {
+    req.url = `/api/taches-supplementaires/${req.params.id}`;
+    return (app as any)._router.handle(req, res);
+  } else {
+    req.url = `/api/heures-supplementaires/${req.params.id}`;
+    return (app as any)._router.handle(req, res);
+  }
+});
+
+app.delete('/api/supplementaires/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+  const { id } = req.params;
+  const dbClient = auth.supabaseClient;
+  const companyId = auth.user.company_id;
+  await dbClient.from('heures_supplementaires').delete().eq('id', id).eq('company_id', companyId);
+  await dbClient.from('taches_supplementaires').delete().eq('id', id).eq('company_id', companyId);
+  return res.json({ success: true, message: 'Opération supprimée.' });
 });
 
 // Initialisation du serveur selon le mode (Dev avec Vite ou Prod avec static)

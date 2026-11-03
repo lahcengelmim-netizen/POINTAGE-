@@ -32,9 +32,11 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Création d'un set des produits déjà existants pour identification visuelle et anti-doublon
+  // Création d'un set des produits ayant DÉJÀ un stock initial enregistré
   const alreadyInitializedKeys = new Set(
-    existingProduits.map((p) => `${p.produit.nom.trim().toUpperCase()}_${p.produit.unite.trim().toUpperCase()}`)
+    existingProduits
+      .filter((p) => typeof p.stock_initial === 'number' && p.stock_initial > 0)
+      .map((p) => `${p.produit.nom.trim().toUpperCase()}_${p.produit.unite.trim().toUpperCase()}`)
   );
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -205,7 +207,7 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
                         </span>
                         {isAlreadyInit ? (
                           <span className="block text-[9px] text-amber-700 font-bold mt-0.5">
-                            Produit déjà existant
+                            Stock initial déjà enregistré
                           </span>
                         ) : (
                           <span className="block text-[9px] text-emerald-600 font-bold mt-0.5">

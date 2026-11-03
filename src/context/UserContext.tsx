@@ -7,6 +7,7 @@ interface UserContextType {
   user: UserAccount | null;
   loading: boolean;
   login: (usernameOrEmail: string, code: string) => Promise<UserAccount>;
+  loginWithBiometrics: (userId?: string) => Promise<UserAccount>;
   logout: () => Promise<void>;
 }
 
@@ -26,12 +27,22 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
         .maybeSingle();
 
       if (profile) {
+        let userCompId = profile.company_id;
+        if (!userCompId) {
+          const { data: comp } = await supabase.from('companies').select('id').limit(1);
+          if (comp && comp.length > 0 && comp[0].id) {
+            userCompId = comp[0].id;
+          } else {
+            userCompId = 'cie_lahcen_pointeur';
+          }
+        }
+
         const userAcc: UserAccount = {
           id: profile.id,
           username: profile.username || authUser?.email?.split('@')[0] || 'user',
           nom: profile.nom || 'Utilisateur',
           role: profile.role || 'caporal',
-          company_id: profile.company_id || 'cie_lahcen_pointeur',
+          company_id: userCompId,
           actif: profile.actif !== false,
           createdAt: profile.created_at || new Date().toISOString(),
         };
@@ -146,6 +157,28 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return profile;
   };
 
+  const loginWithBiometrics = async (userId?: string): Promise<UserAccount> => {
+    const { authenticateWithBiometrics } = await import('../services/webAuthnService');
+    const storedCred = await authenticateWithBiometrics(userId);
+
+    // Vérifier la session Supabase ou récupérer le profil directement
+    const { data: { session } } = await supabase.auth.getSession();
+    let profile: UserAccount | null = null;
+
+    if (session && session.user.id === storedCred.userId) {
+      profile = await fetchProfile(session.user.id, session.user);
+    } else {
+      profile = await fetchProfile(storedCred.userId);
+    }
+
+    if (!profile) {
+      throw new Error('Lecture biométrique validée, mais session introuvable. Veuillez vous reconnecter par e-mail.');
+    }
+
+    setUser(profile);
+    return profile;
+  };
+
   const logout = async () => {
     await supabase.auth.signOut();
     setUser(null);
@@ -153,7 +186,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <UserContext.Provider value={{ user, loading, login, logout }}>
+    <UserContext.Provider value={{ user, loading, login, loginWithBiometrics, logout }}>
       {children}
     </UserContext.Provider>
   );

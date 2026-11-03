@@ -55,6 +55,7 @@ import {
   TypeSupplementaire,
   UserAccount,
 } from '../types';
+import { syncAndFetchHeuresSupplementairesServer } from '../services/heuresSupplementairesService';
 
 export interface HeuresSuppDetailItem {
   item: HeureSupplementaire;
@@ -98,13 +99,13 @@ interface HeuresSupplementairesModalProps {
       updated_by_id?: string | null;
       updated_by_nom?: string | null;
     }
-  ) => {
+  ) => Promise<{
     success: boolean;
     message?: string;
     item?: HeureSupplementaire;
     isUpdated?: boolean;
-  };
-  onRemoveHeureSupp: (id: string) => void;
+  }>;
+  onRemoveHeureSupp: (id: string) => Promise<{ success: boolean; message?: string }>;
   selectedDate: string;
 }
 
@@ -184,11 +185,14 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
   // --- CONFIRMATION DE SUPPRESSION ---
   const [deletingEntry, setDeletingEntry] = useState<HeureSupplementaire | null>(null);
 
+  // --- VERROU ANTI-DOUBLE CLIC & SOUMISSION ---
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
   // --- NOTIFICATIONS UTILISATEUR ---
   const [bannerSuccess, setBannerSuccess] = useState<string | null>(null);
   const [bannerError, setBannerError] = useState<string | null>(null);
 
-  // Synchronisation avec la date active lors de l'ouverture
+  // Synchronisation avec la date active et chargement des enregistrements depuis le serveur lors de l'ouverture
   useEffect(() => {
     if (isOpen) {
       setHDate(selectedDate);
@@ -196,8 +200,24 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
       setRecapDate(selectedDate);
       setRecapStartDate(selectedDate);
       setRecapEndDate(selectedDate);
+
+      // Charger et fusionner les enregistrements du serveur
+      const filters = recapMode === 'jour'
+        ? { date: selectedDate }
+        : { startDate: selectedDate, endDate: selectedDate };
+      syncAndFetchHeuresSupplementairesServer(filters).catch(() => {});
     }
   }, [isOpen, selectedDate]);
+
+  // Synchronisation serveur lors du changement des filtres du récapitulatif
+  useEffect(() => {
+    if (isOpen) {
+      const filters = recapMode === 'jour'
+        ? { date: recapDate }
+        : { startDate: recapStartDate, endDate: recapEndDate };
+      syncAndFetchHeuresSupplementairesServer(filters).catch(() => {});
+    }
+  }, [isOpen, recapMode, recapDate, recapStartDate, recapEndDate]);
 
   // Nettoyage temporisé des alertes
   useEffect(() => {
@@ -304,8 +324,9 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
   // -------------------------------------------------------------
   // SOUMISSION SECTION A : HEURES SUPPLÉMENTAIRES
   // -------------------------------------------------------------
-  const handleSubmitHeures = (e: React.FormEvent) => {
+  const handleSubmitHeures = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setBannerError(null);
 
     if (!hConfirmedWorker) {
@@ -315,40 +336,48 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
 
     const heuresVal = parseFloat(hNbHeures);
     if (isNaN(heuresVal) || heuresVal <= 0) {
-      setBannerError('Le nombre d\'heures supplémentaires est obligatoire et doit être strictement supérieur à 0.');
+      setBannerError('Le nombre d\'heures supplémentaires est obligatoire et doit être strictly supérieur à 0.');
       return;
     }
 
-    const res = onSaveHeureSupp(hConfirmedWorker.id, {
-      date: hDate,
-      type: 'heures',
-      quantite: heuresVal,
-      heures: heuresVal,
-      unite: 'HEURE',
-      domaine_id: hDomaineId || null,
-      serre_id: hSerreId || null,
-      observation: hObservation.trim() || null,
-      created_by_id: currentUser?.id || null,
-      created_by_nom: currentUser?.nom || 'Administrateur',
-    });
+    setIsSubmitting(true);
+    try {
+      const res = await onSaveHeureSupp(hConfirmedWorker.id, {
+        date: hDate,
+        type: 'heures',
+        quantite: heuresVal,
+        heures: heuresVal,
+        unite: 'HEURE',
+        domaine_id: hDomaineId || null,
+        serre_id: hSerreId || null,
+        observation: hObservation.trim() || null,
+        created_by_id: currentUser?.id || null,
+        created_by_nom: currentUser?.nom || 'Administrateur',
+      });
 
-    if (res.success) {
-      setBannerSuccess(`Heures sup. enregistrées avec succès pour #${hConfirmedWorker.numero} ${hConfirmedWorker.nom} (${heuresVal} H).`);
-      // Réinitialiser le formulaire pour saisie fluide de l'ouvrier suivant
-      setHWorkerNumInput('');
-      setHConfirmedWorker(null);
-      setHNbHeures('');
-      setHObservation('');
-    } else {
-      setBannerError(res.message || 'Erreur lors de l\'enregistrement des heures supplémentaires.');
+      if (res.success) {
+        setBannerSuccess(`Heures sup. enregistrées avec succès pour #${hConfirmedWorker.numero} ${hConfirmedWorker.nom} (${heuresVal} H).`);
+        // Réinitialiser le formulaire pour saisie fluide de l'ouvrier suivant
+        setHWorkerNumInput('');
+        setHConfirmedWorker(null);
+        setHNbHeures('');
+        setHObservation('');
+      } else {
+        setBannerError(res.message || 'Erreur lors de l\'enregistrement des heures supplémentaires.');
+      }
+    } catch (err: any) {
+      setBannerError(err.message || 'Erreur de connexion au serveur.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   // -------------------------------------------------------------
   // SOUMISSION SECTION B : TÂCHES SUPPLÉMENTAIRES
   // -------------------------------------------------------------
-  const handleSubmitTaches = (e: React.FormEvent) => {
+  const handleSubmitTaches = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setBannerError(null);
 
     if (!tConfirmedWorker) {
@@ -378,30 +407,36 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
       return;
     }
 
-    const res = onSaveHeureSupp(tConfirmedWorker.id, {
-      date: tDate,
-      type: 'tache',
-      tache_id: tSelectedTacheId || null,
-      nom_tache: resolvedTacheNom,
-      quantite: qteVal,
-      unite: finalUnite,
-      domaine_id: tDomaineId || null,
-      serre_id: tSerreId || null,
-      observation: tObservation.trim() || null,
-      created_by_id: currentUser?.id || null,
-      created_by_nom: currentUser?.nom || 'Administrateur',
-    });
+    setIsSubmitting(true);
+    try {
+      const res = await onSaveHeureSupp(tConfirmedWorker.id, {
+        date: tDate,
+        type: 'tache',
+        tache_id: tSelectedTacheId || null,
+        nom_tache: resolvedTacheNom,
+        quantite: qteVal,
+        unite: finalUnite,
+        domaine_id: tDomaineId || null,
+        serre_id: tSerreId || null,
+        observation: tObservation.trim() || null,
+        created_by_id: currentUser?.id || null,
+        created_by_nom: currentUser?.nom || 'Administrateur',
+      });
 
-    if (res.success) {
-      setBannerSuccess(`Tâche sup. enregistrée : #${tConfirmedWorker.numero} ${tConfirmedWorker.nom} — ${qteVal} ${finalUnite} ${resolvedTacheNom}.`);
-      setTWorkerNumInput('');
-      setTConfirmedWorker(null);
-      setTQuantite('');
-      setTObservation('');
-      setTCustomNomTache('');
-    } else {
-      setBannerError(res.message || 'Erreur lors de l\'enregistrement de la tâche supplémentaire.');
-    }
+      if (res.success) {
+        setBannerSuccess(`Tâche sup. enregistrée : #${tConfirmedWorker.numero} ${tConfirmedWorker.nom} — ${qteVal} ${finalUnite} ${resolvedTacheNom}.`);
+        setTWorkerNumInput('');
+        setTConfirmedWorker(null);
+        setTQuantite('');
+        setTObservation('');
+        setTCustomNomTache('');
+      } else {
+        setBannerError(res.message || 'Erreur lors de l\'enregistrement de la tâche supplémentaire.');
+      }
+    } catch (err: any) {
+      setBannerError(err.message || 'Erreur de connexion au serveur.');
+    } finally {
+      setIsSubmitting(false);
   };
 
   // -------------------------------------------------------------
@@ -420,7 +455,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
         map.set(d.item.id, d.item);
       }
     });
-    return Array.from(map.values()).sort((a, b) => b.timestamp - a.timestamp);
+    return Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [allHeuresSupplementaires, heuresSuppDetails]);
 
   // Filtrage selon la date ou période
@@ -600,9 +635,9 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
     setEditObservation(op.observation || '');
   };
 
-  const handleSaveEdit = (e: React.FormEvent) => {
+  const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingEntry) return;
+    if (!editingEntry || isSubmitting) return;
 
     const qteNum = parseFloat(editQuantite);
     if (isNaN(qteNum) || qteNum <= 0) {
@@ -612,38 +647,56 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
 
     const opType: TypeSupplementaire = editingEntry.type || (editingEntry.tache_id ? 'tache' : 'heures');
 
-    const res = onSaveHeureSupp(editingEntry.ouvrier_id, {
-      id: editingEntry.id,
-      date: editDate,
-      type: opType,
-      tache_id: opType === 'tache' ? (editTacheId || null) : null,
-      nom_tache: opType === 'tache' ? (editNomTache.trim() || null) : null,
-      quantite: qteNum,
-      heures: opType === 'heures' ? qteNum : null,
-      unite: editUnite.trim().toUpperCase(),
-      domaine_id: editDomaineId || null,
-      serre_id: editSerreId || null,
-      observation: editObservation.trim() || null,
-      updated_by_id: currentUser?.id || null,
-      updated_by_nom: currentUser?.nom || 'Administrateur',
-    });
+    setIsSubmitting(true);
+    try {
+      const res = await onSaveHeureSupp(editingEntry.ouvrier_id, {
+        id: editingEntry.id,
+        date: editDate,
+        type: opType,
+        tache_id: opType === 'tache' ? (editTacheId || null) : null,
+        nom_tache: opType === 'tache' ? (editNomTache.trim() || null) : null,
+        quantite: qteNum,
+        heures: opType === 'heures' ? qteNum : null,
+        unite: editUnite.trim().toUpperCase(),
+        domaine_id: editDomaineId || null,
+        serre_id: editSerreId || null,
+        observation: editObservation.trim() || null,
+        updated_by_id: currentUser?.id || null,
+        updated_by_nom: currentUser?.nom || 'Administrateur',
+      });
 
-    if (res.success) {
-      setBannerSuccess('Opération mise à jour avec succès.');
-      setEditingEntry(null);
-    } else {
-      setBannerError(res.message || 'Erreur lors de la mise à jour.');
+      if (res.success) {
+        setBannerSuccess('Opération mise à jour avec succès.');
+        setEditingEntry(null);
+      } else {
+        setBannerError(res.message || 'Erreur lors de la mise à jour.');
+      }
+    } catch (err: any) {
+      setBannerError(err.message || 'Erreur lors de la modification sur le serveur.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   // -------------------------------------------------------------
   // GESTION DES SUPPRESSIONS CIBLÉES
   // -------------------------------------------------------------
-  const handleConfirmDelete = () => {
-    if (!deletingEntry) return;
-    onRemoveHeureSupp(deletingEntry.id);
-    setBannerSuccess('Opération supprimée avec succès.');
-    setDeletingEntry(null);
+  const handleConfirmDelete = async () => {
+    if (!deletingEntry || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      const res = await onRemoveHeureSupp(deletingEntry.id);
+      if (res && res.success === false) {
+        setBannerError(res.message || 'Erreur lors de la suppression sur le serveur.');
+      } else {
+        setBannerSuccess('Opération supprimée avec succès.');
+        setDeletingEntry(null);
+      }
+    } catch (err: any) {
+      setBannerError(err.message || 'Erreur de connexion lors de la suppression.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -984,11 +1037,11 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                 {/* Bouton de validation */}
                 <button
                   type="submit"
-                  disabled={!hConfirmedWorker || !hNbHeures || parseFloat(hNbHeures) <= 0}
+                  disabled={isSubmitting || !hConfirmedWorker || !hNbHeures || parseFloat(hNbHeures) <= 0}
                   className="w-full py-3.5 px-4 bg-linear-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400 text-slate-950 font-black text-sm rounded-2xl shadow-sm transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <Save className="w-4 h-4" />
-                  Enregistrer l'heure supplémentaire
+                  <span>{isSubmitting ? 'Enregistrement en cours...' : 'Enregistrer l\'heure supplémentaire'}</span>
                 </button>
               </form>
             </div>
@@ -1252,11 +1305,11 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                 {/* Bouton de validation */}
                 <button
                   type="submit"
-                  disabled={!tConfirmedWorker || !tQuantite || parseFloat(tQuantite) <= 0 || (!tSelectedTacheId && !tCustomNomTache.trim())}
+                  disabled={isSubmitting || !tConfirmedWorker || !tQuantite || parseFloat(tQuantite) <= 0 || (!tSelectedTacheId && !tCustomNomTache.trim())}
                   className="w-full py-3.5 px-4 bg-linear-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400 text-white font-black text-sm rounded-2xl shadow-sm transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <Save className="w-4 h-4" />
-                  Enregistrer la tâche supplémentaire
+                  <span>{isSubmitting ? 'Enregistrement en cours...' : 'Enregistrer la tâche supplémentaire'}</span>
                 </button>
               </form>
             </div>
@@ -1937,4 +1990,5 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
       )}
     </div>
   );
+};
 };

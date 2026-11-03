@@ -360,15 +360,24 @@ DROP POLICY IF EXISTS "stock_mvt_delete" ON public.stock_mouvements;
 -- 8. DÉFINITION EXPLICITE DES POLITIQUES RLS PAR OPÉRATION
 -- ---------------------------------------------------------------------
 
--- A. Table COMPANIES (Zero création client)
+-- A. Table COMPANIES
 CREATE POLICY "companies_select" ON public.companies
   FOR SELECT TO authenticated
-  USING (id = public.get_my_company_id() AND public.is_active_user());
+  USING ((id = public.get_my_company_id() AND public.is_active_user()) OR public.is_admin());
+
+CREATE POLICY "companies_insert" ON public.companies
+  FOR INSERT TO authenticated
+  WITH CHECK (public.is_admin());
 
 CREATE POLICY "companies_update" ON public.companies
   FOR UPDATE TO authenticated
-  USING (id = public.get_my_company_id() AND public.is_admin())
-  WITH CHECK (id = public.get_my_company_id() AND public.is_admin());
+  USING ((id = public.get_my_company_id() AND public.is_admin()) OR public.is_admin())
+  WITH CHECK ((id = public.get_my_company_id() AND public.is_admin()) OR public.is_admin());
+
+-- Société par défaut (Exploitation Lahcen Pointeur)
+INSERT INTO public.companies (id, nom, code, ville)
+VALUES ('cie_lahcen_pointeur', 'Exploitation Agricole Lahcen Pointeur', 'LAH', 'Guelmim')
+ON CONFLICT (id) DO NOTHING;
 
 -- B. Table PROFILES
 CREATE POLICY "profiles_select" ON public.profiles

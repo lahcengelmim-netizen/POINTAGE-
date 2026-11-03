@@ -16,10 +16,22 @@ import {
   User,
   LogOut,
   Package,
+  Clock,
+  ClipboardList,
 } from 'lucide-react';
 import { UserRole } from '../types';
 
-export type ActiveScreen = 'pointage' | 'taches' | 'absences' | 'recolte' | 'stock' | 'gazoil' | 'recap' | 'gestion';
+export type ActiveScreen =
+  | 'pointage'
+  | 'taches'
+  | 'absences'
+  | 'recolte'
+  | 'stock'
+  | 'gazoil'
+  | 'recap'
+  | 'gestion'
+  | 'heures_supp'
+  | 'taches_supp';
 
 interface NavigationProps {
   activeScreen: ActiveScreen;
@@ -38,33 +50,61 @@ export const Navigation: React.FC<NavigationProps> = ({
   currentUserRole = 'admin',
   onOpenAccountModal,
 }) => {
-  // Navigation restreinte pour le rôle Caporal : UNIQUEMENT Récolte et Mon Compte
+  // Navigation pour le rôle Caporal : Récolte (Chargement/Déchargement), Heures Sup, Tâches Sup, et Mon Compte
   if (currentUserRole === 'caporal') {
     return (
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-xl px-3 py-2 pb-safe">
-        <div className="max-w-md mx-auto grid grid-cols-2 gap-2">
-          {/* Module unique Récolte */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-xl px-2 py-1.5 pb-safe">
+        <div className="max-w-md mx-auto grid grid-cols-4 gap-1.5">
+          {/* Module 1 : Récolte, Chargement & Déchargement */}
           <button
             type="button"
             onClick={() => onSelectScreen('recolte')}
-            className={`flex items-center justify-center gap-2 py-3 px-3 rounded-2xl transition active:scale-95 ${
+            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl transition active:scale-95 ${
               activeScreen === 'recolte'
                 ? 'text-emerald-950 bg-emerald-100 font-black shadow-xs border border-emerald-300'
-                : 'text-slate-600 bg-slate-50 font-bold'
+                : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
             }`}
           >
-            <Grape className="w-5 h-5 text-emerald-700" />
-            <span className="text-xs">Module Récolte</span>
+            <Grape className="w-5 h-5 text-emerald-700 mb-0.5" />
+            <span className="text-[10px] leading-tight text-center">Récolte</span>
           </button>
 
-          {/* Déconnexion / Mon Compte */}
+          {/* Module 2 : Heures Supplémentaires */}
+          <button
+            type="button"
+            onClick={() => onSelectScreen('heures_supp')}
+            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl transition active:scale-95 ${
+              activeScreen === 'heures_supp'
+                ? 'text-amber-950 bg-amber-100 font-black shadow-xs border border-amber-300'
+                : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
+            }`}
+          >
+            <Clock className="w-5 h-5 text-amber-700 mb-0.5" />
+            <span className="text-[10px] leading-tight text-center">Heures Sup</span>
+          </button>
+
+          {/* Module 3 : Tâches Supplémentaires */}
+          <button
+            type="button"
+            onClick={() => onSelectScreen('taches_supp')}
+            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl transition active:scale-95 ${
+              activeScreen === 'taches_supp'
+                ? 'text-blue-950 bg-blue-100 font-black shadow-xs border border-blue-300'
+                : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
+            }`}
+          >
+            <ClipboardList className="w-5 h-5 text-blue-700 mb-0.5" />
+            <span className="text-[10px] leading-tight text-center">Tâches Sup</span>
+          </button>
+
+          {/* Mon Compte */}
           <button
             type="button"
             onClick={onOpenAccountModal}
-            className="flex items-center justify-center gap-2 py-3 px-3 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-95"
+            className="flex flex-col items-center justify-center py-2 px-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-95"
           >
-            <User className="w-4 h-4 text-slate-600" />
-            <span className="text-xs">Mon Compte</span>
+            <User className="w-5 h-5 text-slate-600 mb-0.5" />
+            <span className="text-[10px] leading-tight text-center">Mon Compte</span>
           </button>
         </div>
       </nav>

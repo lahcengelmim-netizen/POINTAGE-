@@ -20,6 +20,12 @@ import {
 } from '../types';
 import * as storage from '../services/storage';
 import { generateWhatsAppRecap } from '../utils/whatsappFormatter';
+import {
+  syncAndFetchHeuresSupplementairesServer,
+  createHeureSupplementaireServer,
+  updateHeureSupplementaireServer,
+  deleteHeureSupplementaireServer,
+} from '../services/heuresSupplementairesService';
 
 export function getTodayIsoDate(): string {
   const now = new Date();
@@ -105,6 +111,11 @@ export function useAgriPointage() {
     void updateTick;
     return storage.getAllHeuresSupplementaires(activeCompanyId);
   }, [activeCompanyId, updateTick]);
+
+  // Synchronisation des heures supplémentaires depuis le serveur au chargement et changement de date
+  useEffect(() => {
+    syncAndFetchHeuresSupplementairesServer({ date: selectedDate }).catch(() => {});
+  }, [selectedDate, activeCompanyId]);
 
   // Affectations de tâches pour la société et la date sélectionnée
   const affectations = useMemo(() => {
@@ -395,7 +406,7 @@ export function useAgriPointage() {
 
   // Enregistrer ou modifier une entrée en heures supplémentaires (par heures ou par tâche)
   const saveHeureSupp = useCallback(
-    (
+    async (
       ouvrierId: string,
       data: {
         id?: string;
@@ -414,37 +425,100 @@ export function useAgriPointage() {
         updated_by_id?: string | null;
         updated_by_nom?: string | null;
       }
-    ): { success: boolean; message?: string; item?: HeureSupplementaire; isUpdated?: boolean } => {
+    ): Promise<{ success: boolean; message?: string; item?: HeureSupplementaire; isUpdated?: boolean }> => {
       const targetDate = data.date || selectedDate;
-      const res = storage.saveHeureSupplementaire(activeCompanyId, ouvrierId, targetDate, data);
-      if (res.success) {
+      const ouvrier = activeOuvriers.find((o) => o.id === ouvrierId) || allOuvriers.find((o) => o.id === ouvrierId);
+
+      // Si un ID est fourni -> Modification sur le serveur
+      if (data.id) {
+        const sRes = await updateHeureSupplementaireServer(data.id, {
+          type: data.type,
+          tache_id: data.tache_id,
+          nom_tache: data.nom_tache,
+          quantite: data.quantite,
+          unite: data.unite,
+          heures: data.heures,
+          domaine_id: data.domaine_id,
+          serre_id: data.serre_id,
+          observation: data.observation,
+          date: targetDate,
+        });
+
+        if (!sRes.success) {
+          return { success: false, message: sRes.error || 'Erreur lors de la mise à jour sur le serveur.' };
+        }
+
+        const localRes = storage.saveHeureSupplementaire(activeCompanyId, ouvrierId, targetDate, data);
         return {
           success: true,
-          item: res.item,
-          isUpdated: res.isUpdated,
-          message: res.isUpdated ? 'Opération mise à jour avec succès !' : 'Opération enregistrée avec succès !',
+          item: sRes.item || localRes.item,
+          isUpdated: true,
+          message: 'Opération mise à jour avec succès !',
+        };
+      } else {
+        // Sinon -> Création sur le serveur
+        if (!ouvrier) {
+          return { success: false, message: 'Ouvrier introuvable dans cette exploitation.' };
+        }
+
+        const sRes = await createHeureSupplementaireServer({
+          ouvrier_id: ouvrierId,
+          numero_ouvrier: ouvrier.numero,
+          date: targetDate,
+          type: data.type,
+          tache_id: data.tache_id,
+          nom_tache: data.nom_tache,
+          quantite: data.quantite,
+          unite: data.unite,
+          heures: data.heures,
+          domaine_id: data.domaine_id,
+          serre_id: data.serre_id,
+          observation: data.observation,
+        });
+
+        if (!sRes.success) {
+          return { success: false, message: sRes.error || 'Erreur lors de l\'enregistrement sur le serveur.' };
+        }
+
+        const itemToSave = sRes.item || data;
+        const localRes = storage.saveHeureSupplementaire(activeCompanyId, ouvrierId, targetDate, {
+          ...data,
+          id: sRes.item?.id,
+        });
+
+        return {
+          success: true,
+          item: sRes.item || localRes.item,
+          isUpdated: false,
+          message: 'Opération enregistrée avec succès !',
         };
       }
-      return { success: false, message: res.error || 'Erreur lors de l\'enregistrement.' };
     },
-    [activeCompanyId, selectedDate]
+    [activeCompanyId, selectedDate, activeOuvriers, allOuvriers]
   );
 
   // Enregistrer une entrée en heures supplémentaires (rétro-compatibilité)
   const pointHeuresSupp = useCallback(
-    (ouvrierId: string, heures?: number | null): { success: boolean; message?: string } => {
-      const res = storage.addHeureSupplementaire(activeCompanyId, ouvrierId, selectedDate, heures);
-      if (res.success) {
-        return { success: true, message: 'Heures supplémentaires enregistrées avec succès !' };
-      }
-      return { success: false, message: res.error || 'Erreur lors de l\'enregistrement.' };
+    async (ouvrierId: string, heures?: number | null): Promise<{ success: boolean; message?: string }> => {
+      const res = await saveHeureSupp(ouvrierId, {
+        type: 'heures',
+        quantite: heures,
+        heures,
+        unite: 'HEURE',
+      });
+      return { success: res.success, message: res.message };
     },
-    [activeCompanyId, selectedDate]
+    [saveHeureSupp]
   );
 
   // Supprimer une entrée en heures supplémentaires
-  const removeHeureSupp = useCallback((id: string) => {
+  const removeHeureSupp = useCallback(async (id: string): Promise<{ success: boolean; message?: string }> => {
+    const sRes = await deleteHeureSupplementaireServer(id);
+    if (!sRes.success) {
+      return { success: false, message: sRes.error || 'Erreur lors de la suppression sur le serveur.' };
+    }
     storage.deleteHeureSupplementaire(id);
+    return { success: true, message: 'Opération supprimée avec succès.' };
   }, []);
 
   // Changer de société

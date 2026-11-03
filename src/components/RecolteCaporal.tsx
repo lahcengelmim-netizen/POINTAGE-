@@ -52,12 +52,22 @@ interface RecolteCaporalProps {
       nom_ouvrier: string;
       caisses: number;
       notes?: string;
+      type_operation?: 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT';
+      domaine_id?: string | null;
     }>,
     author: { id: string; nom: string }
   ) => { success: boolean; error?: string; count: number; added: RecolteEntry[] };
   onUpdateRecolte: (
     id: string,
-    partial: { caisses?: number; notes?: string; date?: string; serre_id?: string; serre_nom?: string },
+    partial: {
+      caisses?: number;
+      notes?: string;
+      date?: string;
+      serre_id?: string;
+      serre_nom?: string;
+      type_operation?: 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT';
+      domaine_id?: string | null;
+    },
     updatedBy: { id: string; nom: string }
   ) => { success: boolean; error?: string; entry?: RecolteEntry };
   onDeleteRecolte: (id: string) => { success: boolean; error?: string };
@@ -76,6 +86,9 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
   onDeleteRecolte,
   onSync,
 }) => {
+  // Type d'opération sélectionné : Récolte (par défaut), Chargement, ou Déchargement
+  const [operationType, setOperationType] = useState<'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT'>('RECOLTE');
+
   // Mode d'affichage principal : 'saisie' (Assistant 3 étapes) ou 'historique' (Mes Saisies du jour)
   const [mainView, setMainView] = useState<'saisie' | 'historique'>('saisie');
 
@@ -298,6 +311,8 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
       numero_ouvrier: number;
       nom_ouvrier: string;
       caisses: number;
+      type_operation?: 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT';
+      domaine_id?: string | null;
     }> = [];
 
     selectedWorkersList.forEach((worker) => {
@@ -312,6 +327,8 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
             numero_ouvrier: worker.numero,
             nom_ouvrier: worker.nom,
             caisses: qty,
+            type_operation: operationType,
+            domaine_id: 'dom_d2',
           });
         }
       });
@@ -579,6 +596,43 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
       {/* ========================================================================================= */}
       {mainView === 'saisie' && (
         <div className="space-y-3">
+          {/* SÉLECTEUR DU TYPE D'OPÉRATION : RÉCOLTE, CHARGEMENT, DÉCHARGEMENT */}
+          <div className="bg-white p-1 rounded-2xl border border-slate-200 shadow-xs grid grid-cols-3 gap-1 text-xs font-bold">
+            <button
+              type="button"
+              onClick={() => setOperationType('RECOLTE')}
+              className={`py-2 rounded-xl transition flex items-center justify-center gap-1.5 ${
+                operationType === 'RECOLTE'
+                  ? 'bg-emerald-600 text-white shadow-xs font-black'
+                  : 'text-slate-600 hover:bg-slate-100 font-semibold'
+              }`}
+            >
+              <span>🍇 Récolte</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setOperationType('CHARGEMENT')}
+              className={`py-2 rounded-xl transition flex items-center justify-center gap-1.5 ${
+                operationType === 'CHARGEMENT'
+                  ? 'bg-blue-600 text-white shadow-xs font-black'
+                  : 'text-slate-600 hover:bg-slate-100 font-semibold'
+              }`}
+            >
+              <span>🚚 Chargement</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setOperationType('DECHARGEMENT')}
+              className={`py-2 rounded-xl transition flex items-center justify-center gap-1.5 ${
+                operationType === 'DECHARGEMENT'
+                  ? 'bg-amber-600 text-white shadow-xs font-black'
+                  : 'text-slate-600 hover:bg-slate-100 font-semibold'
+              }`}
+            >
+              <span>📦 Déchargement</span>
+            </button>
+          </div>
+
           {/* BARRE D'AVANCEMENT EN 3 ÉTAPES CLAIRES */}
           <div className="bg-white rounded-2xl p-2 border border-slate-200 shadow-xs grid grid-cols-3 gap-1 text-center">
             <button
@@ -1110,7 +1164,22 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
                         #{entry.numero_ouvrier}
                       </span>
                       <div className="min-w-0">
-                        <p className="font-black text-slate-900 truncate">{entry.nom_ouvrier}</p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <p className="font-black text-slate-900 truncate">{entry.nom_ouvrier}</p>
+                          {entry.type_operation === 'CHARGEMENT' ? (
+                            <span className="text-[9px] font-black bg-blue-100 text-blue-900 border border-blue-200 px-1.5 py-0.2 rounded-md">
+                              🚚 Chargement
+                            </span>
+                          ) : entry.type_operation === 'DECHARGEMENT' ? (
+                            <span className="text-[9px] font-black bg-amber-100 text-amber-900 border border-amber-200 px-1.5 py-0.2 rounded-md">
+                              📦 Déchargement
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-black bg-emerald-100 text-emerald-900 border border-emerald-200 px-1.5 py-0.2 rounded-md">
+                              🍇 Récolte
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[10px] text-slate-500 truncate font-medium">
                           {entry.serre_nom}
                           {entry.notes ? ` • "${entry.notes}"` : ''}

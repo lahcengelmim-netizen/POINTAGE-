@@ -10,6 +10,7 @@ import {
   Pointage,
   Domaine,
   HeureSupplementaire,
+  TacheSupplementaire,
   TypeSupplementaire,
   GazoilMouvement,
   GazoilConfig,
@@ -19,6 +20,7 @@ import {
   UserRole,
   Serre,
   RecolteEntry,
+  RecolteOperationType,
   RecolteFilter,
   RecolteStats,
 } from '../types';
@@ -35,6 +37,7 @@ export const STORAGE_KEYS = {
   POINTAGES: 'agripointage_pointages_v1',
   AFFECTATIONS: 'agripointage_affectations_v1',
   HEURES_SUPP: 'agripointage_heures_supp_v1',
+  TACHES_SUPP: 'agripointage_taches_supp_v1',
   GAZOIL_CONFIG: 'agripointage_gazoil_config_v1',
   GAZOIL_MOUVEMENTS: 'agripointage_gazoil_mouvements_v1',
   LAST_BACKUP_DATE: 'agripointage_last_backup_date_v1',
@@ -1368,7 +1371,7 @@ export function getHeuresSupplementaires(companyId: string, date: string): Heure
     const all: HeureSupplementaire[] = raw ? JSON.parse(raw) : [];
     return all
       .filter((h) => h.company_id === companyId && h.date === date)
-      .sort((a, b) => b.timestamp - a.timestamp);
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   } catch {
     return [];
   }
@@ -1389,9 +1392,37 @@ export function getAllHeuresSupplementaires(companyId: string): HeureSupplementa
     const all: HeureSupplementaire[] = raw ? JSON.parse(raw) : [];
     return all
       .filter((h) => h.company_id === companyId)
-      .sort((a, b) => b.timestamp - a.timestamp);
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   } catch {
     return [];
+  }
+}
+
+export function mergeHeuresSupplementairesServerData(serverRecords: HeureSupplementaire[]): void {
+  initStorage();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.HEURES_SUPP);
+    const localList: HeureSupplementaire[] = raw ? JSON.parse(raw) : [];
+
+    const map = new Map<string, HeureSupplementaire>();
+    for (const item of localList) {
+      if (item.id) map.set(item.id, item);
+    }
+    for (const serverItem of serverRecords) {
+      if (!serverItem.id) continue;
+      const existing = map.get(serverItem.id);
+      if (!existing) {
+        map.set(serverItem.id, serverItem);
+      } else {
+        map.set(serverItem.id, { ...existing, ...serverItem });
+      }
+    }
+
+    const merged = Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(merged));
+    notifyListeners();
+  } catch (err) {
+    console.error('Erreur fusion Heures Supplementaires:', err);
   }
 }
 
@@ -1464,8 +1495,7 @@ export function saveHeureSupplementaire(
     }
   }
 
-  // NOUVELLE ENTRÉE : Toujours enregistrée individuellement avec son propre ID et horodatage
-  // Un ouvrier peut avoir plusieurs opérations supplémentaires le même jour sans écrasement
+  const finalDuration = Number(data.heures !== undefined && data.heures !== null ? data.heures : (data.quantite || 0));
   const newEntry: HeureSupplementaire = {
     id: `hsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     company_id: companyId,
@@ -1478,6 +1508,7 @@ export function saveHeureSupplementaire(
     quantite: data.quantite,
     unite: data.unite || (data.type === 'tache' ? 'ruban' : 'heure'),
     heures: data.type === 'heures' ? (data.quantite !== undefined ? data.quantite : data.heures) : null,
+    duree_heures: finalDuration,
     domaine_id: data.domaine_id || null,
     serre_id: data.serre_id || null,
     observation: data.observation || null,
@@ -1514,6 +1545,161 @@ export function deleteHeureSupplementaire(id: string): void {
   let all: HeureSupplementaire[] = allRaw ? JSON.parse(allRaw) : [];
   all = all.filter((h) => h.id !== id);
   safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(all));
+  notifyListeners();
+}
+
+// ------------------------- TÂCHES SUPPLÉMENTAIRES -------------------------
+
+export function getTachesSupplementaires(companyId: string, date: string): TacheSupplementaire[] {
+  initStorage();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
+    const all: TacheSupplementaire[] = raw ? JSON.parse(raw) : [];
+    return all
+      .filter((t) => t.company_id === companyId && t.date === date)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  } catch {
+    return [];
+  }
+}
+
+export function getAllTachesSupplementaires(companyId: string): TacheSupplementaire[] {
+  initStorage();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
+    const all: TacheSupplementaire[] = raw ? JSON.parse(raw) : [];
+    return all
+      .filter((t) => t.company_id === companyId)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  } catch {
+    return [];
+  }
+}
+
+export function mergeTachesSupplementairesServerData(serverRecords: TacheSupplementaire[]): void {
+  initStorage();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
+    const localList: TacheSupplementaire[] = raw ? JSON.parse(raw) : [];
+
+    const map = new Map<string, TacheSupplementaire>();
+    for (const item of localList) {
+      if (item.id) map.set(item.id, item);
+    }
+    for (const serverItem of serverRecords) {
+      if (!serverItem.id) continue;
+      const existing = map.get(serverItem.id);
+      if (!existing) {
+        map.set(serverItem.id, serverItem);
+      } else {
+        map.set(serverItem.id, { ...existing, ...serverItem });
+      }
+    }
+
+    const merged = Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    safeSetItem(STORAGE_KEYS.TACHES_SUPP, JSON.stringify(merged));
+    notifyListeners();
+  } catch (err) {
+    console.error('Erreur fusion Taches Supplementaires:', err);
+  }
+}
+
+export function saveTacheSupplementaire(
+  companyId: string,
+  ouvrierId: string,
+  date: string,
+  data: {
+    id?: string;
+    tache_id?: string | null;
+    nom_tache: string;
+    description?: string | null;
+    quantite: number;
+    unite: string;
+    domaine_id?: string | null;
+    serre_id?: string | null;
+    observation?: string | null;
+    created_by_id?: string | null;
+    created_by_nom?: string | null;
+    updated_by_id?: string | null;
+    updated_by_nom?: string | null;
+  }
+): { success: boolean; item?: TacheSupplementaire; error?: string } {
+  initStorage();
+  const allRaw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
+  const all: TacheSupplementaire[] = allRaw ? JSON.parse(allRaw) : [];
+
+  const ouvriers = getActiveOuvriers(companyId);
+  const ouvrier = ouvriers.find((o) => o.id === ouvrierId) || getOuvriers(companyId).find((o: Ouvrier) => o.id === ouvrierId);
+
+  if (!ouvrier) {
+    return { success: false, error: 'Ouvrier introuvable dans cette exploitation.' };
+  }
+
+  const now = new Date();
+  const heureStr = now.toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  if (data.id) {
+    const idx = all.findIndex((t) => t.id === data.id);
+    if (idx >= 0) {
+      all[idx] = {
+        ...all[idx],
+        tache_id: data.tache_id !== undefined ? data.tache_id : all[idx].tache_id,
+        nom_tache: data.nom_tache || all[idx].nom_tache,
+        description: data.description !== undefined ? data.description : all[idx].description,
+        quantite: data.quantite,
+        unite: data.unite.toLowerCase(),
+        domaine_id: data.domaine_id !== undefined ? data.domaine_id : all[idx].domaine_id,
+        serre_id: data.serre_id !== undefined ? data.serre_id : all[idx].serre_id,
+        observation: data.observation !== undefined ? data.observation : all[idx].observation,
+        updated_at: now.toISOString(),
+        updated_by_id: data.updated_by_id || null,
+        updated_by_nom: data.updated_by_nom || null,
+        timestamp: now.getTime(),
+      };
+      safeSetItem(STORAGE_KEYS.TACHES_SUPP, JSON.stringify(all));
+      addToSyncQueue('taches_supplementaires', all[idx]);
+      notifyListeners();
+      return { success: true, item: all[idx] };
+    }
+  }
+
+  const newEntry: TacheSupplementaire = {
+    id: `tsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    company_id: companyId,
+    ouvrier_id: ouvrierId,
+    numero_ouvrier: ouvrier.numero,
+    date,
+    tache_id: data.tache_id || null,
+    nom_tache: data.nom_tache,
+    description: data.description || null,
+    quantite: data.quantite,
+    unite: data.unite.toLowerCase(),
+    domaine_id: data.domaine_id || null,
+    serre_id: data.serre_id || null,
+    observation: data.observation || null,
+    created_by_id: data.created_by_id || null,
+    created_by_nom: data.created_by_nom || null,
+    heure_enregistrement: heureStr,
+    timestamp: now.getTime(),
+  };
+
+  all.push(newEntry);
+  safeSetItem(STORAGE_KEYS.TACHES_SUPP, JSON.stringify(all));
+  addToSyncQueue('taches_supplementaires', newEntry);
+  notifyListeners();
+
+  return { success: true, item: newEntry };
+}
+
+export function deleteTacheSupplementaire(id: string): void {
+  const allRaw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
+  let all: TacheSupplementaire[] = allRaw ? JSON.parse(allRaw) : [];
+  all = all.filter((t) => t.id !== id);
+  safeSetItem(STORAGE_KEYS.TACHES_SUPP, JSON.stringify(all));
   notifyListeners();
 }
 
@@ -2494,13 +2680,15 @@ export function addRecolteEntries(
     nom_ouvrier: string;
     caisses: number;
     notes?: string;
+    type_operation?: RecolteOperationType;
+    domaine_id?: string | null;
   }>,
   author: { id: string; nom: string }
 ): { success: boolean; error?: string; count: number; added: RecolteEntry[] } {
   initStorage();
 
   if (!entries || entries.length === 0) {
-    return { success: false, error: 'Aucun ouvrier sélectionné pour la récolte.', count: 0, added: [] };
+    return { success: false, error: 'Aucun ouvrier sélectionné pour l\'opération.', count: 0, added: [] };
   }
 
   // Validation stricte des quantités
@@ -2527,6 +2715,8 @@ export function addRecolteEntries(
       id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       company_id: companyId,
       date: item.date,
+      type_operation: item.type_operation || 'RECOLTE',
+      domaine_id: item.domaine_id || null,
       serre_id: item.serre_id,
       serre_nom: item.serre_nom,
       ouvrier_id: item.ouvrier_id,
@@ -2566,6 +2756,8 @@ export function updateRecolteEntry(
     date?: string;
     serre_id?: string;
     serre_nom?: string;
+    type_operation?: RecolteOperationType;
+    domaine_id?: string | null;
   },
   updatedBy: { id: string; nom: string }
 ): { success: boolean; error?: string; entry?: RecolteEntry } {
@@ -2575,13 +2767,13 @@ export function updateRecolteEntry(
   const idx = all.findIndex((r) => r.id === id);
 
   if (idx === -1) {
-    return { success: false, error: 'Enregistrement de récolte introuvable.' };
+    return { success: false, error: 'Enregistrement introuvable.' };
   }
 
   if (partial.caisses !== undefined) {
     const qty = Number(partial.caisses);
     if (isNaN(qty) || qty <= 0) {
-      return { success: false, error: 'Le nombre de caisses doit être un nombre supérieur à 0.' };
+      return { success: false, error: 'La quantité doit être un nombre supérieur à 0.' };
     }
   }
 
@@ -2591,6 +2783,8 @@ export function updateRecolteEntry(
     caisses: partial.caisses !== undefined ? Math.round(Number(partial.caisses) * 10) / 10 : current.caisses,
     notes: partial.notes !== undefined ? (partial.notes.trim() || undefined) : current.notes,
     date: partial.date || current.date,
+    type_operation: partial.type_operation || current.type_operation || 'RECOLTE',
+    domaine_id: partial.domaine_id !== undefined ? partial.domaine_id : current.domaine_id,
     serre_id: partial.serre_id || current.serre_id,
     serre_nom: partial.serre_nom || current.serre_nom,
     updated_at: new Date().toISOString(),

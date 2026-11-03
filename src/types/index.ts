@@ -83,22 +83,53 @@ export interface HeureSupplementaire {
   ouvrier_id: string;
   numero_ouvrier: number;
   date: string; // Format ISO YYYY-MM-DD
-  type?: TypeSupplementaire; // 'heures' | 'tache' (par défaut 'heures')
-  tache_id?: string | null; // Tâche associée si type === 'tache'
-  nom_tache?: string | null; // Nom ou libellé de la tâche
-  quantite?: number | null; // Quantité (obligatoire si type === 'tache', ou nb d'heures)
-  unite?: string; // 'ruban' | 'forfait' | 'heure' ou texte personnalisé
-  heures?: number | null; // Rétro-compatibilité si type === 'heures'
-  domaine_id?: string | null; // Domaine optionnel
-  serre_id?: string | null; // Serre optionnelle
-  observation?: string | null; // Remarque / détail
-  created_by_id?: string | null; // ID Administrateur créateur
-  created_by_nom?: string | null; // Nom Administrateur créateur
-  updated_at?: string | null; // Horodatage dernière modification
-  updated_by_id?: string | null; // ID Administrateur modificateur
-  updated_by_nom?: string | null; // Nom Administrateur modificateur
-  heure_enregistrement: string; // HH:MM:SS
-  timestamp: number;
+  tache_id?: string | null; // Tâche associée
+  nom_tache?: string | null; // Nom de la tâche
+  heure_debut?: string | null; // Format HH:MM (ex: 17:00)
+  heure_fin?: string | null; // Format HH:MM (ex: 19:30)
+  duree_heures: number; // Durée totale en heures (> 0)
+  domaine_id?: string | null; // Domaine
+  serre_id?: string | null; // Serre
+  observation?: string | null; // Remarque
+  created_by_id?: string | null; // ID utilisateur (admin ou caporal)
+  created_by_nom?: string | null; // Nom utilisateur
+  created_by_role?: 'admin' | 'caporal' | null;
+  created_at?: string;
+  updated_at?: string | null;
+  updated_by_id?: string | null;
+  updated_by_nom?: string | null;
+  // Champs rétro-compatibilité
+  type?: TypeSupplementaire;
+  heures?: number | null;
+  quantite?: number | null;
+  unite?: string;
+  heure_enregistrement?: string;
+  timestamp?: number;
+}
+
+export interface TacheSupplementaire {
+  id: string;
+  company_id: string;
+  ouvrier_id: string;
+  numero_ouvrier: number;
+  date: string; // Format ISO YYYY-MM-DD
+  tache_id?: string | null;
+  nom_tache: string;
+  description?: string | null;
+  quantite: number; // Quantité physique réalisée (> 0)
+  unite: string; // Ex: 'caisse', 'kg', 'mètre', 'pièce', 'ruban', 'forfait', 'heure'
+  domaine_id?: string | null;
+  serre_id?: string | null;
+  observation?: string | null;
+  created_by_id?: string | null;
+  created_by_nom?: string | null;
+  created_by_role?: 'admin' | 'caporal' | null;
+  created_at?: string;
+  updated_at?: string | null;
+  updated_by_id?: string | null;
+  updated_by_nom?: string | null;
+  heure_enregistrement?: string;
+  timestamp?: number;
 }
 
 export interface RecapLigne {
@@ -170,16 +201,20 @@ export interface Serre {
   ordre: number;
 }
 
+export type RecolteOperationType = 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT';
+
 export interface RecolteEntry {
   id: string;
   company_id: string;
   date: string; // Format ISO YYYY-MM-DD
+  type_operation?: RecolteOperationType; // 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT' (par défaut 'RECOLTE')
+  domaine_id?: string | null;
   serre_id: string;
   serre_nom: string;
   ouvrier_id: string;
   numero_ouvrier: number;
   nom_ouvrier: string;
-  caisses: number; // Nombre de caisses récoltées (> 0)
+  caisses: number; // Nombre de caisses ou quantité (> 0)
   notes?: string;
   created_by_id: string; // ID de l'utilisateur (caporal ou admin)
   created_by_nom: string; // Nom du caporal / créateur

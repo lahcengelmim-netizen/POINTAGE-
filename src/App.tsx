@@ -19,8 +19,12 @@ import { HelpModal } from './components/HelpModal';
 import { HeuresSupplementairesModal } from './components/HeuresSupplementairesModal';
 import { RecolteCaporal } from './components/RecolteCaporal';
 import { RecolteAdminDashboard } from './components/RecolteAdminDashboard';
-import { StockProDashboard } from './components/StockPro/StockProDashboard';
 import { LoginModal } from './components/LoginModal';
+import { LoginPage } from './components/LoginPage';
+import { StockProDashboard } from './components/StockPro/StockProDashboard';
+import { HeuresSupplementairesView } from './components/HeuresSupplementairesView';
+import { TachesSupplementairesView } from './components/TachesSupplementairesView';
+import { useUser } from './context/UserContext';
 import { HelpCircle, AlertTriangle, ShieldAlert } from 'lucide-react';
 
 export default function App() {
@@ -90,8 +94,12 @@ export default function App() {
     syncRecolte,
   } = useAgriPointage();
 
+  const { user, loading } = useUser();
+
+  const activeUser = user || currentUser;
+
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>(() => {
-    return currentUser.role === 'caporal' ? 'recolte' : 'pointage';
+    return activeUser.role === 'caporal' ? 'recolte' : 'pointage';
   });
   const [showHelpModal, setShowHelpModal] = useState<boolean>(false);
   const [showHeuresSuppModal, setShowHeuresSuppModal] = useState<boolean>(false);
@@ -99,12 +107,13 @@ export default function App() {
   const [adminRecolteSubMode, setAdminRecolteSubMode] = useState<'dashboard' | 'saisie'>('dashboard');
 
   // RÈGLE D'AUTORISATION STRICTE :
-  // Si le caporal est connecté, forcer l'écran sur 'recolte'
+  // Le caporal a accès aux modules 'recolte', 'heures_supp', et 'taches_supp'.
+  // S'il tente d'accéder à un écran réservé à l'Admin, le rediriger vers 'recolte'.
   useEffect(() => {
-    if (currentUser.role === 'caporal' && activeScreen !== 'recolte') {
+    if (activeUser.role === 'caporal' && !['recolte', 'heures_supp', 'taches_supp'].includes(activeScreen)) {
       setActiveScreen('recolte');
     }
-  }, [currentUser.role, activeScreen]);
+  }, [activeUser.role, activeScreen]);
 
   // Synchronisation en arrière-plan à la reconnexion internet
   useEffect(() => {
@@ -121,8 +130,30 @@ export default function App() {
     };
   }, [syncRecolte]);
 
+  // Protection d'écran d'accès obligatoire avant ouverture de l'application
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4 selection:bg-emerald-500 font-sans">
+        <div className="w-20 h-20 rounded-3xl bg-linear-to-tr from-emerald-600 to-emerald-400 text-white flex items-center justify-center text-4xl shadow-xl shadow-emerald-900/40 mb-4 animate-pulse ring-4 ring-emerald-500/20">
+          🌾
+        </div>
+        <h1 className="text-2xl font-black font-mono tracking-wider mb-2 uppercase">
+          AGRI<span className="text-emerald-400">POINTAGE</span>
+        </h1>
+        <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
+          <div className="w-4 h-4 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin" />
+          <span>Vérification de la session en cours...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
+
   // Vérification de sécurité pour empêcher un caporal d'accéder aux écrans d'administration
-  const isCaporal = currentUser.role === 'caporal';
+  const isCaporal = activeUser.role === 'caporal';
 
   return (
     <div className="min-h-screen bg-slate-200/80 text-slate-900 flex justify-center selection:bg-emerald-500 selection:text-white">
@@ -137,7 +168,7 @@ export default function App() {
           onSelectDate={setSelectedDate}
           onOpenHeuresSupp={() => setShowHeuresSuppModal(true)}
           heuresSuppCount={heuresSupplementaires.length}
-          currentUser={currentUser}
+          currentUser={activeUser}
           onOpenLoginModal={() => setShowLoginModal(true)}
         />
 
@@ -175,7 +206,7 @@ export default function App() {
               {isCaporal ? (
                 // Vue Caporal : Saisie rapide et synthèse de ses caisses
                 <RecolteCaporal
-                  currentUser={currentUser}
+                  currentUser={activeUser}
                   activeOuvriers={activeOuvriers}
                   serres={serres}
                   recoltes={allRecoltes}
@@ -229,7 +260,7 @@ export default function App() {
                     />
                   ) : (
                     <RecolteCaporal
-                      currentUser={currentUser}
+                      currentUser={activeUser}
                       activeOuvriers={activeOuvriers}
                       serres={serres}
                       recoltes={allRecoltes}
@@ -244,6 +275,31 @@ export default function App() {
                 </div>
               )}
             </>
+          )}
+
+          {/* ===================== ÉCRAN HEURES SUPPLÉMENTAIRES ===================== */}
+          {activeScreen === 'heures_supp' && (
+            <HeuresSupplementairesView
+              currentUser={activeUser}
+              allOuvriers={allOuvriers}
+              domaines={domaines}
+              serres={serres}
+              selectedDate={selectedDate}
+              onSelectDate={setSelectedDate}
+            />
+          )}
+
+          {/* ===================== ÉCRAN TÂCHES SUPPLÉMENTAIRES ===================== */}
+          {activeScreen === 'taches_supp' && (
+            <TachesSupplementairesView
+              currentUser={activeUser}
+              allOuvriers={allOuvriers}
+              taches={taches}
+              domaines={domaines}
+              serres={serres}
+              selectedDate={selectedDate}
+              onSelectDate={setSelectedDate}
+            />
           )}
 
           {/* ===================== ÉCRANS ADMINISTRATIFS (RÉSERVÉS ADMIN) ===================== */}
@@ -316,7 +372,7 @@ export default function App() {
               <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
             ) : (
               <StockProDashboard
-                currentUser={currentUser}
+                currentUser={activeUser}
                 domaines={domaines}
               />
             )
@@ -399,7 +455,7 @@ export default function App() {
             taches={taches}
             domaines={domaines}
             serres={serres}
-            currentUser={currentUser}
+            currentUser={activeUser}
             heuresSuppDetails={heuresSuppDetails}
             allHeuresSupplementaires={allHeuresSupplementaires}
             checkWorkerForHeuresSupp={checkWorkerForHeuresSupp}
@@ -419,7 +475,7 @@ export default function App() {
         <LoginModal
           isOpen={showLoginModal}
           onClose={() => setShowLoginModal(false)}
-          currentUser={currentUser}
+          currentUser={activeUser}
           onLoginSuccess={(user) => {
             switchUser(user);
             if (user.role === 'caporal') {
@@ -435,7 +491,7 @@ export default function App() {
           onSelectScreen={setActiveScreen}
           absentsCount={stats.restants}
           gazoilAlert={gazoilStatus.isStockBas}
-          currentUserRole={currentUser.role}
+          currentUserRole={activeUser.role}
           onOpenAccountModal={() => setShowLoginModal(true)}
         />
       </div>
