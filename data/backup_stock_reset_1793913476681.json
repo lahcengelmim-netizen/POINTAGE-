@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-11-05T21:17:56.681Z",
+  "companyId": "cie_lahcen_pointeur",
+  "author": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "nom": "Lahcen (Administrateur)",
+    "company_id": "cie_lahcen_pointeur"
+  },
+  "stock_produits_count": 271,
+  "stock_mouvements_count": 277
+}

@@ -1,6 +1,11 @@
 import React, { useState, useRef } from 'react';
-import { Upload, X, AlertCircle, CheckCircle2, FileSpreadsheet, AlertTriangle, ArrowRight } from 'lucide-react';
-import { parseStockInitialExcel, importInitialStock, generateIdempotencyKey } from '../../services/stockService';
+import { Upload, X, AlertCircle, CheckCircle2, FileSpreadsheet, AlertTriangle, ShieldAlert } from 'lucide-react';
+import {
+  parseStockInitialExcel,
+  importInitialStock,
+  generateIdempotencyKey,
+  ExcelDuplicateInfo,
+} from '../../services/stockService';
 import { StockProduitSynthese } from '../../types';
 
 interface StockProImportModalProps {
@@ -22,6 +27,7 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [parsedItems, setParsedItems] = useState<Array<{ nom: string; unite: string; qte: number }>>([]);
   const [parseErrors, setParseErrors] = useState<string[]>([]);
+  const [duplicates, setDuplicates] = useState<ExcelDuplicateInfo[]>([]);
   const [importResult, setImportResult] = useState<{
     success: boolean;
     importedCount?: number;
@@ -46,15 +52,18 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
     setSelectedFile(file);
     setIsParsing(true);
     setParseErrors([]);
+    setDuplicates([]);
     setImportResult(null);
 
     try {
-      const { validItems, errors } = await parseStockInitialExcel(file);
-      setParsedItems(validItems);
-      setParseErrors(errors);
+      const result = await parseStockInitialExcel(file);
+      setParsedItems(result.validItems);
+      setParseErrors(result.errors);
+      setDuplicates(result.duplicates);
     } catch (err: any) {
       setParseErrors([err.message || 'Erreur lors de la lecture du fichier Excel.']);
       setParsedItems([]);
+      setDuplicates([]);
     } finally {
       setIsParsing(false);
     }
@@ -152,7 +161,35 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
             )}
           </div>
 
-          {/* Erreurs de parsing */}
+          {/* Bloc d'alerte spécifique : Doublons détectés */}
+          {duplicates.length > 0 && (
+            <div className="p-3.5 bg-red-50 border-2 border-red-400 rounded-2xl space-y-2 text-red-950">
+              <div className="flex items-center gap-2 font-black text-xs text-red-800">
+                <ShieldAlert className="w-5 h-5 text-red-600 shrink-0" />
+                <span>IMPORTATION REFUSÉE : {duplicates.length} doublon(s) détecté(s)</span>
+              </div>
+              <p className="text-[11px] text-red-800 leading-relaxed font-medium">
+                Des produits identiques apparaissent sur plusieurs lignes dans le même fichier.
+                Le système <strong>refuse catégoriquement de fusionner ou d'additionner</strong> ces lignes.
+                Veuillez corriger votre fichier Excel puis le réimporter :
+              </p>
+              <div className="bg-white rounded-xl p-2.5 border border-red-200 max-h-36 overflow-y-auto divide-y divide-red-100 font-mono text-[11px]">
+                {duplicates.map((dup, idx) => (
+                  <div key={idx} className="py-1.5 first:pt-0 last:pb-0 flex items-start gap-1.5">
+                    <span className="text-red-600 font-black">•</span>
+                    <div>
+                      <span className="font-black text-slate-900">{dup.nom} - {dup.unite}</span>
+                      <span className="text-red-700 font-bold ml-1.5">
+                        : {dup.lines.map((l) => `ligne ${l}`).join(' et ')}.
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Autres erreurs de parsing (ex: quantité négative, format) */}
           {parseErrors.length > 0 && (
             <div className="p-3 bg-red-50 border border-red-200 rounded-2xl space-y-1 text-red-900">
               <div className="flex items-center gap-1.5 font-bold text-xs">
@@ -167,7 +204,7 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
             </div>
           )}
 
-          {/* Aperçu des données détectées */}
+          {/* Aperçu des données détectées (uniquement si aucun doublon et aucune erreur bloquante) */}
           {parsedItems.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
@@ -253,11 +290,15 @@ export const StockProImportModal: React.FC<StockProImportModalProps> = ({
           <button
             type="button"
             onClick={handleConfirmImport}
-            disabled={itemsToImport.length === 0 || isSubmitting}
+            disabled={itemsToImport.length === 0 || duplicates.length > 0 || parseErrors.length > 0 || isSubmitting}
             className="flex-1 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 disabled:text-slate-500 text-white font-black py-2.5 rounded-xl shadow-xs transition active:scale-95 text-xs flex items-center justify-center gap-1.5"
           >
             {isSubmitting ? (
               <span>Enregistrement...</span>
+            ) : duplicates.length > 0 ? (
+              <span>Importation bloquée (Doublons)</span>
+            ) : parseErrors.length > 0 ? (
+              <span>Importation bloquée (Erreurs)</span>
             ) : (
               <>
                 <CheckCircle2 className="w-4 h-4" />

@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS public.stock_mouvements (
   produit_nom TEXT NOT NULL,
   unite TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('INITIAL', 'ENTREE', 'SORTIE', 'CORRECTION')),
-  quantite NUMERIC NOT NULL CHECK (quantite > 0),
+  quantite NUMERIC NOT NULL CHECK ((type = 'INITIAL' AND quantite >= 0) OR (type != 'INITIAL' AND quantite > 0)),
   date TEXT NOT NULL,
   domaine_id TEXT,
   serre_id TEXT,
@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS public.stock_mouvements (
   reference_document TEXT,
   motif TEXT,
   observation TEXT,
-  created_by_id UUID REFERENCES public.profiles(id),
+  created_by_id TEXT, -- Déblocage : conservé pour la traçabilité mais sans contrainte FK bloquante
   created_by_nom TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );

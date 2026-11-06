@@ -51,6 +51,8 @@ export interface Pointage {
   present: boolean; // true
   tache_id?: string | null; // Rétrocompatibilité
   domaine_id?: string; // ID du domaine ou code (ex: 'dom_d2')
+  serre_id?: string | null; // ID de la serre affectée
+  serre_nom?: string | null; // Nom de la serre affectée
   heure: string; // Format HH:MM:SS
   timestamp: number;
 }

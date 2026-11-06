@@ -18,9 +18,14 @@ import {
   TrendingDown,
   Layers,
   ShieldCheck,
+  Plus,
+  Edit2,
+  Trash2,
+  RotateCcw,
 } from 'lucide-react';
 import {
   StockProduitSynthese,
+  StockProduit,
   StockKPIs,
   StockMouvement,
   StockEtat,
@@ -30,6 +35,7 @@ import {
 import {
   getStockSynthese,
   getMouvements,
+  deleteProduit,
   exportEtatStockExcel,
   exportHistoriqueExcel,
   exportSortiesParDomaineExcel,
@@ -39,6 +45,8 @@ import { StockProImportModal } from './StockProImportModal';
 import { StockProEntreeModal } from './StockProEntreeModal';
 import { StockProSortieModal } from './StockProSortieModal';
 import { StockProHistoriqueModal } from './StockProHistoriqueModal';
+import { StockProProduitModal } from './StockProProduitModal';
+import { StockProResetModal } from './StockProResetModal';
 
 interface StockProDashboardProps {
   currentUser: User;
@@ -77,8 +85,47 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
   const [isEntreeModalOpen, setIsEntreeModalOpen] = useState(false);
   const [isSortieModalOpen, setIsSortieModalOpen] = useState(false);
   const [isHistoriqueModalOpen, setIsHistoriqueModalOpen] = useState(false);
+  const [isProduitModalOpen, setIsProduitModalOpen] = useState(false);
+  const [produitToEdit, setProduitToEdit] = useState<StockProduit | null>(null);
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [selectedProduitForModal, setSelectedProduitForModal] = useState<string | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [successFeedback, setSuccessFeedback] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const triggerSuccessFeedback = (msg: string) => {
+    setSuccessFeedback(msg);
+    setTimeout(() => setSuccessFeedback(null), 5000);
+  };
+
+  const handleOpenCreateProduit = () => {
+    setProduitToEdit(null);
+    setIsProduitModalOpen(true);
+  };
+
+  const handleOpenEditProduit = (prod: StockProduit) => {
+    setProduitToEdit(prod);
+    setIsProduitModalOpen(true);
+  };
+
+  const handleDeleteProduit = async (prod: StockProduit) => {
+    const ok = window.confirm(`Voulez-vous vraiment supprimer le produit "${prod.nom}" (${prod.unite}) ainsi que son historique de mouvements ?`);
+    if (!ok) return;
+
+    setDeletingId(prod.id);
+    try {
+      const res = await deleteProduit(prod.id);
+      if (!res.success) {
+        throw new Error(res.error || 'Erreur lors de la suppression.');
+      }
+      triggerSuccessFeedback(res.message || `Produit "${prod.nom}" supprimé.`);
+      loadData();
+    } catch (err: any) {
+      alert(err.message || 'Erreur lors de la suppression.');
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const handleOpenEntree = (produitId?: string) => {
     setSelectedProduitForModal(produitId || null);
@@ -220,6 +267,16 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={handleOpenCreateProduit}
+              className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black rounded-xl transition shadow-sm active:scale-95 cursor-pointer"
+              title="Ajouter un nouveau produit manuellement au catalogue"
+            >
+              <Plus className="w-4 h-4" />
+              <span>+ Nouveau Produit</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setIsImportModalOpen(true)}
               className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl transition shadow-sm active:scale-95 cursor-pointer"
               title="Importer le stock initial depuis Excel (3 colonnes)"
@@ -299,24 +356,34 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => exportSortiesParDomaineExcel(mouvements)}
+                    onClick={() => exportHistoriqueExcel(mouvements)}
                     className="w-full text-left px-4 py-2 text-xs font-semibold hover:bg-slate-100 flex items-center justify-between"
                   >
-                    <span>3. Sorties par Domaine</span>
+                    <span>3. Historique Mouvements</span>
                     <Download className="w-3.5 h-3.5 text-slate-400" />
                   </button>
                   <button
                     type="button"
-                    onClick={() => exportHistoriqueExcel(mouvements)}
-                    className="w-full text-left px-4 py-2 text-xs font-semibold hover:bg-slate-100 flex items-center justify-between border-t border-slate-100"
+                    onClick={() => exportSortiesParDomaineExcel(mouvements)}
+                    className="w-full text-left px-4 py-2 text-xs font-semibold hover:bg-slate-100 flex items-center justify-between"
                   >
-                    <span>4. Historique Complet</span>
+                    <span>4. Sorties par Domaine</span>
                     <Download className="w-3.5 h-3.5 text-slate-400" />
                   </button>
                 </div>
               )}
             </div>
 
+            {/* Réinitialiser Catalogue */}
+            <button
+              type="button"
+              onClick={() => setIsResetModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-2 bg-red-950/60 hover:bg-red-900 text-red-300 text-xs font-bold rounded-xl transition border border-red-800/60 active:scale-95 cursor-pointer ml-auto sm:ml-0"
+              title="Vider et réinitialiser complètement le catalogue de produits et le stock"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-red-400" />
+              <span>Réinitialiser</span>
+            </button>
             {/* Rafraîchir */}
             <button
               type="button"
@@ -330,6 +397,14 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Bannière de confirmation d'action */}
+      {successFeedback && (
+        <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-3 text-emerald-950 font-bold text-xs flex items-center gap-2 animate-in fade-in duration-200 shadow-xs">
+          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+          <span>{successFeedback}</span>
+        </div>
+      )}
 
       {/* Message d'erreur éventuel */}
       {errorMessage && (
@@ -557,23 +632,33 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
           </div>
           <div>
             <h3 className="text-base font-black text-slate-900">
-              {produits.length === 0 ? 'Aucun produit dans le catalogue Stock Pro' : 'Aucun produit correspondant aux filtres'}
+              {produits.length === 0 ? 'Catalogue Stock Pro actuellement vide' : 'Aucun produit correspondant aux filtres'}
             </h3>
             <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
               {produits.length === 0
-                ? 'Pour démarrer, importez votre stock initial via un fichier Excel à 3 colonnes (NOM PRODUIT | UNITE | QTE).'
+                ? 'Vous pouvez repartir de zéro : ajouter des produits manuellement ou importer une nouvelle liste complète depuis Excel (NOM PRODUIT | UNITE | QTE).'
                 : 'Essayez de réinitialiser la recherche ou le filtre d\'état.'}
             </p>
           </div>
           {produits.length === 0 && (
-            <button
-              type="button"
-              onClick={() => setIsImportModalOpen(true)}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl transition shadow-md active:scale-95 cursor-pointer"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Importer le fichier Excel Initial</span>
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={handleOpenCreateProduit}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black rounded-xl transition shadow-md active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Ajouter un Produit Manuellement</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsImportModalOpen(true)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl transition shadow-md active:scale-95 cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Importer une Liste Excel</span>
+              </button>
+            </div>
           )}
         </div>
       ) : (
@@ -597,6 +682,7 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
                 {filteredProduits.map((p) => {
                   const isRupture = p.etat === 'RUPTURE';
                   const isFaible = p.etat === 'STOCK_FAIBLE';
+                  const isDeleting = deletingId === p.produit.id;
 
                   return (
                     <tr
@@ -657,7 +743,7 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
                       {/* État Badge */}
                       <td className="py-3 px-3 text-center">
                         {isRupture ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-red-100 text-red-700 border border-red-200 shadow-xs">
+                           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-red-100 text-red-700 border border-red-200 shadow-xs">
                             <AlertCircle className="w-3 h-3 text-red-600" />
                             Rupture
                           </span>
@@ -676,16 +762,16 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
 
                       {/* Actions */}
                       <td className="py-3 px-4 text-center">
-                        <div className="flex items-center justify-center gap-1.5">
+                        <div className="flex items-center justify-center gap-1">
                           {isRupture ? (
                             <button
                               type="button"
                               onClick={() => handleOpenEntree(p.produit.id)}
-                              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-black shadow-xs transition active:scale-95 cursor-pointer"
-                              title="Réapprovisionner immédiatement ce produit"
+                              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black shadow-xs transition active:scale-95 cursor-pointer"
+                              title="Réapprovisionner immédiatement"
                             >
                               <PlusCircle className="w-3.5 h-3.5" />
-                              <span>Réapprovisionner</span>
+                              <span className="hidden xl:inline">Entrée</span>
                             </button>
                           ) : (
                             <button
@@ -694,7 +780,7 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
                               className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 transition cursor-pointer"
                               title="Ajouter une Entrée (+)"
                             >
-                              <PlusCircle className="w-4 h-4" />
+                              <PlusCircle className="w-3.5 h-3.5" />
                             </button>
                           )}
 
@@ -707,18 +793,39 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
                                 ? 'bg-slate-100 text-slate-300 cursor-not-allowed opacity-40'
                                 : 'bg-amber-50 hover:bg-amber-100 text-amber-700 cursor-pointer'
                             }`}
-                            title={isRupture ? 'Sortie impossible : stock épuisé (0)' : 'Enregistrer une Sortie (-)'}
+                            title={isRupture ? 'Sortie impossible : stock épuisé' : 'Enregistrer une Sortie (-)'}
                           >
-                            <MinusCircle className="w-4 h-4" />
+                            <MinusCircle className="w-3.5 h-3.5" />
                           </button>
 
                           <button
                             type="button"
                             onClick={() => handleOpenHistorique(p.produit.id)}
                             className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-                            title="Voir l'historique complet de ce produit"
+                            title="Historique des mouvements"
                           >
-                            <History className="w-4 h-4" />
+                            <History className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Modifier Produit */}
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditProduit(p.produit)}
+                            className="p-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition cursor-pointer"
+                            title="Modifier ce produit (Nom, Unité, Seuil)"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Supprimer Produit */}
+                          <button
+                            type="button"
+                            disabled={isDeleting}
+                            onClick={() => handleDeleteProduit(p.produit)}
+                            className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 transition cursor-pointer disabled:opacity-50"
+                            title="Supprimer ce produit du catalogue"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </td>
@@ -767,6 +874,7 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
         }}
         produits={produits}
         initialProduitId={selectedProduitForModal}
+        onRequestRefreshStock={loadData}
         onEntreeSuccess={() => {
           setIsEntreeModalOpen(false);
           setSelectedProduitForModal(null);
@@ -782,6 +890,7 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
         }}
         produits={produits}
         initialProduitId={selectedProduitForModal}
+        onRequestRefreshStock={loadData}
         onSortieSuccess={() => {
           setIsSortieModalOpen(false);
           setSelectedProduitForModal(null);
@@ -799,6 +908,31 @@ export const StockProDashboard: React.FC<StockProDashboardProps> = ({
         produits={produits}
         initialProduitId={selectedProduitForModal}
         onCorrectionSuccess={() => {
+          loadData();
+        }}
+      />
+
+      {/* Modal Création & Modification de Produit */}
+      <StockProProduitModal
+        isOpen={isProduitModalOpen}
+        onClose={() => {
+          setIsProduitModalOpen(false);
+          setProduitToEdit(null);
+        }}
+        produitToEdit={produitToEdit}
+        onSuccess={(msg) => {
+          triggerSuccessFeedback(msg);
+          loadData();
+        }}
+      />
+
+      {/* Modal Purge & Réinitialisation sécurisée */}
+      <StockProResetModal
+        isOpen={isResetModalOpen}
+        onClose={() => setIsResetModalOpen(false)}
+        produitsCount={produits.length}
+        onSuccess={(msg) => {
+          triggerSuccessFeedback(msg);
           loadData();
         }}
       />

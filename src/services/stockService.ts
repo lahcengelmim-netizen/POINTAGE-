@@ -104,22 +104,89 @@ export async function importInitialStock(
   }
 }
 
-// 3. Création manuelle d'un produit
+// 3. Création manuelle d'un produit (avec support du stock initial libre)
 export async function createProduit(
   nom: string,
   unite: string,
-  seuil_minimum: number = 5
+  seuil_minimum: number = 5,
+  stock_initial: number = 0
 ): Promise<{ success: boolean; produit?: StockProduit; error?: string }> {
   try {
     const headers = await getAuthHeaders();
     const res = await fetch('/api/stock/produit', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ nom, unite, seuil_minimum }),
+      body: JSON.stringify({ nom, unite, seuil_minimum, stock_initial }),
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur création produit.' };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
+// 3b. Modification manuelle d'un produit
+export async function updateProduit(
+  id: string,
+  nom: string,
+  unite: string,
+  seuil_minimum: number = 5
+): Promise<{ success: boolean; produit?: StockProduit; error?: string; message?: string }> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`/api/stock/produit/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ nom, unite, seuil_minimum }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Erreur modification produit.' };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
+// 3c. Suppression manuelle d'un produit et de son historique
+export async function deleteProduit(
+  id: string
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`/api/stock/produit/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Erreur suppression produit.' };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
+// 3d. Réinitialisation intégrale du catalogue et du stock initial
+export async function resetStockCatalogue(): Promise<{
+  success: boolean;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch('/api/stock/reset-catalogue', {
+      method: 'POST',
+      headers,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Erreur réinitialisation catalogue.' };
     }
     return data;
   } catch (err: any) {
@@ -190,6 +257,68 @@ export async function addSortie(params: {
   }
 }
 
+// 4b. Enregistrement d'une entrée multi-produits en lot (idempotent)
+export async function addEntreeBatch(params: {
+  items: Array<{ produit_id: string; quantite: number }>;
+  date?: string;
+  tiers?: string;
+  reference_document?: string;
+  motif?: string;
+  observation?: string;
+  idempotencyKey?: string;
+}): Promise<{ success: boolean; count?: number; reference_document?: string; message?: string; error?: string }> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch('/api/stock/entree-batch', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...params,
+        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Erreur lors de l\'entrée multi-produits.' };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
+// 5b. Enregistrement d'une sortie multi-produits en lot (idempotent)
+export async function addSortieBatch(params: {
+  items: Array<{ produit_id: string; quantite: number }>;
+  date?: string;
+  domaine_id?: string;
+  serre_id?: string;
+  tiers?: string;
+  reference_document?: string;
+  motif?: string;
+  observation?: string;
+  idempotencyKey?: string;
+}): Promise<{ success: boolean; count?: number; reference_document?: string; message?: string; error?: string }> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch('/api/stock/sortie-batch', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...params,
+        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Erreur lors de la sortie multi-produits.' };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
 // 6. Enregistrement d'une correction / ajustement de stock (idempotent)
 export async function addCorrection(params: {
   produit_id: string;
@@ -247,10 +376,24 @@ export async function getMouvements(filter?: StockFilter): Promise<{
 }
 
 // 8. Analyse du fichier Excel à 3 colonnes exactes (NOM PRODUIT | UNITE | QTE)
-export async function parseStockInitialExcel(file: File): Promise<{
-  validItems: Array<{ nom: string; unite: string; qte: number }>;
+export interface ExcelDuplicateInfo {
+  nom: string;
+  unite: string;
+  lines: number[];
+  formattedMessage: string;
+}
+
+export interface ParseStockInitialExcelResult {
+  validItems: Array<{ nom: string; unite: string; qte: number; line: number }>;
   errors: string[];
-}> {
+  duplicates: ExcelDuplicateInfo[];
+  hasDuplicates: boolean;
+  hasErrors: boolean;
+}
+
+// 8. Analyse du fichier Excel à 3 colonnes exactes (NOM PRODUIT | UNITE | QTE)
+// RÈGLE STRICTE : Refus absolu si doublons ou quantités négatives (aucune fusion, aucune addition)
+export async function parseStockInitialExcel(file: File): Promise<ParseStockInitialExcelResult> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
@@ -258,13 +401,25 @@ export async function parseStockInitialExcel(file: File): Promise<{
       try {
         const buffer = e.target?.result;
         if (!buffer) {
-          return resolve({ validItems: [], errors: ['Fichier Excel vide ou illisible.'] });
+          return resolve({
+            validItems: [],
+            errors: ['Fichier Excel vide ou illisible.'],
+            duplicates: [],
+            hasDuplicates: false,
+            hasErrors: true,
+          });
         }
         const dataArray = new Uint8Array(buffer as ArrayBuffer);
         const workbook = XLSX.read(dataArray, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
         if (!sheetName) {
-          return resolve({ validItems: [], errors: ['Le classeur Excel est vide.'] });
+          return resolve({
+            validItems: [],
+            errors: ['Le classeur Excel est vide.'],
+            duplicates: [],
+            hasDuplicates: false,
+            hasErrors: true,
+          });
         }
 
         const worksheet = workbook.Sheets[sheetName];
@@ -275,12 +430,19 @@ export async function parseStockInitialExcel(file: File): Promise<{
           return resolve({
             validItems: [],
             errors: ['Le fichier ne contient aucune ligne exploitable.'],
+            duplicates: [],
+            hasDuplicates: false,
+            hasErrors: true,
           });
         }
 
-        // Normalisation pour supprimer les accents (ex: UNITÉ -> UNITE, QUANTITÉ -> QUANTITE)
+        // Normalisation stricte pour la détection (insensible à la casse, accents et espaces multiples)
         const normalizeStr = (str: string) =>
-          str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase();
+          str.normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toUpperCase();
 
         // Détection des en-têtes dans la première ligne
         const headerRow = rows[0].map((c) => normalizeStr(String(c || '')));
@@ -295,64 +457,112 @@ export async function parseStockInitialExcel(file: File): Promise<{
         });
 
         // Si non trouvé par nom, considérer l'ordre strict des 3 colonnes : Col 0 = Nom, Col 1 = Unité, Col 2 = Quantité
-        // Si le fichier n'a pas d'en-tête (la première ligne est directement un produit), on commence à l'index 0
         const hasHeader = nomIdx !== -1 || uniteIdx !== -1 || qteIdx !== -1;
         if (nomIdx === -1) nomIdx = 0;
         if (uniteIdx === -1) uniteIdx = 1;
         if (qteIdx === -1) qteIdx = 2;
 
-        const validItems: Array<{ nom: string; unite: string; qte: number }> = [];
+        const tempItems: Array<{ nom: string; unite: string; qte: number; line: number }> = [];
         const errors: string[] = [];
-        const seenNames = new Set<string>();
+        const occurrencesMap = new Map<string, { nom: string; unite: string; lines: number[]; quantities: number[] }>();
 
         const startIndex = hasHeader ? 1 : 0;
 
         for (let i = startIndex; i < rows.length; i++) {
           const row = rows[i];
+          const lineNum = i + 1; // Numéro exact de ligne dans Excel (1-indexé)
           if (!row || row.length === 0) continue;
 
           const rawNom = row[nomIdx];
           const rawUnite = row[uniteIdx];
           const rawQte = row[qteIdx];
 
-          if (!rawNom && !rawUnite && (rawQte === undefined || rawQte === null || String(rawQte).trim() === '')) continue;
+          // Ligne entièrement vide
+          if (!rawNom && !rawUnite && (rawQte === undefined || rawQte === null || String(rawQte).trim() === '')) {
+            continue;
+          }
 
-          const nom = String(rawNom || '').trim().toUpperCase();
-          const unite = String(rawUnite || '').trim().toUpperCase();
+          const nom = String(rawNom || '').trim().replace(/\s+/g, ' ').toUpperCase();
+          const unite = String(rawUnite || '').trim().replace(/\s+/g, ' ').toUpperCase();
 
           if (!nom) {
-            errors.push(`Ligne ${i + 1} : Le nom du produit est manquant.`);
+            errors.push(`Ligne ${lineNum} : Le nom du produit est manquant.`);
             continue;
           }
           if (!unite) {
-            errors.push(`Ligne ${i + 1} ("${nom}") : L'unité de mesure est manquante.`);
+            errors.push(`Ligne ${lineNum} ("${nom}") : L'unité de mesure est manquante.`);
             continue;
           }
 
           if (rawQte === undefined || rawQte === null || String(rawQte).trim() === '') {
-            errors.push(`Ligne ${i + 1} ("${nom}") : La quantité est manquante.`);
+            errors.push(`Ligne ${lineNum} ("${nom}") : La quantité est manquante.`);
             continue;
           }
 
           const parsedQteStr = String(rawQte).trim().replace(',', '.');
           const qte = Number(parsedQteStr);
 
-          if (isNaN(qte) || qte < 0) {
-            errors.push(`Ligne ${i + 1} ("${nom}") : La quantité doit être un nombre positif ou nul (valeur trouvée: "${rawQte}").`);
+          // Validation stricte des quantités :
+          // - Accepter quantité = 0 (ex: CARTOUCHE 20 = 0)
+          // - Accepter toute quantité positive (> 0)
+          // - Refuser toute quantité négative (< 0) avec détail produit, qte et ligne
+          if (isNaN(qte)) {
+            errors.push(`Ligne ${lineNum} ("${nom}") : La quantité doit être un nombre valide (valeur trouvée: "${rawQte}").`);
             continue;
           }
 
-          const uniqueKey = `${nom}_${unite}`;
-          if (seenNames.has(uniqueKey)) {
-            errors.push(`Ligne ${i + 1} ("${nom} - ${unite}") : Doublon détecté dans le même fichier Excel.`);
+          if (qte < 0) {
+            errors.push(`Ligne ${lineNum} ("${nom}") : Quantité négative interdite (quantité: ${qte}). L'importation est refusée.`);
             continue;
           }
 
-          seenNames.add(uniqueKey);
-          validItems.push({ nom, unite, qte: Math.round(qte * 100) / 100 });
+          // Détection des doublons intra-fichier
+          const key = `${normalizeStr(nom)}____${normalizeStr(unite)}`;
+          if (!occurrencesMap.has(key)) {
+            occurrencesMap.set(key, { nom, unite, lines: [lineNum], quantities: [qte] });
+          } else {
+            const occ = occurrencesMap.get(key)!;
+            occ.lines.push(lineNum);
+            occ.quantities.push(qte);
+          }
+
+          tempItems.push({
+            nom,
+            unite,
+            qte: Math.round(qte * 100) / 100,
+            line: lineNum,
+          });
         }
 
-        resolve({ validItems, errors });
+        // Identifier tous les doublons
+        const duplicates: ExcelDuplicateInfo[] = [];
+        for (const occ of occurrencesMap.values()) {
+          if (occ.lines.length > 1) {
+            const linesStr = occ.lines.map((l) => `ligne ${l}`).join(' et ');
+            const formattedMessage = `${occ.nom} - ${occ.unite} : ${linesStr}.`;
+            duplicates.push({
+              nom: occ.nom,
+              unite: occ.unite,
+              lines: occ.lines,
+              formattedMessage,
+            });
+          }
+        }
+
+        const hasDuplicates = duplicates.length > 0;
+        const hasErrors = errors.length > 0;
+
+        // RÈGLE ABSOLUE : Si le fichier contient des doublons ou des erreurs (ex: qte négative),
+        // AUCUN PRODUIT N'EST ENREGISTRÉ (validItems = []) et l'importation est refusée !
+        const validItems = hasDuplicates || hasErrors ? [] : tempItems;
+
+        resolve({
+          validItems,
+          errors,
+          duplicates,
+          hasDuplicates,
+          hasErrors,
+        });
       } catch (err: any) {
         reject(new Error('Erreur de lecture du fichier Excel: ' + err.message));
       }
