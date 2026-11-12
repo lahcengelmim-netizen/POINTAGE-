@@ -19,6 +19,18 @@
       "salt": "lahcen_salt_caporal",
       "actif": true,
       "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "usr_caporal_tariq",
+      "username": "tariq",
+      "email": "tariq@caporal.com",
+      "nom": "Tariq (Caporal Contractuelles)",
+      "role": "caporal_contractuelles",
+      "module_attribue": "contractuelles",
+      "passwordHash": "60efbfa0610f5678397a76dcbfbba1f59bc5db9962e4f5e4c4fe995a982943dc",
+      "salt": "lahcen_salt_caporal",
+      "actif": true,
+      "createdAt": "2026-11-01T00:00:00.000Z"
     }
   ],
   "serres": [
@@ -760,6 +772,368 @@
       "created_by_role": "caporal",
       "created_at": "2026-11-03T21:17:50.422Z",
       "timestamp": 1793740670422
+    }
+  ],
+  "contractuels_ouvriers": [],
+  "contractuels_pointages": [
+    {
+      "id": "cp_1793990253495_5i8ww",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1793990249039_fcq86",
+      "matricule": "C-001",
+      "nom_complet": "BENALI Karim",
+      "date": "2026-11-06",
+      "present": true,
+      "domaine_id": "dom_d1",
+      "serre_id": null,
+      "montant_total_jour": 120,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-06T18:37:33.495Z",
+      "updated_at": "2026-11-06T18:37:33.495Z"
+    },
+    {
+      "id": "cp_1793993996833_6b4vm",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "test_ouvrier_01",
+      "matricule": "CTR-001",
+      "nom_complet": "Brahim Mansouri",
+      "date": "2026-11-06",
+      "present": false,
+      "domaine_id": "dom_d2",
+      "serre_id": null,
+      "serres_ids": [],
+      "serres_noms": [],
+      "serres_texte": null,
+      "montant_total_jour": 0,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-06T19:39:56.833Z",
+      "updated_at": "2026-11-06T19:39:56.833Z"
+    },
+    {
+      "id": "cp_1794079163076_97yrf",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1794079162750_0_rrir",
+      "matricule": "C-002",
+      "nom_complet": "EL AMRANI Fatima",
+      "date": "2026-11-07",
+      "present": true,
+      "domaine_id": "dom_d2",
+      "serre_id": "serre_1",
+      "serres_ids": [
+        "serre_1",
+        "serre_2"
+      ],
+      "serres_noms": [
+        "SERRE 01",
+        "SERRE 02"
+      ],
+      "serres_texte": "SERRE 01, SERRE 02",
+      "montant_total_jour": 100,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-07T19:19:23.076Z",
+      "updated_at": "2026-11-07T19:19:23.076Z"
+    },
+    {
+      "id": "cp_1794079163351_6dec2",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1794079162837_1_ydra",
+      "matricule": "C-003",
+      "nom_complet": "BOUZID Khadija",
+      "date": "2026-11-07",
+      "present": false,
+      "domaine_id": "dom_d2",
+      "serre_id": null,
+      "serres_ids": [],
+      "serres_noms": [],
+      "serres_texte": null,
+      "montant_total_jour": 0,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-07T19:19:23.351Z",
+      "updated_at": "2026-11-07T19:19:23.351Z"
+    },
+    {
+      "id": "cp_1794079163554_jiioe",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1794079162909_2_9gzp",
+      "matricule": "C-004",
+      "nom_complet": "AIT ALI Said",
+      "date": "2026-11-07",
+      "present": true,
+      "domaine_id": "dom_d2",
+      "serre_id": "serre_3",
+      "serres_ids": [
+        "serre_3"
+      ],
+      "serres_noms": [
+        "SERRE 03"
+      ],
+      "serres_texte": "SERRE 03",
+      "montant_total_jour": 125,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-07T19:19:23.554Z",
+      "updated_at": "2026-11-07T19:19:23.554Z"
+    }
+  ],
+  "contractuels_activites": [
+    {
+      "id": "ca_1793990253495_bvtll",
+      "pointage_id": "cp_1793990253495_5i8ww",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1793990249039_fcq86",
+      "nom_complet": "BENALI Karim",
+      "matricule": "C-001",
+      "date": "2026-11-06",
+      "tache_id": "tch_contractuel",
+      "tache_nom": "RÉCOLTE",
+      "domaine_id": "dom_d1",
+      "serre_id": "serre_1",
+      "serre_nom": "Serre 1",
+      "mode_remuneration": "JOUR",
+      "quantite": 1,
+      "unite": "JOUR",
+      "prix_unitaire": 120,
+      "montant_total": 120,
+      "observation": null,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-06T18:37:33.495Z",
+      "updated_at": "2026-11-06T18:37:33.495Z"
+    },
+    {
+      "id": "ca_1794079163076_un3o7",
+      "pointage_id": "cp_1794079163076_97yrf",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1794079162750_0_rrir",
+      "nom_complet": "EL AMRANI Fatima",
+      "matricule": "C-002",
+      "date": "2026-11-07",
+      "contrat_id": null,
+      "contrat_nom": null,
+      "tache_id": "tch_1",
+      "tache_nom": "Travaux divers",
+      "domaine_id": "dom_d2",
+      "serre_id": "serre_1",
+      "serre_nom": "SERRE 01, SERRE 02",
+      "serres_ids": [
+        "serre_1",
+        "serre_2"
+      ],
+      "serres_noms": [
+        "SERRE 01",
+        "SERRE 02"
+      ],
+      "serres_texte": "SERRE 01, SERRE 02",
+      "mode_remuneration": "JOUR",
+      "quantite": 1,
+      "unite": "JOUR",
+      "prix_unitaire": 100,
+      "montant_total": 100,
+      "observation": null,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-07T19:19:23.076Z",
+      "updated_at": "2026-11-07T19:19:23.076Z"
+    },
+    {
+      "id": "ca_1794079163554_lvjt8",
+      "pointage_id": "cp_1794079163554_jiioe",
+      "company_id": "cie_lahcen_pointeur",
+      "ouvrier_id": "co_1794079162909_2_9gzp",
+      "nom_complet": "AIT ALI Said",
+      "matricule": "C-004",
+      "date": "2026-11-07",
+      "contrat_id": null,
+      "contrat_nom": null,
+      "tache_id": "tch_2",
+      "tache_nom": "Attache des plants",
+      "domaine_id": "dom_d2",
+      "serre_id": "serre_3",
+      "serre_nom": "SERRE 03",
+      "serres_ids": [
+        "serre_3"
+      ],
+      "serres_noms": [
+        "SERRE 03"
+      ],
+      "serres_texte": "SERRE 03",
+      "mode_remuneration": "JOUR",
+      "quantite": 1,
+      "unite": "JOUR",
+      "prix_unitaire": 125,
+      "montant_total": 125,
+      "observation": null,
+      "created_by_id": "usr_admin",
+      "created_by_nom": "Lahcen (Administrateur)",
+      "created_at": "2026-11-07T19:19:23.554Z",
+      "updated_at": "2026-11-07T19:19:23.554Z"
+    }
+  ],
+  "contractuels_contrats": [
+    {
+      "id": "ct_1793993988192_0_kfce",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "CTR-EFF",
+      "designation": "EFFEUILLAGE D1 & D2",
+      "prix_unitaire": 125,
+      "unite": "JOUR",
+      "mode_remuneration": "JOUR",
+      "description": "Effeuillage et nettoyage des grappes",
+      "actif": true,
+      "created_at": "2026-11-06T19:39:48.084Z",
+      "updated_at": "2026-11-06T19:39:48.084Z"
+    },
+    {
+      "id": "ct_1793993988258_1_h4x4",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "CTR-REC",
+      "designation": "RÉCOLTE TOMATE CERISE",
+      "prix_unitaire": 2.8,
+      "unite": "CAISSE",
+      "mode_remuneration": "UNITE",
+      "description": "Cueillette calibrée en caisse",
+      "actif": true,
+      "created_at": "2026-11-06T19:39:48.084Z",
+      "updated_at": "2026-11-06T19:39:48.084Z"
+    },
+    {
+      "id": "ct_1793993988339_2_11po",
+      "company_id": "cie_lahcen_pointeur",
+      "code": "CTR-PAL",
+      "designation": "PALISSAGE SERRES",
+      "prix_unitaire": 18,
+      "unite": "HEURE",
+      "mode_remuneration": "HEURE",
+      "description": "Attache des plants et clips tuteurs",
+      "actif": true,
+      "created_at": "2026-11-06T19:39:48.084Z",
+      "updated_at": "2026-11-06T19:39:48.084Z"
+    }
+  ],
+  "ouvriers": [
+    {
+      "id": "ouv_1",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 1,
+      "nom": "Mohammed Amine",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_2",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 2,
+      "nom": "Fatima Zahra",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_3",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 3,
+      "nom": "Youssef El Idrissi",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_4",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 4,
+      "nom": "Hassan Benali",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_5",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 5,
+      "nom": "Khadija Mansouri",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_6",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 6,
+      "nom": "Brahim Oukacha",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_7",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 7,
+      "nom": "Aïcha Tazi",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_8",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 8,
+      "nom": "Omar Naciri",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_9",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 9,
+      "nom": "Salma Daoudi",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_10",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 10,
+      "nom": "Khalid Berrada",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_11",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 11,
+      "nom": "Zineb Alaoui",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_12",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 12,
+      "nom": "Mustapha Chaoui",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_13",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 13,
+      "nom": "Nadia El Fassi",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_14",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 14,
+      "nom": "Rachid Bouzid",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "ouv_15",
+      "company_id": "cie_lahcen_pointeur",
+      "numero": 15,
+      "nom": "Samira Bennani",
+      "actif": true,
+      "createdAt": "2026-01-01T00:00:00.000Z"
     }
   ]
 }

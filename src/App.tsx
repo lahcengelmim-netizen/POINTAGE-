@@ -24,6 +24,8 @@ import { LoginPage } from './components/LoginPage';
 import { StockProDashboard } from './components/StockPro/StockProDashboard';
 import { HeuresSupplementairesView } from './components/HeuresSupplementairesView';
 import { TachesSupplementairesView } from './components/TachesSupplementairesView';
+import { SupplementairesAdminModule } from './components/Supplementaires/SupplementairesAdminModule';
+import { ContractuellesModule } from './components/Contractuelles/ContractuellesModule';
 import { useUser } from './context/UserContext';
 import { HelpCircle, AlertTriangle, ShieldAlert } from 'lucide-react';
 
@@ -49,6 +51,7 @@ export default function App() {
     heuresSuppDetails,
     stats,
     recapWhatsAppText,
+    pointageFinancier,
     checkWorkerByNumber,
     pointWorker,
     setTaskWorkers,
@@ -99,6 +102,13 @@ export default function App() {
   const activeUser = user || currentUser;
 
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>(() => {
+    if (
+      activeUser.role === 'caporal_contractuelles' ||
+      activeUser.module_attribue === 'contractuelles' ||
+      activeUser.username === 'tariq'
+    ) {
+      return 'contractuelles';
+    }
     return activeUser.role === 'caporal' ? 'recolte' : 'pointage';
   });
   const [showHelpModal, setShowHelpModal] = useState<boolean>(false);
@@ -107,13 +117,22 @@ export default function App() {
   const [adminRecolteSubMode, setAdminRecolteSubMode] = useState<'dashboard' | 'saisie'>('dashboard');
 
   // RÈGLE D'AUTORISATION STRICTE :
-  // Le caporal a accès aux modules 'recolte', 'heures_supp', et 'taches_supp'.
-  // S'il tente d'accéder à un écran réservé à l'Admin, le rediriger vers 'recolte'.
+  // - Le caporal Contractuelles a accès UNIQUEMENT à 'contractuelles'.
+  // - Le caporal Récolte a accès aux modules 'recolte', 'heures_supp', et 'taches_supp'.
+  // - S'ils tentent d'accéder à un écran non autorisé, les rediriger vers leur écran respectif.
   useEffect(() => {
-    if (activeUser.role === 'caporal' && !['recolte', 'heures_supp', 'taches_supp'].includes(activeScreen)) {
+    if (
+      activeUser.role === 'caporal_contractuelles' ||
+      activeUser.module_attribue === 'contractuelles' ||
+      activeUser.username === 'tariq'
+    ) {
+      if (activeScreen !== 'contractuelles') {
+        setActiveScreen('contractuelles');
+      }
+    } else if (activeUser.role === 'caporal' && !['recolte', 'heures_supp', 'taches_supp'].includes(activeScreen)) {
       setActiveScreen('recolte');
     }
-  }, [activeUser.role, activeScreen]);
+  }, [activeUser.role, activeUser.module_attribue, activeUser.username, activeScreen]);
 
   // Synchronisation en arrière-plan à la reconnexion internet
   useEffect(() => {
@@ -152,8 +171,13 @@ export default function App() {
     return <LoginPage />;
   }
 
-  // Vérification de sécurité pour empêcher un caporal d'accéder aux écrans d'administration
-  const isCaporal = activeUser.role === 'caporal';
+  // Vérification de sécurité pour restreindre les accès selon le rôle
+  const isCaporalContractuel =
+    activeUser.role === 'caporal_contractuelles' ||
+    activeUser.module_attribue === 'contractuelles' ||
+    activeUser.username === 'tariq';
+  const isCaporal = activeUser.role === 'caporal' && !isCaporalContractuel;
+  const isAnyCaporal = isCaporal || isCaporalContractuel;
 
   return (
     <div className="min-h-screen bg-slate-200/80 text-slate-900 flex justify-center selection:bg-emerald-500 selection:text-white">
@@ -173,7 +197,7 @@ export default function App() {
         />
 
         {/* Barre de statistiques : visible uniquement pour l'administrateur */}
-        {!isCaporal && <StatsBar stats={stats} />}
+        {!isAnyCaporal && <StatsBar stats={stats} />}
 
         {/* Alerte Quota Stockage si la mémoire locale du navigateur est saturée */}
         {storageQuotaError && (
@@ -325,6 +349,7 @@ export default function App() {
                 gazoilStatus={gazoilStatus}
                 onNavigateGazoil={() => setActiveScreen('gazoil')}
                 onNavigateGestion={() => setActiveScreen('gestion')}
+                pointageFinancier={pointageFinancier}
               />
             )
           )}
@@ -366,14 +391,35 @@ export default function App() {
             )
           )}
 
-          {/* ===================== ÉCRAN STOCK PRO (RÉSERVÉ ADMIN) ===================== */}
-          {activeScreen === 'stock' && (
+          {/* ===================== ÉCRAN CONTRACTUELLES (NOUVEAU MODULE INDÉPENDANT) ===================== */}
+          {activeScreen === 'contractuelles' && (
+            isCaporal && !isCaporalContractuel ? (
+              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            ) : (
+              <ContractuellesModule
+                selectedDate={selectedDate}
+                onSelectDate={setSelectedDate}
+                domaines={domaines}
+                serres={serres}
+                taches={taches}
+                currentUser={activeUser}
+              />
+            )
+          )}
+
+          {/* ===================== ÉCRAN SUPPLÉMENTAIRES (RÉSERVÉ ADMIN) ===================== */}
+          {activeScreen === 'supplementaires' && (
             isCaporal ? (
               <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
             ) : (
-              <StockProDashboard
+              <SupplementairesAdminModule
                 currentUser={activeUser}
+                allOuvriers={allOuvriers}
+                taches={taches}
                 domaines={domaines}
+                serres={serres}
+                selectedDate={selectedDate}
+                onSelectDate={setSelectedDate}
               />
             )
           )}
@@ -406,6 +452,7 @@ export default function App() {
                 totalPointes={stats.pointes}
                 totalAbsents={stats.restants}
                 totalSupp={heuresSupplementaires.length}
+                pointageFinancier={pointageFinancier}
               />
             )
           )}
@@ -434,7 +481,7 @@ export default function App() {
         </main>
 
         {/* Bouton Flottant d'Aide & Guide de test (pour Administrateur) */}
-        {!isCaporal && (
+        {!isAnyCaporal && (
           <button
             type="button"
             onClick={() => setShowHelpModal(true)}
@@ -446,7 +493,7 @@ export default function App() {
         )}
 
         {/* Modale Pointage des Heures Supplémentaires */}
-        {!isCaporal && (
+        {!isAnyCaporal && (
           <HeuresSupplementairesModal
             isOpen={showHeuresSuppModal}
             onClose={() => setShowHeuresSuppModal(false)}
@@ -478,7 +525,9 @@ export default function App() {
           currentUser={activeUser}
           onLoginSuccess={(user) => {
             switchUser(user);
-            if (user.role === 'caporal') {
+            if (user.role === 'caporal_contractuelles' || user.module_attribue === 'contractuelles') {
+              setActiveScreen('contractuelles');
+            } else if (user.role === 'caporal') {
               setActiveScreen('recolte');
             }
           }}

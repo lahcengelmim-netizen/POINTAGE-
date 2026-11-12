@@ -11,7 +11,9 @@ import {
   Send,
   MessageSquare,
   Sparkles,
+  Banknote,
 } from 'lucide-react';
+import { CalculFinancierPointageResult } from '../utils/pointageFinancier';
 
 interface RecapWhatsAppProps {
   recapText: string;
@@ -19,6 +21,7 @@ interface RecapWhatsAppProps {
   totalPointes: number;
   totalAbsents: number;
   totalSupp?: number;
+  pointageFinancier?: CalculFinancierPointageResult;
 }
 
 export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
@@ -26,6 +29,7 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
   totalPointes,
   totalAbsents,
   totalSupp = 0,
+  pointageFinancier,
 }) => {
   const [copied, setCopied] = useState(false);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
@@ -120,6 +124,26 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
         </div>
       )}
 
+      {/* Bandeau récapitulatif financier */}
+      {pointageFinancier && pointageFinancier.categoriesPresentes.length > 0 && (
+        <div className="bg-gradient-to-r from-emerald-900 to-slate-900 text-white p-3 rounded-2xl flex items-center justify-between text-xs shadow-xs border border-emerald-800/60">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+              <Banknote className="w-4 h-4" />
+            </div>
+            <div className="truncate">
+              <span className="font-black text-slate-100">Total financier : </span>
+              <span className="text-[11px] text-emerald-300">
+                {pointageFinancier.categoriesPresentes.map((c) => `${c.nomAffiche}: ${c.montantTotal} DH`).join(' • ')}
+              </span>
+            </div>
+          </div>
+          <span className="font-mono font-black text-sm text-emerald-300 shrink-0 ml-2">
+            {pointageFinancier.totalGeneralDH.toLocaleString('fr-FR')} DH
+          </span>
+        </div>
+      )}
+
       {/* Prévisualisation façon WhatsApp */}
       <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
         {/* En-tête style conversation WhatsApp */}
@@ -146,6 +170,12 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
               <>
                 <span>•</span>
                 <span className="text-amber-400 font-extrabold">{totalSupp} sup.</span>
+              </>
+            )}
+            {pointageFinancier && pointageFinancier.totalGeneralDH > 0 && (
+              <>
+                <span>•</span>
+                <span className="text-emerald-300 font-extrabold">{pointageFinancier.totalGeneralDH} DH</span>
               </>
             )}
           </div>

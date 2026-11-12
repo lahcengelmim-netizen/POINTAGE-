@@ -37,15 +37,38 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
+        const userEmail = (authUser?.email || '').toLowerCase();
+        const isTariq = userEmail === 'tariq@caporal.com' || profile.username === 'tariq';
+        const isContractuel =
+          profile.role === 'caporal_contractuelles' ||
+          profile.module_attribue === 'contractuelles' ||
+          isTariq;
+
+        const assignedModule = isContractuel ? 'contractuelles' : (profile.module_attribue || 'recolte');
+        const assignedRole = isContractuel
+          ? (profile.role === 'admin' ? 'admin' : 'caporal_contractuelles')
+          : (profile.role || 'caporal');
+
         const userAcc: UserAccount = {
           id: profile.id,
-          username: profile.username || authUser?.email?.split('@')[0] || 'user',
-          nom: profile.nom || 'Utilisateur',
-          role: profile.role || 'caporal',
+          username: profile.username || userEmail.split('@')[0] || 'user',
+          nom: profile.nom || (isTariq ? 'Tariq (Caporal Contractuelles)' : 'Utilisateur'),
+          role: assignedRole as any,
+          module_attribue: assignedModule as any,
           company_id: userCompId,
           actif: profile.actif !== false,
           createdAt: profile.created_at || new Date().toISOString(),
         };
+
+        // Si tariq n'a pas encore module_attribue = 'contractuelles' enregistré dans public.profiles, mettre à jour la table
+        if (isTariq && (profile.module_attribue !== 'contractuelles' || profile.role !== 'caporal_contractuelles')) {
+          supabase
+            .from('profiles')
+            .update({ module_attribue: 'contractuelles', role: 'caporal_contractuelles' })
+            .eq('id', profile.id)
+            .then(() => {}, () => {});
+        }
+
         storage.setCurrentUser(userAcc);
         return userAcc;
       }
@@ -53,19 +76,24 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Si le profil n'existe pas encore dans public.profiles (premier login), le créer avec son UUID Supabase Auth
       if (authUser) {
         const userEmail = (authUser.email || '').toLowerCase();
+        const isTariq = userEmail === 'tariq@caporal.com';
         const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
-        const role = authUser.user_metadata?.role || (isAdminEmail ? 'admin' : 'caporal');
+        const role = isTariq
+          ? 'caporal_contractuelles'
+          : (authUser.user_metadata?.role || (isAdminEmail ? 'admin' : 'caporal'));
         const nom =
           authUser.user_metadata?.nom ||
-          (role === 'admin' ? 'Lahcen (Administrateur)' : 'Caporal (Récolte)');
+          (role === 'admin' ? 'Lahcen (Administrateur)' : isTariq ? 'Tariq (Caporal Contractuelles)' : 'Caporal (Récolte)');
         const username =
           authUser.user_metadata?.username || userEmail.split('@')[0] || 'user';
+        const module_attribue = isTariq ? 'contractuelles' : (authUser.user_metadata?.module_attribue || 'recolte');
 
         const newProfile = {
           id: userId,
           username,
           nom,
           role,
+          module_attribue,
           company_id: authUser.user_metadata?.company_id || 'cie_lahcen_pointeur',
           actif: true,
         };
@@ -81,7 +109,8 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
           id: finalProfile.id,
           username: finalProfile.username,
           nom: finalProfile.nom,
-          role: finalProfile.role as 'admin' | 'caporal',
+          role: finalProfile.role as any,
+          module_attribue: (finalProfile as any).module_attribue || 'contractuelles',
           company_id: finalProfile.company_id || 'cie_lahcen_pointeur',
           actif: finalProfile.actif !== false,
           createdAt: new Date().toISOString(),

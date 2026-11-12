@@ -1,4 +1,0 @@
-{
-  "summary": "SQL migration script for adding serre_id and serre_nom to public.pointages table with performance index.",
-  "updatedAt": "2026-11-06T18:09:53.101927348Z"
-}

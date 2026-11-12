@@ -18,6 +18,7 @@ import {
   Package,
   Clock,
   ClipboardList,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { UserRole } from '../types';
 
@@ -26,7 +27,9 @@ export type ActiveScreen =
   | 'taches'
   | 'absences'
   | 'recolte'
+  | 'contractuelles'
   | 'stock'
+  | 'supplementaires'
   | 'gazoil'
   | 'recap'
   | 'gestion'
@@ -50,61 +53,67 @@ export const Navigation: React.FC<NavigationProps> = ({
   currentUserRole = 'admin',
   onOpenAccountModal,
 }) => {
-  // Navigation pour le rôle Caporal : Récolte (Chargement/Déchargement), Heures Sup, Tâches Sup, et Mon Compte
-  if (currentUserRole === 'caporal') {
+  // Navigation pour le rôle Caporal Contractuelles : Contractuelles et Mon Compte
+  if (currentUserRole === 'caporal_contractuelles') {
     return (
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-xl px-2 py-1.5 pb-safe">
-        <div className="max-w-md mx-auto grid grid-cols-4 gap-1.5">
-          {/* Module 1 : Récolte, Chargement & Déchargement */}
+        <div className="max-w-md mx-auto grid grid-cols-2 gap-2">
+          {/* Module 1 : Pointage Contractuelles */}
           <button
             type="button"
-            onClick={() => onSelectScreen('recolte')}
-            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl transition active:scale-95 ${
-              activeScreen === 'recolte'
+            onClick={() => onSelectScreen('contractuelles')}
+            className={`flex flex-col items-center justify-center py-2.5 px-2 rounded-xl transition active:scale-95 ${
+              activeScreen === 'contractuelles'
                 ? 'text-emerald-950 bg-emerald-100 font-black shadow-xs border border-emerald-300'
                 : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
             }`}
           >
-            <Grape className="w-5 h-5 text-emerald-700 mb-0.5" />
-            <span className="text-[10px] leading-tight text-center">Récolte</span>
-          </button>
-
-          {/* Module 2 : Heures Supplémentaires */}
-          <button
-            type="button"
-            onClick={() => onSelectScreen('heures_supp')}
-            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl transition active:scale-95 ${
-              activeScreen === 'heures_supp'
-                ? 'text-amber-950 bg-amber-100 font-black shadow-xs border border-amber-300'
-                : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
-            }`}
-          >
-            <Clock className="w-5 h-5 text-amber-700 mb-0.5" />
-            <span className="text-[10px] leading-tight text-center">Heures Sup</span>
-          </button>
-
-          {/* Module 3 : Tâches Supplémentaires */}
-          <button
-            type="button"
-            onClick={() => onSelectScreen('taches_supp')}
-            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl transition active:scale-95 ${
-              activeScreen === 'taches_supp'
-                ? 'text-blue-950 bg-blue-100 font-black shadow-xs border border-blue-300'
-                : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
-            }`}
-          >
-            <ClipboardList className="w-5 h-5 text-blue-700 mb-0.5" />
-            <span className="text-[10px] leading-tight text-center">Tâches Sup</span>
+            <FileSpreadsheet className="w-5 h-5 text-emerald-700 mb-0.5" />
+            <span className="text-[11px] leading-tight text-center font-bold">Contractuelles</span>
           </button>
 
           {/* Mon Compte */}
           <button
             type="button"
             onClick={onOpenAccountModal}
-            className="flex flex-col items-center justify-center py-2 px-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-95"
+            className="flex flex-col items-center justify-center py-2.5 px-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-95"
           >
             <User className="w-5 h-5 text-slate-600 mb-0.5" />
-            <span className="text-[10px] leading-tight text-center">Mon Compte</span>
+            <span className="text-[11px] leading-tight text-center">Mon Compte</span>
+          </button>
+        </div>
+      </nav>
+    );
+  }
+
+  // Navigation pour le rôle Caporal : Récolte (Chargement/Déchargement) et Mon Compte
+  // INTERDICTION STRICTE : Aucun accès ni bouton Heures Sup / Tâches Sup
+  if (currentUserRole === 'caporal') {
+    return (
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-xl px-2 py-1.5 pb-safe">
+        <div className="max-w-md mx-auto grid grid-cols-2 gap-2">
+          {/* Module 1 : Récolte, Chargement & Déchargement */}
+          <button
+            type="button"
+            onClick={() => onSelectScreen('recolte')}
+            className={`flex flex-col items-center justify-center py-2.5 px-2 rounded-xl transition active:scale-95 ${
+              activeScreen === 'recolte'
+                ? 'text-emerald-950 bg-emerald-100 font-black shadow-xs border border-emerald-300'
+                : 'text-slate-600 hover:text-slate-900 bg-slate-50 font-bold'
+            }`}
+          >
+            <Grape className="w-5 h-5 text-emerald-700 mb-0.5" />
+            <span className="text-[11px] leading-tight text-center font-bold">Récolte</span>
+          </button>
+
+          {/* Mon Compte */}
+          <button
+            type="button"
+            onClick={onOpenAccountModal}
+            className="flex flex-col items-center justify-center py-2.5 px-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-95"
+          >
+            <User className="w-5 h-5 text-slate-600 mb-0.5" />
+            <span className="text-[11px] leading-tight text-center">Mon Compte</span>
           </button>
         </div>
       </nav>
@@ -114,7 +123,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   // Navigation complète pour l'Administrateur
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-lg px-1 py-1.5 pb-safe">
-      <div className="max-w-md mx-auto grid grid-cols-8 gap-0.5">
+      <div className="max-w-md mx-auto grid grid-cols-10 gap-0.5">
         {/* ÉCRAN 1 : POINTAGE */}
         <button
           type="button"
@@ -130,7 +139,7 @@ export const Navigation: React.FC<NavigationProps> = ({
               activeScreen === 'pointage' ? 'text-emerald-600 stroke-[2.5]' : 'text-slate-500'
             }`}
           />
-          <span className="text-[8px] mt-0.5 tracking-tight truncate">Pointage</span>
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Pointage</span>
         </button>
 
         {/* ÉCRAN 2 : TÂCHES */}
@@ -148,7 +157,7 @@ export const Navigation: React.FC<NavigationProps> = ({
               activeScreen === 'taches' ? 'text-purple-600 stroke-[2.5]' : 'text-slate-500'
             }`}
           />
-          <span className="text-[8px] mt-0.5 tracking-tight truncate">Tâches</span>
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Tâches</span>
         </button>
 
         {/* ÉCRAN 3 : ABSENCES */}
@@ -173,7 +182,7 @@ export const Navigation: React.FC<NavigationProps> = ({
               </span>
             )}
           </div>
-          <span className="text-[8px] mt-0.5 tracking-tight truncate">Absents</span>
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Absents</span>
         </button>
 
         {/* ÉCRAN 4 : RÉCOLTE */}
@@ -191,10 +200,28 @@ export const Navigation: React.FC<NavigationProps> = ({
               activeScreen === 'recolte' ? 'text-purple-700 stroke-[2.5]' : 'text-slate-500'
             }`}
           />
-          <span className="text-[8px] mt-0.5 tracking-tight truncate">Récolte</span>
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Récolte</span>
         </button>
 
-        {/* ÉCRAN 5 : STOCK PRO (NOUVEAU) */}
+        {/* ÉCRAN 5 : CONTRACTUELLES (NOUVEAU MODULE) */}
+        <button
+          type="button"
+          onClick={() => onSelectScreen('contractuelles')}
+          className={`flex flex-col items-center justify-center py-1 px-0.5 rounded-xl transition active:scale-95 ${
+            activeScreen === 'contractuelles'
+              ? 'text-emerald-900 bg-emerald-100 font-black'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <FileSpreadsheet
+            className={`w-4 h-4 ${
+              activeScreen === 'contractuelles' ? 'text-emerald-700 stroke-[2.5]' : 'text-slate-500'
+            }`}
+          />
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Contract.</span>
+        </button>
+
+        {/* ÉCRAN 6 : STOCK PRO */}
         <button
           type="button"
           onClick={() => onSelectScreen('stock')}
@@ -209,7 +236,27 @@ export const Navigation: React.FC<NavigationProps> = ({
               activeScreen === 'stock' ? 'text-indigo-700 stroke-[2.5]' : 'text-slate-500'
             }`}
           />
-          <span className="text-[8px] mt-0.5 tracking-tight truncate">Stock</span>
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Stock</span>
+        </button>
+
+        {/* ÉCRAN 7 : SUPPLÉMENTAIRES (ADMIN ONLY) */}
+        <button
+          type="button"
+          onClick={() => onSelectScreen('supplementaires')}
+          className={`flex flex-col items-center justify-center py-1 px-0.5 rounded-xl transition active:scale-95 ${
+            activeScreen === 'supplementaires' || activeScreen === 'heures_supp' || activeScreen === 'taches_supp'
+              ? 'text-amber-900 bg-amber-100 font-black'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <Clock
+            className={`w-4 h-4 ${
+              activeScreen === 'supplementaires' || activeScreen === 'heures_supp' || activeScreen === 'taches_supp'
+                ? 'text-amber-700 stroke-[2.5]'
+                : 'text-slate-500'
+            }`}
+          />
+          <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Supplém.</span>
         </button>
 
         {/* ÉCRAN 6 : GAZOIL */}

@@ -21,6 +21,10 @@ import {
 import * as storage from '../services/storage';
 import { generateWhatsAppRecap } from '../utils/whatsappFormatter';
 import {
+  calculerPointageFinancierMatin,
+  CalculFinancierPointageResult,
+} from '../utils/pointageFinancier';
+import {
   syncAndFetchHeuresSupplementairesServer,
   createHeureSupplementaireServer,
   updateHeureSupplementaireServer,
@@ -205,6 +209,17 @@ export function useAgriPointage() {
       heuresSupp: heuresSupplementaires,
     });
   }, [selectedDate, activeOuvriers, taches, pointages, affectations, domaines, defaultDomaineId, heuresSupplementaires]);
+
+  // Récapitulatif financier automatique pour POINTAGE MATIN D1–D5
+  const pointageFinancier = useMemo<CalculFinancierPointageResult>(() => {
+    return calculerPointageFinancierMatin({
+      pointages,
+      affectations,
+      taches,
+      domaines,
+      defaultDomaineId,
+    });
+  }, [pointages, affectations, taches, domaines, defaultDomaineId]);
 
   // --- ACTIONS ---
 
@@ -694,6 +709,7 @@ export function useAgriPointage() {
     heuresSuppDetails,
     stats,
     recapWhatsAppText,
+    pointageFinancier,
     checkWorkerByNumber,
     pointWorker,
     setTaskWorkers,

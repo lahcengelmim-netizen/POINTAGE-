@@ -15,7 +15,8 @@
  * SANS TÂCHE (2) : 14.20
  */
 
-import { Ouvrier, Tache, Pointage, Domaine, AffectationTache, HeureSupplementaire } from '../types';
+import { Ouvrier, Tache, Pointage, Domaine, AffectationTache, HeureSupplementaire } from '../types/index';
+import { calculerPointageFinancierMatin } from './pointageFinancier';
 
 export function formatDateJJMM(dateIso: string): string {
   const parts = dateIso.split('-');
@@ -178,7 +179,7 @@ export function generateWhatsAppRecap(params: {
     if (p.tache_id) assignedWorkerIds.add(p.ouvrier_id);
   });
 
-  const sansTacheNumeros = pointages
+  const sansTacheNumeros = presentPointages
     .filter((p) => !assignedWorkerIds.has(p.ouvrier_id))
     .map((p) => p.numero_ouvrier)
     .sort((a, b) => a - b);
@@ -216,6 +217,21 @@ export function generateWhatsAppRecap(params: {
 
     lignes.push('');
     lignes.push(`SUPPLEMENTAIRE (${suppWorkerNums.length}) : ${formattedWorkers.join(' - ')}`);
+  }
+
+  // 4. RÉCAPITULATIF FINANCIER — POINTAGE MATIN D1–D5
+  // Calcul automatique des montants selon le barème officiel
+  const finResult = calculerPointageFinancierMatin({
+    pointages,
+    affectations,
+    taches,
+    domaines,
+    defaultDomaineId,
+  });
+
+  if (finResult.texteRecapWhatsApp) {
+    lignes.push('');
+    lignes.push(finResult.texteRecapWhatsApp);
   }
 
   return lignes.join('\n');

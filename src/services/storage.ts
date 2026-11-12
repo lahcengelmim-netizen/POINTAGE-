@@ -140,6 +140,10 @@ const DEFAULT_OUVRIERS: Ouvrier[] = [
 ];
 
 const DEFAULT_TACHES: Tache[] = [
+  { id: 'tch_instable', company_id: 'cie_lahcen_pointeur', code: 'INS01', nom: 'INSTABLE', couleur: '#16a34a', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
+  { id: 'tch_stationnaire', company_id: 'cie_lahcen_pointeur', code: 'STA01', nom: 'STATIONNAIRE', couleur: '#0284c7', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
+  { id: 'tch_ebourgeonnage_d5', company_id: 'cie_lahcen_pointeur', code: 'EBD05', nom: 'ÉBOURGEONNAGE D5', couleur: '#ea580c', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
+  { id: 'tch_traitement_phyto', company_id: 'cie_lahcen_pointeur', code: 'PHY01', nom: 'TRAITEMENT PHYTO', couleur: '#dc2626', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
   { id: 'tch_recolte', company_id: 'cie_lahcen_pointeur', code: 'R01', nom: 'RECOLTE', couleur: '#16a34a', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
   { id: 'tch_effeuillage', company_id: 'cie_lahcen_pointeur', code: 'E01', nom: 'EFFEUILLAGE', couleur: '#2563eb', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
   { id: 'tch_entretien', company_id: 'cie_lahcen_pointeur', code: 'EN01', nom: 'ENTRETIEN', couleur: '#d97706', ouvriers_autorises: 'tous', createdAt: new Date().toISOString() },
@@ -248,8 +252,28 @@ export function initStorage(): void {
             else if (t.nom === 'EFFEUILLAGE') { t.code = 'E01'; updated = true; }
             else if (t.nom === 'ENTRETIEN') { t.code = 'EN01'; updated = true; }
             else if (t.nom === 'PLANTATION') { t.code = 'P01'; updated = true; }
+            else if (t.nom === 'STATIONNAIRE') { t.code = 'STA01'; updated = true; }
+            else if (t.nom === 'ÉBOURGEONNAGE D5') { t.code = 'EBD05'; updated = true; }
+            else if (t.nom === 'TRAITEMENT PHYTO') { t.code = 'PHY01'; updated = true; }
+            else if (t.nom === 'INSTABLE') { t.code = 'INS01'; updated = true; }
           }
         });
+
+        // Assurer la présence des tâches officielles du barème pour la société active
+        const existingNames = new Set(parsedTaches.map((t) => t.nom.toUpperCase().trim()));
+        const financialDefaults = [
+          { id: 'tch_stationnaire', company_id: DEFAULT_COMPANY.id, code: 'STA01', nom: 'STATIONNAIRE', couleur: '#0284c7', ouvriers_autorises: 'tous' as const, createdAt: new Date().toISOString() },
+          { id: 'tch_ebourgeonnage_d5', company_id: DEFAULT_COMPANY.id, code: 'EBD05', nom: 'ÉBOURGEONNAGE D5', couleur: '#ea580c', ouvriers_autorises: 'tous' as const, createdAt: new Date().toISOString() },
+          { id: 'tch_traitement_phyto', company_id: DEFAULT_COMPANY.id, code: 'PHY01', nom: 'TRAITEMENT PHYTO', couleur: '#dc2626', ouvriers_autorises: 'tous' as const, createdAt: new Date().toISOString() },
+          { id: 'tch_instable', company_id: DEFAULT_COMPANY.id, code: 'INS01', nom: 'INSTABLE', couleur: '#16a34a', ouvriers_autorises: 'tous' as const, createdAt: new Date().toISOString() },
+        ];
+        financialDefaults.forEach((def) => {
+          if (!existingNames.has(def.nom)) {
+            parsedTaches.push(def);
+            updated = true;
+          }
+        });
+
         if (updated) {
           safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify(parsedTaches));
         }

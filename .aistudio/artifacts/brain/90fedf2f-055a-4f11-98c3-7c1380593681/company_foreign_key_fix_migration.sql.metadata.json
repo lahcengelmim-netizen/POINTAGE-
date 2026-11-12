@@ -1,5 +1,0 @@
-{
-  "summary": "Migration SQL pour la résolution définitive de l'intégrité référentielle company_id et de la contrainte foreign key stock_produits_company_id_fkey dans Supabase PostgreSQL.",
-  "updatedAt": "2026-11-02T20:57:29.257120898Z",
-  "userFacing": true
-}

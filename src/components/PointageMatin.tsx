@@ -18,10 +18,12 @@ import {
   ChevronDown,
   ChevronUp,
   Fuel,
+  Banknote,
 } from 'lucide-react';
-import { Ouvrier, Tache, Pointage, Domaine } from '../types';
+import { Ouvrier, Tache, Pointage, Domaine } from '../types/index';
 import { TaskModal } from './TaskModal';
 import { formatTacheLabel } from '../utils/tacheUtils';
+import { CalculFinancierPointageResult } from '../utils/pointageFinancier';
 import * as storage from '../services/storage';
 
 interface PointageDetailsItem {
@@ -70,6 +72,7 @@ interface PointageMatinProps {
   };
   onNavigateGazoil?: () => void;
   onNavigateGestion?: () => void;
+  pointageFinancier?: CalculFinancierPointageResult;
 }
 
 export const PointageMatin: React.FC<PointageMatinProps> = ({
@@ -84,11 +87,13 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
   onUpdatePointage,
   onUpdateTask,
   onRemovePointage,
+  selectedDate,
   onOpenHeuresSupp,
   heuresSuppCount = 0,
   gazoilStatus,
   onNavigateGazoil,
   onNavigateGestion,
+  pointageFinancier,
 }) => {
   const [inputNumber, setInputNumber] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -803,6 +808,59 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
         {/* CONTENU ONGLET 2 : PRÉSENTS (Déjà pointés aujourd'hui) */}
         {activeTab === 'pointes' && (
           <div className="p-3">
+            {/* RÉCAPITULATIF FINANCIER DU JOUR (POINTAGE MATIN) */}
+            {pointageFinancier && pointageFinancier.categoriesPresentes.length > 0 && (
+              <div className="mb-3 bg-gradient-to-br from-emerald-900 to-slate-900 text-white rounded-2xl p-3.5 shadow-md border border-emerald-700/50">
+                <div className="flex items-center justify-between pb-2 border-b border-emerald-800/60">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-black">
+                      <Banknote className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-black uppercase tracking-wider text-emerald-300">
+                        Récapitulatif Financier (Pointage Matin)
+                      </div>
+                      <div className="text-[10px] text-slate-300">
+                        {pointageFinancier.totalOuvriersComptabilises} ouvrier(s) comptabilisé(s) • Absents exclus
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[10px] text-emerald-300 font-bold uppercase tracking-wider">TOTAL GÉNÉRAL</div>
+                    <div className="text-lg font-black text-white font-mono tracking-tight">
+                      {pointageFinancier.totalGeneralDH.toLocaleString('fr-FR')} DH
+                    </div>
+                  </div>
+                </div>
+
+                {/* Lignes par tâche pointée */}
+                <div className="mt-2.5 space-y-1.5">
+                  {pointageFinancier.categoriesPresentes.map((cat) => (
+                    <div
+                      key={cat.key}
+                      className="flex items-center justify-between text-xs bg-white/10 hover:bg-white/15 px-2.5 py-1.5 rounded-xl border border-white/5 transition"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                        <span className="font-bold text-white truncate">{cat.nomAffiche}</span>
+                        <span className="text-[10px] text-slate-300 font-mono">
+                          ({cat.nombreOuvriers} ouvrier{cat.nombreOuvriers > 1 ? 's' : ''})
+                        </span>
+                      </div>
+                      <div className="font-mono text-emerald-200 font-black shrink-0">
+                        {cat.nombreOuvriers} × {cat.tarifUnitaire} DH = <span className="text-white font-bold">{cat.montantTotal} DH</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-2.5 pt-2 border-t border-emerald-800/40 flex items-center justify-between text-[10px] text-emerald-300/80">
+                  <span>✓ Calcul automatique en direct</span>
+                  <span>✓ Inclus dans le message WhatsApp</span>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-between text-xs text-slate-500 font-semibold mb-2">
               <span>Ouvriers enregistrés aujourd'hui :</span>
               <span className="font-mono">{pointesDetails.length} présent(s)</span>

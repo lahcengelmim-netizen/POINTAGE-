@@ -173,7 +173,7 @@ export interface GazoilConfig {
 
 // ------------------------- MULTI-COMPTES & RÔLES -------------------------
 
-export type UserRole = 'admin' | 'caporal';
+export type UserRole = 'admin' | 'caporal' | 'caporal_contractuelles';
 
 export interface UserAccount {
   id: string;
@@ -182,6 +182,9 @@ export interface UserAccount {
   role: UserRole;
   company_id: string; // ID de l'entreprise rattachée
   permissions?: any; // Permissions JSONB
+  module_attribue?: 'recolte' | 'contractuelles' | 'all'; // Module dédié pour le Caporal
+  domaines_autorises?: string[]; // Domaines autorisés pour le Caporal
+  serres_autorisees?: string[]; // Serres autorisées
   passwordHash?: string; // Hachage salé (local dev)
   salt?: string;
   actif: boolean;
@@ -306,5 +309,113 @@ export interface StockFilter {
   startDate?: string;
   endDate?: string;
   type?: StockMouvementType | 'ALL';
+}
+
+// ------------------------- MODULE GESTION CONTRACTUELLES -------------------------
+
+export type ModeRemuneration = 'JOUR' | 'TACHE' | 'UNITE' | 'HEURE';
+
+export interface ContractuelContrat {
+  id: string;
+  company_id: string;
+  code?: string;
+  designation: string; // Ex: 'TAILLE & ÉGOURGEONNAGE', 'RÉCOLTE TOMATES', 'EFFEUILLAGE D1'
+  prix_unitaire: number; // Prix de référence en DH
+  unite: string; // Ex: 'JOUR', 'TACHE', 'CAISSE', 'KG', 'HEURE', 'M2'
+  mode_remuneration: ModeRemuneration;
+  domaine_id?: string;
+  description?: string;
+  actif: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface ContractuelOuvrier {
+  id: string;
+  company_id: string;
+  nom: string;
+  prenom: string;
+  nom_complet: string;
+  matricule: string;
+  domaine_id: string; // Ex: 'dom_d2'
+  serre_id?: string | null; // Serre habituelle
+  mode_remuneration: ModeRemuneration;
+  prix_convenu: number; // Prix en DH
+  unite?: string; // Ex: 'JOUR', 'TACHE', 'CAISSE', 'KG', 'HEURE', 'PIÈCE'
+  actif: boolean;
+  telephone?: string;
+  notes?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface ContractuelActivite {
+  id: string;
+  pointage_id?: string;
+  company_id: string;
+  ouvrier_id: string;
+  nom_complet: string;
+  matricule: string;
+  date: string; // Format ISO YYYY-MM-DD
+  contrat_id?: string | null;
+  contrat_nom?: string | null;
+  tache_id: string;
+  tache_nom?: string; // Saisie libre par le Caporal (ex: 'Nettoyage des serres', 'Effeuillage')
+  domaine_id: string;
+  serre_id?: string | null; // Première serre ou serre principale (compatibilité rétroactive)
+  serre_nom?: string; // Nom ou texte descriptif des serres
+  serres_ids?: string[]; // Choix multiple des serres (ex: ['serre_1', 'serre_2', 'serre_5'])
+  serres_noms?: string[]; // Noms des serres sélectionnées
+  serres_texte?: string | null; // Texte lisible (ex: 'Serre 1, Serre 2, Serre 5')
+  mode_remuneration: ModeRemuneration;
+  quantite: number;
+  unite: string;
+  prix_unitaire: number; // Prix historique figé au pointage
+  montant_total: number; // quantite * prix_unitaire (la multi-sélection ne multiplie pas le prix)
+  observation?: string | null;
+  created_by_id?: string;
+  created_by_nom?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface ContractuelPointage {
+  id: string;
+  company_id: string;
+  ouvrier_id: string;
+  matricule: string;
+  nom_complet: string;
+  date: string; // Format ISO YYYY-MM-DD
+  present: boolean;
+  domaine_id: string;
+  serre_id?: string | null;
+  serres_ids?: string[];
+  serres_noms?: string[];
+  serres_texte?: string | null;
+  activites?: ContractuelActivite[];
+  montant_total_jour: number; // Somme des montants des activités
+  created_by_id?: string;
+  created_by_nom?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface ContractuelFilter {
+  date?: string;
+  startDate?: string;
+  endDate?: string;
+  domaine_id?: string;
+  serre_id?: string;
+  ouvrier_id?: string;
+  present?: boolean;
+}
+
+export interface ContractuelStats {
+  totalOuvriers: number;
+  totalPresents: number;
+  totalAbsents: number;
+  totalAyantTravaille: number;
+  totalTachesRealisees: number;
+  montantTotalJourDH: number;
 }
 
