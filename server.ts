@@ -155,6 +155,11 @@ interface ServerDB {
     domaine_id?: string | null;
     serre_id?: string | null;
     observation?: string | null;
+    mode_calcul?: 'heure' | 'quart_heure';
+    tarif_unitaire?: number | null;
+    nb_unites?: number | null;
+    remuneration?: number | null;
+    montant_total?: number | null;
     created_by_id: string;
     created_by_nom: string;
     created_by_role?: string;
@@ -292,14 +297,21 @@ const DEFAULT_DB: ServerDB = {
     },
   ],
   serres: [
-    { id: 'serre_1', company_id: 'cie_lahcen_pointeur', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1 },
-    { id: 'serre_2', company_id: 'cie_lahcen_pointeur', code: 'S02', nom: 'Serre 2', actif: true, ordre: 2 },
-    { id: 'serre_3', company_id: 'cie_lahcen_pointeur', code: 'S03', nom: 'Serre 3', actif: true, ordre: 3 },
-    { id: 'serre_4', company_id: 'cie_lahcen_pointeur', code: 'S04', nom: 'Serre 4', actif: true, ordre: 4 },
-    { id: 'serre_5', company_id: 'cie_lahcen_pointeur', code: 'S05', nom: 'Serre 5', actif: true, ordre: 5 },
-    { id: 'serre_6', company_id: 'cie_lahcen_pointeur', code: 'S06', nom: 'Serre 6', actif: true, ordre: 6 },
-    { id: 'serre_7', company_id: 'cie_lahcen_pointeur', code: 'S07', nom: 'Serre 7', actif: true, ordre: 7 },
-    { id: 'serre_8', company_id: 'cie_lahcen_pointeur', code: 'S08', nom: 'Serre 8', actif: true, ordre: 8 },
+    { id: 'serre_1', company_id: 'cie_lahcen_pointeur', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1, domaine_id: 'dom_d2' },
+    { id: 'serre_2', company_id: 'cie_lahcen_pointeur', code: 'S02', nom: 'Serre 2', actif: true, ordre: 2, domaine_id: 'dom_d2' },
+    { id: 'serre_3', company_id: 'cie_lahcen_pointeur', code: 'S03', nom: 'Serre 3', actif: true, ordre: 3, domaine_id: 'dom_d2' },
+    { id: 'serre_4', company_id: 'cie_lahcen_pointeur', code: 'S04', nom: 'Serre 4', actif: true, ordre: 4, domaine_id: 'dom_d2' },
+    { id: 'serre_5', company_id: 'cie_lahcen_pointeur', code: 'S05', nom: 'Serre 5', actif: true, ordre: 5, domaine_id: 'dom_d2' },
+    { id: 'serre_6', company_id: 'cie_lahcen_pointeur', code: 'S06', nom: 'Serre 6', actif: true, ordre: 6, domaine_id: 'dom_d2' },
+    { id: 'serre_7', company_id: 'cie_lahcen_pointeur', code: 'S07', nom: 'Serre 7', actif: true, ordre: 7, domaine_id: 'dom_d2' },
+    { id: 'serre_8', company_id: 'cie_lahcen_pointeur', code: 'S08', nom: 'Serre 8', actif: true, ordre: 8, domaine_id: 'dom_d2' },
+    { id: 'serre_9', company_id: 'cie_lahcen_pointeur', code: 'S09', nom: 'Serre 9', actif: true, ordre: 9, domaine_id: 'dom_d2' },
+    { id: 'serre_10', company_id: 'cie_lahcen_pointeur', code: 'S10', nom: 'Serre 10', actif: true, ordre: 10, domaine_id: 'dom_d2' },
+    { id: 'serre_11', company_id: 'cie_lahcen_pointeur', code: 'S11', nom: 'Serre 11', actif: true, ordre: 11, domaine_id: 'dom_d2' },
+    { id: 'serre_12', company_id: 'cie_lahcen_pointeur', code: 'S12', nom: 'Serre 12', actif: true, ordre: 12, domaine_id: 'dom_d2' },
+    { id: 'serre_13', company_id: 'cie_lahcen_pointeur', code: 'S13', nom: 'Serre 13', actif: true, ordre: 13, domaine_id: 'dom_d2' },
+    { id: 'serre_14', company_id: 'cie_lahcen_pointeur', code: 'S14', nom: 'Serre 14', actif: true, ordre: 14, domaine_id: 'dom_d2' },
+    { id: 'serre_15', company_id: 'cie_lahcen_pointeur', code: 'S15', nom: 'Serre 15', actif: true, ordre: 15, domaine_id: 'dom_d2' },
   ],
   recoltes: [],
   stock_produits: [],
@@ -690,6 +702,39 @@ app.get('/api/users', (_req: Request, res: Response) => {
     res.status(500).json({ success: false, error: 'Erreur users' });
   }
 });
+
+// Helper de pagination robuste pour récupérer tous les enregistrements sans troncature
+async function fetchAllPaginated(client: any, table: string, companyId: string, extraFilter?: (q: any) => any) {
+  let allRows: any[] = [];
+  let from = 0;
+  const pageSize = 500;
+  let hasMore = true;
+
+  while (hasMore) {
+    let query = client.from(table).select('*').range(from, from + pageSize - 1);
+    if (companyId) {
+      query = query.eq('company_id', companyId);
+    }
+    if (extraFilter) {
+      query = extraFilter(query);
+    }
+    const { data, error } = await query;
+    if (error) {
+      throw error;
+    }
+    if (data && data.length > 0) {
+      allRows = allRows.concat(data);
+      if (data.length < pageSize) {
+        hasMore = false;
+      } else {
+        from += pageSize;
+      }
+    } else {
+      hasMore = false;
+    }
+  }
+  return allRows;
+}
 
 // =========================================================================
 // MODULE STOCK PRO — API SÉCURISÉE & TRANSACTIONNELLE
@@ -1155,28 +1200,8 @@ app.get('/api/stock', async (req: Request, res: Response) => {
     const dbClient = auth.supabaseClient;
     const actionClient = supabaseAdmin || dbClient;
 
-    const { data: prodsData, error: prodsErr } = await actionClient
-      .from('stock_produits')
-      .select('*')
-      .eq('company_id', companyId)
-      .neq('actif', false);
-
-    if (prodsErr) {
-      console.error('Erreur Supabase stock_produits:', prodsErr);
-      throw new Error('Erreur lecture stock_produits: ' + prodsErr.message);
-    }
-    const produits = prodsData || [];
-
-    const { data: mvtsData, error: mvtsErr } = await actionClient
-      .from('stock_mouvements')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (mvtsErr) {
-      console.error('Erreur Supabase stock_mouvements:', mvtsErr);
-      throw new Error('Erreur lecture stock_mouvements: ' + mvtsErr.message);
-    }
-    const mouvements = mvtsData || [];
+    const produits = await fetchAllPaginated(actionClient, 'stock_produits', companyId, (q) => q.neq('actif', false));
+    const mouvements = await fetchAllPaginated(actionClient, 'stock_mouvements', companyId);
 
     // Calcul individuel du stock actuel pour chaque produit et unité
     const syntheses = produits.map((prod: any) => {
@@ -1286,19 +1311,8 @@ app.post('/api/stock/import-initial', async (req: Request, res: Response) => {
     let importedCount = 0;
 
     // Récupération des produits et mouvements existants depuis Supabase PostgreSQL / DB
-    const { data: existingProds, error: pErr } = await actionClient
-      .from('stock_produits')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (pErr) throw new Error('Erreur lecture stock_produits: ' + pErr.message);
-
-    const { data: existingMvts, error: mErr } = await actionClient
-      .from('stock_mouvements')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (mErr) throw new Error('Erreur lecture stock_mouvements: ' + mErr.message);
+    const existingProds = await fetchAllPaginated(actionClient, 'stock_produits', companyId);
+    const existingMvts = await fetchAllPaginated(actionClient, 'stock_mouvements', companyId);
 
     // 1. CONTRÔLE PRÉALABLE STRICT DES DOUBLONS : AUCUNE FUSION NI ADDITION PERMISE
     const occMap = new Map<string, { nom: string; unite: string; lines: number[]; quantities: any[] }>();
@@ -2438,8 +2452,604 @@ app.get('/api/stock/mouvements', async (req: Request, res: Response) => {
 });
 
 // =========================================================================
-// MODULE SUPPLÉMENTAIRES (ADMIN ONLY) — RECONSTRUCTION COMPLÈTE
+// MODULE SUPPLÉMENTAIRES (ADMIN ONLY) — SÉCURISÉ, SANS ARRONDI & COMPATIBLE SCHÉMA
 // =========================================================================
+
+const SUPP_META_MARKER = '[SUPP_META]';
+const DEFAULT_HEURES_SUP_COLUMNS = new Set([
+  'id',
+  'company_id',
+  'ouvrier_id',
+  'numero_ouvrier',
+  'date',
+  'type',
+  'tache_id',
+  'quantite',
+  'unite',
+  'heures',
+  'domaine_id',
+  'serre_id',
+  'observation',
+  'created_by_id',
+  'created_by_nom',
+  'heure_enregistrement',
+  'timestamp',
+  'created_at',
+]);
+
+let cachedSuppSchema: {
+  fetchedAt: number;
+  hasTachesTable: boolean;
+  heuresColumns: Set<string>;
+  tachesColumns: Set<string>;
+} | null = null;
+
+async function getSupplementairesSchemaInfo(forceRefresh = false): Promise<{
+  hasTachesTable: boolean;
+  heuresColumns: Set<string>;
+  tachesColumns: Set<string>;
+}> {
+  const nowMs = Date.now();
+  if (!forceRefresh && cachedSuppSchema && nowMs - cachedSuppSchema.fetchedAt < 60_000) {
+    return cachedSuppSchema;
+  }
+
+  let hasTachesTable = false;
+  let heuresColumns = new Set<string>(DEFAULT_HEURES_SUP_COLUMNS);
+  let tachesColumns = new Set<string>();
+
+  if (supabaseUrl && (serviceRoleKey || supabaseAnonKey)) {
+    try {
+      const apiKey = serviceRoleKey || supabaseAnonKey;
+      const resp = await fetch(`${supabaseUrl}/rest/v1/`, {
+        headers: {
+          apikey: apiKey,
+          Authorization: `Bearer ${apiKey}`,
+        },
+      });
+      if (resp.ok) {
+        const spec: any = await resp.json();
+        const defs = spec?.definitions || {};
+        if (defs.heures_supplementaires?.properties) {
+          heuresColumns = new Set(Object.keys(defs.heures_supplementaires.properties));
+        }
+        if (defs.taches_supplementaires?.properties) {
+          hasTachesTable = true;
+          tachesColumns = new Set(Object.keys(defs.taches_supplementaires.properties));
+        }
+      }
+    } catch {
+      // Conservation du schéma par défaut en cas d'indisponibilité réseau OpenAPI
+    }
+  }
+
+  cachedSuppSchema = {
+    fetchedAt: nowMs,
+    hasTachesTable,
+    heuresColumns,
+    tachesColumns,
+  };
+  return cachedSuppSchema;
+}
+
+function cleanFloatPrecision(val: number): number {
+  return Math.round(val * 1e8) / 1e8;
+}
+
+function parsePositiveDecimal(raw: any): number | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  }
+  const normalized = String(raw).trim().replace(/\s+/g, '').replace(',', '.');
+  if (!normalized || !/^\d+(\.\d+)?$/.test(normalized)) return null;
+  const num = Number(normalized);
+  return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+function parseNonNegativeDecimal(raw: any): number | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw >= 0 ? raw : null;
+  }
+  const normalized = String(raw).trim().replace(/\s+/g, '').replace(',', '.');
+  if (!normalized || !/^\d+(\.\d+)?$/.test(normalized)) return null;
+  const num = Number(normalized);
+  return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+function splitObservationAndMeta(rawObs: any): { cleanObservation: string | null; meta: Record<string, any> } {
+  if (!rawObs || typeof rawObs !== 'string') {
+    return { cleanObservation: rawObs ? String(rawObs) : null, meta: {} };
+  }
+  const idx = rawObs.indexOf(SUPP_META_MARKER);
+  if (idx === -1) {
+    const trimmed = rawObs.trim();
+    return { cleanObservation: trimmed || null, meta: {} };
+  }
+  const textPart = rawObs.slice(0, idx).trim();
+  const jsonPart = rawObs.slice(idx + SUPP_META_MARKER.length).trim();
+  let meta: Record<string, any> = {};
+  try {
+    meta = JSON.parse(jsonPart) || {};
+  } catch {
+    meta = {};
+  }
+  return { cleanObservation: textPart || null, meta };
+}
+
+function combineObservationAndMeta(cleanObs: string | null | undefined, meta: Record<string, any>): string | null {
+  const filteredMeta: Record<string, any> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (v !== undefined && v !== null && v !== '') {
+      filteredMeta[k] = v;
+    }
+  }
+  const text = cleanObs ? String(cleanObs).trim() : '';
+  if (Object.keys(filteredMeta).length === 0) {
+    return text || null;
+  }
+  const encoded = `${SUPP_META_MARKER}${JSON.stringify(filteredMeta)}`;
+  return text ? `${text}\n${encoded}` : encoded;
+}
+
+function pickSupportedColumns(payload: Record<string, any>, supportedCols: Set<string>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (supportedCols.has(k) && v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function decodeSuppRecord(row: any): any {
+  const { cleanObservation, meta } = splitObservationAndMeta(row.observation);
+  const recordType: 'heures' | 'tache' =
+    row.type === 'tache' || String(row.id || '').startsWith('tsup_') ? 'tache' : 'heures';
+
+  if (recordType === 'tache') {
+    const quantiteVal = row.quantite !== undefined && row.quantite !== null
+      ? Number(row.quantite)
+      : Number(meta.quantite ?? 0);
+    const uniteVal = String(row.unite || meta.unite || 'UNITÉ').trim().toUpperCase();
+    const nomTacheVal = String(row.nom_tache || meta.nom_tache || 'TÂCHE').trim().toUpperCase();
+    return {
+      ...row,
+      type: 'tache',
+      ouvrier_id: row.ouvrier_id || meta.ouvrier_id_ref || null,
+      nom_ouvrier: row.nom_ouvrier || meta.nom_ouvrier || null,
+      tache_id: row.tache_id || meta.tache_id_ref || null,
+      nom_tache: nomTacheVal,
+      description: row.description !== undefined ? row.description : (meta.description ?? null),
+      quantite: quantiteVal,
+      unite: uniteVal,
+      observation: cleanObservation,
+      created_by_role: row.created_by_role || meta.created_by_role || 'admin',
+      updated_at: row.updated_at || meta.updated_at || undefined,
+      updated_by_id: row.updated_by_id || meta.updated_by_id || undefined,
+      updated_by_nom: row.updated_by_nom || meta.updated_by_nom || undefined,
+    };
+  }
+
+  const rawMode = row.mode_calcul || meta.mode_calcul || (row.unite === 'quart' ? 'quart_heure' : 'heure');
+  const modeCalcul: 'heure' | 'quart_heure' = rawMode === 'quart_heure' ? 'quart_heure' : 'heure';
+
+  const nbUnitesRaw =
+    row.nb_unites !== undefined && row.nb_unites !== null
+      ? Number(row.nb_unites)
+      : meta.nb_unites !== undefined && meta.nb_unites !== null
+        ? Number(meta.nb_unites)
+        : row.quantite !== undefined && row.quantite !== null
+          ? Number(row.quantite)
+          : row.duree_heures !== undefined && row.duree_heures !== null
+            ? Number(row.duree_heures)
+            : Number(row.heures ?? 0);
+
+  const dureeHeuresRaw =
+    row.duree_heures !== undefined && row.duree_heures !== null
+      ? Number(row.duree_heures)
+      : meta.duree_heures !== undefined && meta.duree_heures !== null
+        ? Number(meta.duree_heures)
+        : row.heures !== undefined && row.heures !== null
+          ? Number(row.heures)
+          : modeCalcul === 'quart_heure'
+            ? cleanFloatPrecision(nbUnitesRaw / 4)
+            : nbUnitesRaw;
+
+  const tarifRaw =
+    row.tarif_unitaire !== undefined && row.tarif_unitaire !== null
+      ? Number(row.tarif_unitaire)
+      : meta.tarif_unitaire !== undefined && meta.tarif_unitaire !== null
+        ? Number(meta.tarif_unitaire)
+        : null;
+
+  const remunRaw =
+    row.remuneration !== undefined && row.remuneration !== null
+      ? Number(row.remuneration)
+      : row.montant_total !== undefined && row.montant_total !== null
+        ? Number(row.montant_total)
+        : meta.remuneration !== undefined && meta.remuneration !== null
+          ? Number(meta.remuneration)
+          : meta.montant_total !== undefined && meta.montant_total !== null
+            ? Number(meta.montant_total)
+            : tarifRaw !== null
+              ? cleanFloatPrecision(tarifRaw * nbUnitesRaw)
+              : null;
+
+  return {
+    ...row,
+    type: 'heures',
+    ouvrier_id: row.ouvrier_id || meta.ouvrier_id_ref || null,
+    nom_ouvrier: row.nom_ouvrier || meta.nom_ouvrier || null,
+    tache_id: row.tache_id || meta.tache_id_ref || null,
+    nom_tache: row.nom_tache || meta.nom_tache || 'HEURES SUPPLÉMENTAIRES',
+    heure_debut: row.heure_debut !== undefined ? row.heure_debut : (meta.heure_debut ?? null),
+    heure_fin: row.heure_fin !== undefined ? row.heure_fin : (meta.heure_fin ?? null),
+    duree_heures: dureeHeuresRaw,
+    heures: dureeHeuresRaw,
+    quantite: nbUnitesRaw,
+    unite: modeCalcul === 'quart_heure' ? 'quart' : 'heure',
+    mode_calcul: modeCalcul,
+    tarif_unitaire: tarifRaw,
+    nb_unites: nbUnitesRaw,
+    remuneration: remunRaw,
+    montant_total: remunRaw,
+    observation: cleanObservation,
+    created_by_role: row.created_by_role || meta.created_by_role || 'admin',
+    updated_at: row.updated_at || meta.updated_at || undefined,
+    updated_by_id: row.updated_by_id || meta.updated_by_id || undefined,
+    updated_by_nom: row.updated_by_nom || meta.updated_by_nom || undefined,
+  };
+}
+
+function buildSupabaseHeuresWritePayload(
+  fullRecord: Record<string, any>,
+  supportedCols: Set<string>,
+  dbOuvrierId: string | null,
+  dbTacheId: string | null,
+  adminUuid: string | null
+): Record<string, any> {
+  const meta: Record<string, any> = {
+    mode_calcul: fullRecord.mode_calcul,
+    tarif_unitaire: fullRecord.tarif_unitaire,
+    nb_unites: fullRecord.nb_unites,
+    duree_heures: fullRecord.duree_heures,
+    remuneration: fullRecord.remuneration,
+    montant_total: fullRecord.montant_total,
+    nom_ouvrier: fullRecord.nom_ouvrier,
+    nom_tache: fullRecord.nom_tache,
+    heure_debut: fullRecord.heure_debut,
+    heure_fin: fullRecord.heure_fin,
+    ouvrier_id_ref: fullRecord.ouvrier_id,
+    tache_id_ref: fullRecord.tache_id,
+    created_by_role: fullRecord.created_by_role,
+    updated_at: fullRecord.updated_at,
+    updated_by_id: fullRecord.updated_by_id,
+    updated_by_nom: fullRecord.updated_by_nom,
+  };
+
+  const hasExtendedCols = supportedCols.has('mode_calcul') && supportedCols.has('nb_unites');
+  const observationToStore = hasExtendedCols
+    ? (fullRecord.observation || null)
+    : combineObservationAndMeta(fullRecord.observation, meta);
+
+  const candidate: Record<string, any> = {
+    ...fullRecord,
+    ouvrier_id: dbOuvrierId,
+    tache_id: dbTacheId,
+    created_by_id: adminUuid,
+    observation: observationToStore,
+  };
+
+  return pickSupportedColumns(candidate, supportedCols);
+}
+
+function buildSupabaseTacheWritePayload(
+  fullRecord: Record<string, any>,
+  schemaInfo: { hasTachesTable: boolean; heuresColumns: Set<string>; tachesColumns: Set<string> },
+  dbOuvrierId: string | null,
+  dbTacheId: string | null,
+  adminUuid: string | null
+): { table: string; payload: Record<string, any> } {
+  if (schemaInfo.hasTachesTable) {
+    const hasExtended = schemaInfo.tachesColumns.has('nom_tache') && schemaInfo.tachesColumns.has('quantite');
+    const observationToStore = hasExtended
+      ? (fullRecord.observation || null)
+      : combineObservationAndMeta(fullRecord.observation, {
+          nom_tache: fullRecord.nom_tache,
+          nom_ouvrier: fullRecord.nom_ouvrier,
+          description: fullRecord.description,
+          ouvrier_id_ref: fullRecord.ouvrier_id,
+          tache_id_ref: fullRecord.tache_id,
+          created_by_role: fullRecord.created_by_role,
+          updated_at: fullRecord.updated_at,
+          updated_by_id: fullRecord.updated_by_id,
+          updated_by_nom: fullRecord.updated_by_nom,
+        });
+
+    const candidate: Record<string, any> = {
+      ...fullRecord,
+      ouvrier_id: dbOuvrierId,
+      tache_id: dbTacheId,
+      created_by_id: adminUuid,
+      observation: observationToStore,
+    };
+    return {
+      table: 'taches_supplementaires',
+      payload: pickSupportedColumns(candidate, schemaInfo.tachesColumns),
+    };
+  }
+
+  // Fallback sûr sur la table PostgreSQL heures_supplementaires avec type = 'tache'
+  const observationToStore = combineObservationAndMeta(fullRecord.observation, {
+    nom_tache: fullRecord.nom_tache,
+    nom_ouvrier: fullRecord.nom_ouvrier,
+    description: fullRecord.description,
+    ouvrier_id_ref: fullRecord.ouvrier_id,
+    tache_id_ref: fullRecord.tache_id,
+    created_by_role: fullRecord.created_by_role,
+    updated_at: fullRecord.updated_at,
+    updated_by_id: fullRecord.updated_by_id,
+    updated_by_nom: fullRecord.updated_by_nom,
+  });
+
+  const candidate: Record<string, any> = {
+    id: fullRecord.id,
+    company_id: fullRecord.company_id,
+    ouvrier_id: dbOuvrierId,
+    numero_ouvrier: fullRecord.numero_ouvrier,
+    date: fullRecord.date,
+    type: 'tache',
+    tache_id: dbTacheId,
+    quantite: fullRecord.quantite,
+    unite: fullRecord.unite,
+    heures: 0,
+    domaine_id: fullRecord.domaine_id,
+    serre_id: fullRecord.serre_id,
+    observation: observationToStore,
+    created_by_id: adminUuid,
+    created_by_nom: fullRecord.created_by_nom,
+    heure_enregistrement: fullRecord.heure_enregistrement,
+    timestamp: fullRecord.timestamp,
+    created_at: fullRecord.created_at,
+  };
+  return {
+    table: 'heures_supplementaires',
+    payload: pickSupportedColumns(candidate, schemaInfo.heuresColumns),
+  };
+}
+
+async function resolveSupabaseOuvrierFk(dbClient: any, companyId: string, ouvrierId?: string | null): Promise<string | null> {
+  if (!ouvrierId) return null;
+  try {
+    const { data } = await dbClient
+      .from('ouvriers')
+      .select('id')
+      .eq('id', String(ouvrierId))
+      .eq('company_id', companyId)
+      .maybeSingle();
+    return data?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveSupabaseTacheFk(dbClient: any, companyId: string, tacheId?: string | null): Promise<string | null> {
+  if (!tacheId) return null;
+  try {
+    const { data } = await dbClient
+      .from('taches')
+      .select('id')
+      .eq('id', String(tacheId))
+      .eq('company_id', companyId)
+      .maybeSingle();
+    return data?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveValidProfileUuid(id?: string | null): string | null {
+  if (!id) return null;
+  const s = String(id).trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s) ? s : null;
+}
+
+function filterHistoricalRows(
+  rows: any[],
+  companyId: string,
+  filters: {
+    date?: string;
+    startDate?: string;
+    endDate?: string;
+    ouvrierId?: string;
+    domaineId?: string;
+    serreId?: string;
+    tacheId?: string;
+    tache?: string;
+    workerSearch?: string;
+  }
+): any[] {
+  return (rows || []).filter((r) => {
+    if (r.company_id && r.company_id !== companyId) return false;
+    if (filters.date && r.date !== filters.date) return false;
+    if (!filters.date && filters.startDate && filters.endDate) {
+      if (r.date < filters.startDate || r.date > filters.endDate) return false;
+    }
+    if (filters.ouvrierId && filters.ouvrierId !== 'ALL' && String(r.ouvrier_id) !== filters.ouvrierId && `num_${r.numero_ouvrier}` !== filters.ouvrierId) return false;
+    if (filters.tacheId && filters.tacheId !== 'ALL' && String(r.tache_id) !== filters.tacheId) return false;
+    if (filters.domaineId && filters.domaineId !== 'ALL' && r.domaine_id !== filters.domaineId) return false;
+    if (filters.serreId && filters.serreId !== 'ALL' && filters.serreId.trim() !== '') {
+      const sQuery = filters.serreId.trim().toLowerCase();
+      const rowSerre = String(r.serre_id || '').trim().toLowerCase();
+      if (!rowSerre.includes(sQuery)) return false;
+    }
+    if (filters.tache && filters.tache.trim() !== '') {
+      const tQuery = filters.tache.trim().toLowerCase();
+      const rowTask = `${r.nom_tache || ''} ${r.description || ''} ${r.tache_id || ''}`.toLowerCase();
+      if (!rowTask.includes(tQuery)) return false;
+    }
+    if (filters.workerSearch && filters.workerSearch.trim() !== '') {
+      const wQuery = filters.workerSearch.trim().toLowerCase();
+      const rowWorker = `${r.numero_ouvrier || ''} ${r.nom_ouvrier || ''}`.toLowerCase();
+      if (!rowWorker.includes(wQuery)) return false;
+    }
+    return true;
+  });
+}
+
+function matchesSuppMemoryFilters(
+  decoded: any,
+  filters: {
+    ouvrierId?: string;
+    serreId?: string;
+    tacheId?: string;
+    tache?: string;
+    workerSearch?: string;
+  }
+): boolean {
+  if (filters.ouvrierId && filters.ouvrierId !== 'ALL') {
+    const targetOuv = String(filters.ouvrierId);
+    if (String(decoded.ouvrier_id) !== targetOuv && `num_${decoded.numero_ouvrier}` !== targetOuv && String(decoded.numero_ouvrier) !== targetOuv) {
+      return false;
+    }
+  }
+  if (filters.tacheId && filters.tacheId !== 'ALL' && String(decoded.tache_id) !== filters.tacheId) {
+    return false;
+  }
+  if (filters.serreId && filters.serreId !== 'ALL' && filters.serreId.trim() !== '') {
+    const sQuery = filters.serreId.trim().toLowerCase();
+    const rowSerre = String(decoded.serre_id || '').trim().toLowerCase();
+    if (!rowSerre.includes(sQuery)) return false;
+  }
+  if (filters.tache && filters.tache.trim() !== '') {
+    const tQuery = filters.tache.trim().toLowerCase();
+    const rowTask = `${decoded.nom_tache || ''} ${decoded.description || ''} ${decoded.tache_id || ''}`.toLowerCase();
+    if (!rowTask.includes(tQuery)) return false;
+  }
+  if (filters.workerSearch && filters.workerSearch.trim() !== '') {
+    const wQuery = filters.workerSearch.trim().toLowerCase();
+    const rowWorker = `${decoded.numero_ouvrier || ''} ${decoded.nom_ouvrier || ''}`.toLowerCase();
+    if (!rowWorker.includes(wQuery)) return false;
+  }
+  return true;
+}
+
+async function fetchMergedHeuresSupplementaires(
+  dbClient: any,
+  companyId: string,
+  filters: {
+    date?: string;
+    startDate?: string;
+    endDate?: string;
+    ouvrierId?: string;
+    domaineId?: string;
+    serreId?: string;
+    tache?: string;
+    workerSearch?: string;
+  }
+): Promise<any[]> {
+  let query = dbClient
+    .from('heures_supplementaires')
+    .select('*')
+    .eq('company_id', companyId)
+    .neq('type', 'tache');
+
+  if (filters.date) {
+    query = query.eq('date', filters.date);
+  } else if (filters.startDate && filters.endDate) {
+    query = query.gte('date', filters.startDate).lte('date', filters.endDate);
+  }
+  if (filters.domaineId && filters.domaineId !== 'ALL') query = query.eq('domaine_id', filters.domaineId);
+  query = query.order('created_at', { ascending: false });
+
+  const { data, error } = await query;
+  if (error) throw new Error('Erreur lecture heures_supplementaires: ' + error.message);
+
+  const byId = new Map<string, any>();
+  for (const row of data || []) {
+    const decoded = decodeSuppRecord(row);
+    if (decoded.type !== 'heures') continue;
+    if (!matchesSuppMemoryFilters(decoded, filters)) continue;
+    byId.set(decoded.id, decoded);
+  }
+
+  // Inclure les données historiques archivées sans écraser les lignes Supabase
+  try {
+    const local = readDB();
+    const histRows = filterHistoricalRows(local.heures_supplementaires || [], companyId, filters);
+    for (const h of histRows) {
+      if (!byId.has(h.id)) {
+        byId.set(h.id, decodeSuppRecord(h));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return Array.from(byId.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+}
+
+async function fetchMergedTachesSupplementaires(
+  dbClient: any,
+  companyId: string,
+  filters: {
+    date?: string;
+    startDate?: string;
+    endDate?: string;
+    ouvrierId?: string;
+    domaineId?: string;
+    serreId?: string;
+    tacheId?: string;
+    tache?: string;
+    workerSearch?: string;
+  }
+): Promise<any[]> {
+  const schemaInfo = await getSupplementairesSchemaInfo();
+  const tableName = schemaInfo.hasTachesTable ? 'taches_supplementaires' : 'heures_supplementaires';
+
+  let query = dbClient
+    .from(tableName)
+    .select('*')
+    .eq('company_id', companyId);
+
+  if (!schemaInfo.hasTachesTable) {
+    query = query.eq('type', 'tache');
+  }
+  if (filters.date) {
+    query = query.eq('date', filters.date);
+  } else if (filters.startDate && filters.endDate) {
+    query = query.gte('date', filters.startDate).lte('date', filters.endDate);
+  }
+  if (filters.domaineId && filters.domaineId !== 'ALL') query = query.eq('domaine_id', filters.domaineId);
+  query = query.order('created_at', { ascending: false });
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Erreur lecture ${tableName}: ` + error.message);
+
+  const byId = new Map<string, any>();
+  for (const row of data || []) {
+    const decoded = decodeSuppRecord({ ...row, type: 'tache' });
+    if (!matchesSuppMemoryFilters(decoded, filters)) continue;
+    byId.set(decoded.id, decoded);
+  }
+
+  // Inclure les données historiques archivées sans écraser les lignes Supabase
+  try {
+    const local = readDB();
+    const histRows = filterHistoricalRows(local.taches_supplementaires || [], companyId, filters);
+    for (const t of histRows) {
+      if (!byId.has(t.id)) {
+        byId.set(t.id, decodeSuppRecord({ ...t, type: 'tache' }));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return Array.from(byId.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+}
 
 // Helper pour retrouver un ouvrier légitime dans la base (aucun ouvrier ne peut être créé automatiquement)
 async function findRealCompanyWorker(dbClient: any, companyId: string, criteria: { numero?: number; id?: string }) {
@@ -2458,7 +3068,9 @@ async function findRealCompanyWorker(dbClient: any, companyId: string, criteria:
       // ignore
     }
     const local = readDB();
-    const found = (local.ouvriers || []).find((o: any) => o.numero === num);
+    const found = (local.ouvriers || []).find(
+      (o: any) => o.numero === num && (!o.company_id || o.company_id === companyId)
+    );
     if (found) return found;
   }
 
@@ -2476,7 +3088,9 @@ async function findRealCompanyWorker(dbClient: any, companyId: string, criteria:
       // ignore
     }
     const local = readDB();
-    const found = (local.ouvriers || []).find((o: any) => o.id === sId);
+    const found = (local.ouvriers || []).find(
+      (o: any) => o.id === sId && (!o.company_id || o.company_id === companyId)
+    );
     if (found) return found;
   }
 
@@ -2519,30 +3133,19 @@ app.get('/api/heures-supplementaires', async (req: Request, res: Response) => {
   }
 
   try {
-    const { date, startDate, endDate, ouvrierId, domaineId, serreId } = req.query;
-    const companyId = auth.admin.company_id;
-    const dbClient = auth.supabaseClient;
+    const { date, startDate, endDate, ouvrierId, domaineId, serreId, tache, workerSearch } = req.query;
+    const items = await fetchMergedHeuresSupplementaires(auth.supabaseClient, auth.admin.company_id, {
+      date: date ? String(date) : undefined,
+      startDate: startDate ? String(startDate) : undefined,
+      endDate: endDate ? String(endDate) : undefined,
+      ouvrierId: ouvrierId ? String(ouvrierId) : undefined,
+      domaineId: domaineId ? String(domaineId) : undefined,
+      serreId: serreId ? String(serreId) : undefined,
+      tache: tache ? String(tache) : undefined,
+      workerSearch: workerSearch ? String(workerSearch) : undefined,
+    });
 
-    let query = dbClient
-      .from('heures_supplementaires')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (date) {
-      query = query.eq('date', String(date));
-    } else if (startDate && endDate) {
-      query = query.gte('date', String(startDate)).lte('date', String(endDate));
-    }
-    if (ouvrierId) query = query.eq('ouvrier_id', String(ouvrierId));
-    if (domaineId && domaineId !== 'ALL') query = query.eq('domaine_id', String(domaineId));
-    if (serreId && serreId !== 'ALL') query = query.eq('serre_id', String(serreId));
-
-    query = query.order('created_at', { ascending: false });
-
-    const { data, error } = await query;
-    if (error) throw new Error('Erreur lecture heures_supplementaires: ' + error.message);
-
-    return res.json({ success: true, heures_supplementaires: data || [] });
+    return res.json({ success: true, heures_supplementaires: items });
   } catch (err: any) {
     console.error('Erreur GET /api/heures-supplementaires:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -2570,6 +3173,10 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
       domaine_id,
       serre_id,
       observation,
+      mode_calcul,
+      tarif_unitaire,
+      nb_unites,
+      remuneration,
     } = req.body;
 
     if (!date) {
@@ -2593,34 +3200,79 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
       });
     }
 
-    // Calcul de la durée en heures avec validation stricte > 0
-    let calculatedDuration: number | null = null;
+    // Détermination du mode de calcul : 'heure' ou 'quart_heure' (15 min)
+    const mode: 'heure' | 'quart_heure' = mode_calcul === 'quart_heure' ? 'quart_heure' : 'heure';
+
+    // Tarif unitaire (DH/heure ou DH/quart d'heure) — aucune troncature ni arrondi forcé
+    let tarif: number | null = null;
+    if (tarif_unitaire !== undefined && tarif_unitaire !== null && String(tarif_unitaire).trim() !== '') {
+      const parsedTarif = parseNonNegativeDecimal(tarif_unitaire);
+      if (parsedTarif === null) {
+        return res.status(400).json({
+          success: false,
+          error: 'Le prix unitaire doit être un nombre valide supérieur ou égal à 0.',
+        });
+      }
+      tarif = parsedTarif;
+    }
+
+    // Calcul de durée optionnel si heure_debut et heure_fin sont renseignées
+    let calculatedDurationHours: number | null = null;
     if (heure_debut && heure_fin && String(heure_debut).includes(':') && String(heure_fin).includes(':')) {
       const [h1, m1] = String(heure_debut).split(':').map((v) => parseInt(v, 10));
       const [h2, m2] = String(heure_fin).split(':').map((v) => parseInt(v, 10));
       if (!isNaN(h1) && !isNaN(m1) && !isNaN(h2) && !isNaN(m2)) {
         let diffMinutes = (h2 * 60 + m2) - (h1 * 60 + m1);
         if (diffMinutes < 0) diffMinutes += 24 * 60;
-        calculatedDuration = Math.round((diffMinutes / 60) * 100) / 100;
+        calculatedDurationHours = cleanFloatPrecision(diffMinutes / 60);
       }
     }
 
-    const finalDuration = Number(
-      duree_heures !== undefined && duree_heures !== null && duree_heures !== ''
-        ? duree_heures
-        : (heures !== undefined && heures !== null && heures !== '' ? heures : calculatedDuration)
-    );
+    // Saisie libre d'entiers et décimaux (accepte virgule et point, jamais de step imposé ni d'arrondi)
+    let finalUnits: number | null = null;
+    const rawUnitsInput =
+      nb_unites !== undefined && nb_unites !== null && String(nb_unites).trim() !== ''
+        ? nb_unites
+        : duree_heures !== undefined && duree_heures !== null && String(duree_heures).trim() !== ''
+          ? duree_heures
+          : heures !== undefined && heures !== null && String(heures).trim() !== ''
+            ? heures
+            : null;
 
-    if (isNaN(finalDuration) || finalDuration <= 0) {
+    if (rawUnitsInput !== null) {
+      finalUnits = parsePositiveDecimal(rawUnitsInput);
+    } else if (calculatedDurationHours !== null && calculatedDurationHours > 0) {
+      finalUnits = mode === 'quart_heure'
+        ? cleanFloatPrecision(calculatedDurationHours * 4)
+        : calculatedDurationHours;
+    }
+
+    if (finalUnits === null || finalUnits <= 0) {
       return res.status(400).json({
         success: false,
-        error: 'Le nombre d\'heures supplémentaires doit être un nombre strictement supérieur à 0 (pas de valeur négative ni vide).',
+        error: mode === 'quart_heure'
+          ? 'Le nombre de quarts d\'heure (15 min) doit être un nombre strictement supérieur à 0.'
+          : 'Le nombre d\'heures supplémentaires doit être un nombre strictement supérieur à 0 (ex: 1, 2, 2.5, 1.75, 3.125).',
       });
+    }
+
+    // Durée réelle en heures décimales : sans arrondi arbitraire
+    const finalDurationInHours = mode === 'quart_heure'
+      ? cleanFloatPrecision(finalUnits / 4)
+      : finalUnits;
+
+    // Rémunération : Rémunération = Prix unitaire × Nombre saisi
+    let calculatedRemuneration: number | null = null;
+    if (tarif !== null) {
+      calculatedRemuneration = cleanFloatPrecision(tarif * finalUnits);
+    } else if (remuneration !== undefined && remuneration !== null && String(remuneration).trim() !== '') {
+      const parsedRem = parseNonNegativeDecimal(remuneration);
+      calculatedRemuneration = parsedRem !== null ? cleanFloatPrecision(parsedRem) : null;
     }
 
     const now = new Date();
     const newRecordId = `hsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const newRecord = {
+    const fullRecord = {
       id: newRecordId,
       company_id: companyId,
       ouvrier_id: realWorker.id,
@@ -2631,10 +3283,15 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
       nom_tache: nom_tache ? String(nom_tache).trim() : 'HEURES SUPPLÉMENTAIRES',
       heure_debut: heure_debut ? String(heure_debut).trim() : null,
       heure_fin: heure_fin ? String(heure_fin).trim() : null,
-      duree_heures: Math.round(finalDuration * 100) / 100,
-      heures: Math.round(finalDuration * 100) / 100,
-      quantite: Math.round(finalDuration * 100) / 100,
-      unite: 'heure',
+      duree_heures: finalDurationInHours,
+      heures: finalDurationInHours,
+      quantite: finalUnits,
+      unite: mode === 'quart_heure' ? 'quart' : 'heure',
+      mode_calcul: mode,
+      tarif_unitaire: tarif,
+      nb_unites: finalUnits,
+      remuneration: calculatedRemuneration,
+      montant_total: calculatedRemuneration,
       type: 'heures',
       domaine_id: domaine_id ? String(domaine_id) : null,
       serre_id: serre_id ? String(serre_id) : null,
@@ -2642,13 +3299,27 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
       created_by_id: auth.admin.id,
       created_by_nom: auth.admin.nom,
       created_by_role: 'admin',
+      heure_enregistrement: now.toTimeString().slice(0, 8),
       created_at: now.toISOString(),
       timestamp: now.getTime(),
     };
 
+    const schemaInfo = await getSupplementairesSchemaInfo();
+    const dbOuvrierId = await resolveSupabaseOuvrierFk(dbClient, companyId, realWorker.id);
+    const dbTacheId = await resolveSupabaseTacheFk(dbClient, companyId, fullRecord.tache_id);
+    const adminUuid = resolveValidProfileUuid(auth.admin.id);
+
+    const dbPayload = buildSupabaseHeuresWritePayload(
+      fullRecord,
+      schemaInfo.heuresColumns,
+      dbOuvrierId,
+      dbTacheId,
+      adminUuid
+    );
+
     const { data, error } = await dbClient
       .from('heures_supplementaires')
-      .insert(newRecord)
+      .insert(dbPayload)
       .select()
       .single();
 
@@ -2657,7 +3328,13 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
       throw new Error('Erreur enregistrement PostgreSQL: ' + error.message);
     }
 
-    return res.json({ success: true, item: data || newRecord, message: 'Heure supplémentaire enregistrée avec succès.' });
+    const decodedItem = decodeSuppRecord(data || dbPayload);
+
+    return res.json({
+      success: true,
+      item: decodedItem,
+      message: `Heure supplémentaire enregistrée (${mode === 'quart_heure' ? `${finalUnits} quarts` : `${finalUnits} H`}${calculatedRemuneration !== null ? ` — ${calculatedRemuneration} DH` : ''}).`,
+    });
   } catch (err: any) {
     console.error('Erreur POST /api/heures-supplementaires:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -2688,44 +3365,153 @@ app.put('/api/heures-supplementaires/:id', async (req: Request, res: Response) =
       domaine_id,
       serre_id,
       observation,
+      mode_calcul,
+      tarif_unitaire,
+      nb_unites,
+      remuneration,
     } = req.body;
 
-    const updatePayload: Record<string, any> = {
+    // 1. Lire l'opération existante (Supabase prioritaire, puis archive JSON)
+    const { data: existingDbRow, error: fetchErr } = await dbClient
+      .from('heures_supplementaires')
+      .select('*')
+      .eq('id', id)
+      .eq('company_id', companyId)
+      .maybeSingle();
+
+    if (fetchErr) throw new Error('Erreur lecture opération PostgreSQL: ' + fetchErr.message);
+
+    let existingLocalIdx = -1;
+    let localDbCache: any = null;
+    if (!existingDbRow) {
+      localDbCache = readDB();
+      existingLocalIdx = (localDbCache.heures_supplementaires || []).findIndex(
+        (x: any) => x.id === id && (!x.company_id || x.company_id === companyId)
+      );
+      if (existingLocalIdx < 0) {
+        return res.status(404).json({ success: false, error: 'Opération d\'heures supplémentaires introuvable.' });
+      }
+    }
+
+    const baseRecord = decodeSuppRecord(
+      existingDbRow || localDbCache.heures_supplementaires[existingLocalIdx]
+    );
+
+    const targetMode: 'heure' | 'quart_heure' =
+      mode_calcul !== undefined
+        ? (mode_calcul === 'quart_heure' ? 'quart_heure' : 'heure')
+        : (baseRecord.mode_calcul === 'quart_heure' ? 'quart_heure' : 'heure');
+
+    let targetTarif: number | null = baseRecord.tarif_unitaire ?? null;
+    if (tarif_unitaire !== undefined) {
+      if (tarif_unitaire === null || String(tarif_unitaire).trim() === '') {
+        targetTarif = null;
+      } else {
+        const parsedT = parseNonNegativeDecimal(tarif_unitaire);
+        if (parsedT === null) {
+          return res.status(400).json({ success: false, error: 'Le prix unitaire doit être un nombre valide (>= 0).' });
+        }
+        targetTarif = parsedT;
+      }
+    }
+
+    let targetUnits: number = Number(baseRecord.nb_unites ?? baseRecord.duree_heures ?? baseRecord.heures ?? 0);
+    if (nb_unites !== undefined && nb_unites !== null && String(nb_unites).trim() !== '') {
+      const parsedNb = parsePositiveDecimal(nb_unites);
+      if (parsedNb === null) {
+        return res.status(400).json({ success: false, error: 'La quantité / durée doit être strictement positive (> 0).' });
+      }
+      targetUnits = parsedNb;
+    } else if (duree_heures !== undefined || heures !== undefined) {
+      const rawDur = duree_heures !== undefined ? duree_heures : heures;
+      const parsedDur = parsePositiveDecimal(rawDur);
+      if (parsedDur === null) {
+        return res.status(400).json({ success: false, error: 'La durée en heures doit être strictement positive (> 0).' });
+      }
+      targetUnits = targetMode === 'quart_heure' ? cleanFloatPrecision(parsedDur * 4) : parsedDur;
+    }
+
+    const targetDurationHours = targetMode === 'quart_heure'
+      ? cleanFloatPrecision(targetUnits / 4)
+      : targetUnits;
+
+    let targetRemun: number | null = baseRecord.remuneration ?? null;
+    if (targetTarif !== null) {
+      targetRemun = cleanFloatPrecision(targetTarif * targetUnits);
+    } else if (tarif_unitaire !== undefined && targetTarif === null) {
+      targetRemun = null;
+    } else if (remuneration !== undefined) {
+      targetRemun =
+        remuneration !== null && String(remuneration).trim() !== ''
+          ? parseNonNegativeDecimal(remuneration)
+          : null;
+    }
+
+    const mergedRecord = {
+      ...baseRecord,
+      date: date ? String(date) : baseRecord.date,
+      heure_debut: heure_debut !== undefined ? (heure_debut || null) : baseRecord.heure_debut,
+      heure_fin: heure_fin !== undefined ? (heure_fin || null) : baseRecord.heure_fin,
+      tache_id: tache_id !== undefined ? (tache_id || null) : baseRecord.tache_id,
+      nom_tache: nom_tache !== undefined ? (nom_tache ? String(nom_tache).trim() : null) : baseRecord.nom_tache,
+      domaine_id: domaine_id !== undefined ? (domaine_id || null) : baseRecord.domaine_id,
+      serre_id: serre_id !== undefined ? (serre_id || null) : baseRecord.serre_id,
+      observation: observation !== undefined ? (observation ? String(observation).trim() : null) : baseRecord.observation,
+      mode_calcul: targetMode,
+      tarif_unitaire: targetTarif,
+      nb_unites: targetUnits,
+      quantite: targetUnits,
+      unite: targetMode === 'quart_heure' ? 'quart' : 'heure',
+      duree_heures: targetDurationHours,
+      heures: targetDurationHours,
+      remuneration: targetRemun,
+      montant_total: targetRemun,
       updated_at: new Date().toISOString(),
       updated_by_id: auth.admin.id,
       updated_by_nom: auth.admin.nom,
     };
 
-    if (date) updatePayload.date = String(date);
-    if (heure_debut !== undefined) updatePayload.heure_debut = heure_debut || null;
-    if (heure_fin !== undefined) updatePayload.heure_fin = heure_fin || null;
-    if (tache_id !== undefined) updatePayload.tache_id = tache_id || null;
-    if (nom_tache !== undefined) updatePayload.nom_tache = nom_tache ? String(nom_tache).trim() : null;
-    if (domaine_id !== undefined) updatePayload.domaine_id = domaine_id || null;
-    if (serre_id !== undefined) updatePayload.serre_id = serre_id || null;
-    if (observation !== undefined) updatePayload.observation = observation ? String(observation).trim() : null;
+    if (existingDbRow) {
+      const schemaInfo = await getSupplementairesSchemaInfo();
+      const dbOuvrierId = await resolveSupabaseOuvrierFk(dbClient, companyId, mergedRecord.ouvrier_id);
+      const dbTacheId = await resolveSupabaseTacheFk(dbClient, companyId, mergedRecord.tache_id);
+      const adminUuid = resolveValidProfileUuid(mergedRecord.created_by_id || auth.admin.id);
 
-    if (duree_heures !== undefined || heures !== undefined) {
-      const dur = Number(duree_heures !== undefined ? duree_heures : heures);
-      if (isNaN(dur) || dur <= 0) {
-        return res.status(400).json({ success: false, error: 'La durée en heures doit être strictement positive (> 0).' });
-      }
-      updatePayload.duree_heures = Math.round(dur * 100) / 100;
-      updatePayload.heures = updatePayload.duree_heures;
-      updatePayload.quantite = updatePayload.duree_heures;
+      const dbPayload = buildSupabaseHeuresWritePayload(
+        mergedRecord,
+        schemaInfo.heuresColumns,
+        dbOuvrierId,
+        dbTacheId,
+        adminUuid
+      );
+      delete dbPayload.id;
+      delete dbPayload.company_id;
+      delete dbPayload.created_at;
+
+      const { data, error } = await dbClient
+        .from('heures_supplementaires')
+        .update(dbPayload)
+        .eq('id', id)
+        .eq('company_id', companyId)
+        .select()
+        .single();
+
+      if (error) throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
+
+      return res.json({
+        success: true,
+        item: decodeSuppRecord(data || mergedRecord),
+        message: 'Heure supplémentaire mise à jour avec succès.',
+      });
+    } else {
+      localDbCache.heures_supplementaires[existingLocalIdx] = mergedRecord;
+      writeDB(localDbCache);
+      return res.json({
+        success: true,
+        item: mergedRecord,
+        message: 'Heure supplémentaire mise à jour avec succès.',
+      });
     }
-
-    const { data, error } = await dbClient
-      .from('heures_supplementaires')
-      .update(updatePayload)
-      .eq('id', id)
-      .eq('company_id', companyId)
-      .select()
-      .single();
-
-    if (error) throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
-
-    return res.json({ success: true, item: data, message: 'Heure supplémentaire mise à jour avec succès.' });
   } catch (err: any) {
     console.error('Erreur PUT /api/heures-supplementaires/:id:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -2746,13 +3532,35 @@ app.delete('/api/heures-supplementaires/:id', async (req: Request, res: Response
     const companyId = auth.admin.company_id;
     const dbClient = auth.supabaseClient;
 
-    const { error } = await dbClient
+    const { data: deletedRows, error } = await dbClient
       .from('heures_supplementaires')
       .delete()
       .eq('id', id)
-      .eq('company_id', companyId);
+      .eq('company_id', companyId)
+      .select('id');
 
     if (error) throw new Error('Erreur suppression PostgreSQL: ' + error.message);
+
+    let deletedLocal = false;
+    try {
+      const local = readDB();
+      if (local.heures_supplementaires) {
+        const before = local.heures_supplementaires.length;
+        local.heures_supplementaires = local.heures_supplementaires.filter(
+          (x: any) => !(x.id === id && (!x.company_id || x.company_id === companyId))
+        );
+        if (local.heures_supplementaires.length < before) {
+          deletedLocal = true;
+          writeDB(local);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if ((!deletedRows || deletedRows.length === 0) && !deletedLocal) {
+      return res.status(404).json({ success: false, error: 'Opération introuvable.' });
+    }
 
     return res.json({ success: true, message: 'Heure supplémentaire supprimée avec succès.' });
   } catch (err: any) {
@@ -2765,6 +3573,8 @@ app.delete('/api/heures-supplementaires/:id', async (req: Request, res: Response
 // SECTION 2 : TÂCHES SUPPLÉMENTAIRES (RÉSERVÉ EXCLUSIVEMENT À ADMIN)
 // =========================================================================
 
+const tachesIdempotencyCache = new Map<string, { createdAt: number; payload: any }>();
+
 // 1. GET /api/taches-supplementaires : Consultation filtrée des tâches sup (ADMIN ONLY)
 app.get('/api/taches-supplementaires', async (req: Request, res: Response) => {
   const auth = await authenticateAdmin(req);
@@ -2773,38 +3583,27 @@ app.get('/api/taches-supplementaires', async (req: Request, res: Response) => {
   }
 
   try {
-    const { date, startDate, endDate, ouvrierId, domaineId, serreId, tacheId } = req.query;
-    const companyId = auth.admin.company_id;
-    const dbClient = auth.supabaseClient;
+    const { date, startDate, endDate, ouvrierId, domaineId, serreId, tacheId, tache, workerSearch } = req.query;
+    const items = await fetchMergedTachesSupplementaires(auth.supabaseClient, auth.admin.company_id, {
+      date: date ? String(date) : undefined,
+      startDate: startDate ? String(startDate) : undefined,
+      endDate: endDate ? String(endDate) : undefined,
+      ouvrierId: ouvrierId ? String(ouvrierId) : undefined,
+      domaineId: domaineId ? String(domaineId) : undefined,
+      serreId: serreId ? String(serreId) : undefined,
+      tacheId: tacheId ? String(tacheId) : undefined,
+      tache: tache ? String(tache) : undefined,
+      workerSearch: workerSearch ? String(workerSearch) : undefined,
+    });
 
-    let query = dbClient
-      .from('taches_supplementaires')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (date) {
-      query = query.eq('date', String(date));
-    } else if (startDate && endDate) {
-      query = query.gte('date', String(startDate)).lte('date', String(endDate));
-    }
-    if (ouvrierId) query = query.eq('ouvrier_id', String(ouvrierId));
-    if (tacheId) query = query.eq('tache_id', String(tacheId));
-    if (domaineId && domaineId !== 'ALL') query = query.eq('domaine_id', String(domaineId));
-    if (serreId && serreId !== 'ALL') query = query.eq('serre_id', String(serreId));
-
-    query = query.order('created_at', { ascending: false });
-
-    const { data, error } = await query;
-    if (error) throw new Error('Erreur lecture taches_supplementaires: ' + error.message);
-
-    return res.json({ success: true, taches_supplementaires: data || [] });
+    return res.json({ success: true, taches_supplementaires: items });
   } catch (err: any) {
     console.error('Erreur GET /api/taches-supplementaires:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 2. POST /api/taches-supplementaires : Enregistrement d'une tâche supplémentaire (ADMIN ONLY)
+// 2. POST /api/taches-supplementaires : Enregistrement individuel ou groupé (multi-ouvriers atomique) (ADMIN ONLY)
 app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
   const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
@@ -2825,7 +3624,25 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       domaine_id,
       serre_id,
       observation,
+      idempotencyKey,
     } = req.body;
+
+    const companyId = auth.admin.company_id;
+    const dbClient = auth.supabaseClient;
+
+    // Purge expirée du cache d'idempotence (TTL 5 min)
+    const nowMs = Date.now();
+    for (const [k, v] of tachesIdempotencyCache.entries()) {
+      if (nowMs - v.createdAt > 5 * 60 * 1000) {
+        tachesIdempotencyCache.delete(k);
+      }
+    }
+
+    const reqIdempKey = String(idempotencyKey || req.headers['x-idempotency-key'] || '').trim();
+    const cacheKey = reqIdempKey ? `${companyId}:${reqIdempKey}` : '';
+    if (cacheKey && tachesIdempotencyCache.has(cacheKey)) {
+      return res.json(tachesIdempotencyCache.get(cacheKey)!.payload);
+    }
 
     if (!nom_tache || !unite || !date) {
       return res.status(400).json({
@@ -2834,94 +3651,193 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       });
     }
 
-    const qty = Number(quantite);
-    if (isNaN(qty) || qty <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'La quantité réalisée doit être un nombre strictement supérieur à 0 (pas de valeur négative ni vide).',
-      });
-    }
+    const commonQty =
+      quantite !== undefined && quantite !== null && String(quantite).trim() !== ''
+        ? parsePositiveDecimal(quantite)
+        : null;
 
-    const companyId = auth.admin.company_id;
-    const dbClient = auth.supabaseClient;
-    const now = new Date();
+    // Résolution et validation intégrale de tous les ouvriers AVANT toute insertion (zéro insertion partielle)
+    const resolvedEntries: Array<{ worker: any; qty: number }> = [];
+    const seenWorkerKeys = new Set<string>();
 
-    // Saisie individuelle (par numéro) ou groupée
-    const targetWorkers: any[] = [];
-
-    if (Array.isArray(ouvriers) && ouvriers.length > 0) {
-      for (const w of ouvriers) {
-        const found = await findRealCompanyWorker(dbClient, companyId, {
-          numero: w.numero !== undefined ? Number(w.numero) : undefined,
-          id: w.id ? String(w.id) : undefined,
+    if (Array.isArray(ouvriers)) {
+      if (ouvriers.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Veuillez sélectionner au moins un ouvrier existant.',
         });
-        if (found) targetWorkers.push(found);
+      }
+
+      for (const w of ouvriers) {
+        const wNum = w?.numero !== undefined ? Number(w.numero) : undefined;
+        const wId = w?.id ? String(w.id) : undefined;
+        const found = await findRealCompanyWorker(dbClient, companyId, {
+          numero: wNum !== undefined && !isNaN(wNum) ? wNum : undefined,
+          id: wId,
+        });
+
+        if (!found) {
+          return res.status(400).json({
+            success: false,
+            error: `Ouvrier introuvable (#${w?.numero ?? w?.id ?? '?'}). Aucune opération n'a été enregistrée ; la création automatique d'ouvriers est strictement interdite.`,
+          });
+        }
+
+        const dedupKey = String(found.id || `num_${found.numero}`);
+        if (seenWorkerKeys.has(dedupKey)) {
+          continue; // Déduplication automatique des sélections en double
+        }
+        seenWorkerKeys.add(dedupKey);
+
+        const rawWorkerQty =
+          w?.quantite !== undefined && w?.quantite !== null && String(w.quantite).trim() !== ''
+            ? w.quantite
+            : quantite;
+        const workerQty = parsePositiveDecimal(rawWorkerQty);
+        if (workerQty === null || workerQty <= 0) {
+          return res.status(400).json({
+            success: false,
+            error: `Quantité invalide pour l'ouvrier #${found.numero} (${found.nom}). La quantité doit être strictement supérieure à 0.`,
+          });
+        }
+
+        resolvedEntries.push({ worker: found, qty: workerQty });
       }
     } else {
+      if (commonQty === null || commonQty <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'La quantité réalisée doit être un nombre strictement supérieur à 0 (pas de valeur négative ni vide).',
+        });
+      }
       const num = numero_ouvrier !== undefined ? parseInt(String(numero_ouvrier), 10) : undefined;
       const found = await findRealCompanyWorker(dbClient, companyId, {
         numero: !isNaN(num as number) ? num : undefined,
         id: ouvrier_id ? String(ouvrier_id) : undefined,
       });
-      if (found) {
-        targetWorkers.push(found);
-      } else {
+      if (!found) {
         return res.status(400).json({
           success: false,
           error: `Ouvrier introuvable. Aucun ouvrier existant ne correspond au numéro "${numero_ouvrier}". La création automatique d'ouvriers est strictement interdite.`,
         });
       }
+      resolvedEntries.push({ worker: found, qty: commonQty });
     }
 
-    if (targetWorkers.length === 0) {
+    if (resolvedEntries.length === 0) {
       return res.status(400).json({
         success: false,
         error: 'Au moins un ouvrier légitime existant doit être sélectionné.',
       });
     }
 
-    const insertedItems: any[] = [];
-    for (const rw of targetWorkers) {
-      const newRecordId = `tsup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const rec = {
+    const normDate = String(date).trim();
+    const normTask = String(nom_tache).trim().toUpperCase();
+    const normUnite = String(unite).trim().toUpperCase();
+    const normDesc = description ? String(description).trim() : null;
+    const normDomaine = domaine_id ? String(domaine_id).trim() : null;
+    const normSerre = serre_id ? String(serre_id).trim() : null;
+    const normObs = observation ? String(observation).trim() : null;
+
+    // Contrôle anti-doublon AVANT toute écriture en base (garantit l'atomicité)
+    const existingSameDate = await fetchMergedTachesSupplementaires(dbClient, companyId, {
+      date: normDate,
+    });
+    for (const entry of resolvedEntries) {
+      const duplicate = existingSameDate.find((ex) => {
+        const sameWorker =
+          Number(ex.numero_ouvrier) === Number(entry.worker.numero) ||
+          (ex.ouvrier_id && entry.worker.id && String(ex.ouvrier_id) === String(entry.worker.id));
+        if (!sameWorker) return false;
+        return (
+          String(ex.nom_tache || '').trim().toUpperCase() === normTask &&
+          String(ex.unite || '').trim().toUpperCase() === normUnite &&
+          cleanFloatPrecision(Number(ex.quantite || 0)) === cleanFloatPrecision(entry.qty) &&
+          (ex.domaine_id || null) === normDomaine &&
+          (ex.serre_id || null) === normSerre
+        );
+      });
+      if (duplicate) {
+        return res.status(409).json({
+          success: false,
+          error: `Doublon détecté pour #${entry.worker.numero} (${entry.worker.nom}) : la tâche "${normTask}" (${entry.qty} ${normUnite}) est déjà enregistrée le ${normDate}. Aucune nouvelle opération n'a été créée.`,
+        });
+      }
+    }
+
+    const schemaInfo = await getSupplementairesSchemaInfo();
+    const dbTacheId = await resolveSupabaseTacheFk(dbClient, companyId, tache_id ? String(tache_id) : null);
+    const adminUuid = resolveValidProfileUuid(auth.admin.id);
+    const now = new Date();
+
+    const batchPayloads: Record<string, any>[] = [];
+    let targetTable = schemaInfo.hasTachesTable ? 'taches_supplementaires' : 'heures_supplementaires';
+
+    for (let idx = 0; idx < resolvedEntries.length; idx++) {
+      const { worker: rw, qty } = resolvedEntries[idx];
+      const newRecordId = `tsup_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 7)}`;
+      const fullRec = {
         id: newRecordId,
         company_id: companyId,
         ouvrier_id: rw.id,
         numero_ouvrier: rw.numero,
         nom_ouvrier: rw.nom,
-        date: String(date),
+        date: normDate,
         tache_id: tache_id ? String(tache_id) : null,
-        nom_tache: String(nom_tache).trim().toUpperCase(),
-        description: description ? String(description).trim() : null,
-        quantite: Math.round(qty * 100) / 100,
-        unite: String(unite).trim().toUpperCase(),
-        domaine_id: domaine_id ? String(domaine_id) : null,
-        serre_id: serre_id ? String(serre_id) : null,
-        observation: observation ? String(observation).trim() : null,
+        nom_tache: normTask,
+        description: normDesc,
+        quantite: qty,
+        unite: normUnite,
+        domaine_id: normDomaine,
+        serre_id: normSerre,
+        observation: normObs,
         created_by_id: auth.admin.id,
         created_by_nom: auth.admin.nom,
         created_by_role: 'admin',
-        created_at: now.toISOString(),
-        timestamp: now.getTime(),
+        heure_enregistrement: now.toTimeString().slice(0, 8),
+        created_at: new Date(now.getTime() + idx).toISOString(),
+        timestamp: now.getTime() + idx,
       };
 
-      const { data, error } = await dbClient
-        .from('taches_supplementaires')
-        .insert(rec)
-        .select()
-        .single();
-
-      if (error) throw new Error('Erreur insertion tâche: ' + error.message);
-      insertedItems.push(data || rec);
+      const dbOuvrierId = await resolveSupabaseOuvrierFk(dbClient, companyId, rw.id);
+      const { table, payload } = buildSupabaseTacheWritePayload(
+        fullRec,
+        schemaInfo,
+        dbOuvrierId,
+        dbTacheId,
+        adminUuid
+      );
+      targetTable = table;
+      batchPayloads.push(payload);
     }
 
-    return res.json({
+    // Insertion atomique en une seule requête PostgreSQL (tout passe ou rien n'est enregistré)
+    const { data: insertedData, error } = await dbClient
+      .from(targetTable)
+      .insert(batchPayloads)
+      .select();
+
+    if (error) {
+      throw new Error('Erreur insertion atomique tâche PostgreSQL: ' + error.message);
+    }
+
+    const insertedItems = (insertedData && insertedData.length > 0 ? insertedData : batchPayloads).map(
+      (row: any) => decodeSuppRecord({ ...row, type: 'tache' })
+    );
+
+    const responseBody = {
       success: true,
       items: insertedItems,
       item: insertedItems[0],
       count: insertedItems.length,
-      message: `${insertedItems.length} tâche(s) supplémentaire(s) enregistrée(s) avec succès.`,
-    });
+      message: `${insertedItems.length} opération(s) individuelle(s) enregistrée(s) avec succès pour "${normTask}".`,
+    };
+
+    if (cacheKey) {
+      tachesIdempotencyCache.set(cacheKey, { createdAt: Date.now(), payload: responseBody });
+    }
+
+    return res.json(responseBody);
   } catch (err: any) {
     console.error('Erreur POST /api/taches-supplementaires:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -2953,40 +3869,102 @@ app.put('/api/taches-supplementaires/:id', async (req: Request, res: Response) =
       observation,
     } = req.body;
 
-    const updatePayload: Record<string, any> = {
+    const schemaInfo = await getSupplementairesSchemaInfo();
+    const tableName = schemaInfo.hasTachesTable ? 'taches_supplementaires' : 'heures_supplementaires';
+
+    let existingQuery = dbClient
+      .from(tableName)
+      .select('*')
+      .eq('id', id)
+      .eq('company_id', companyId);
+    if (!schemaInfo.hasTachesTable) {
+      existingQuery = existingQuery.eq('type', 'tache');
+    }
+
+    const { data: existingDbRow, error: fetchErr } = await existingQuery.maybeSingle();
+    if (fetchErr) throw new Error('Erreur lecture tâche PostgreSQL: ' + fetchErr.message);
+
+    let existingLocalIdx = -1;
+    let localDbCache: any = null;
+    if (!existingDbRow) {
+      localDbCache = readDB();
+      existingLocalIdx = (localDbCache.taches_supplementaires || []).findIndex(
+        (x: any) => x.id === id && (!x.company_id || x.company_id === companyId)
+      );
+      if (existingLocalIdx < 0) {
+        return res.status(404).json({ success: false, error: 'Tâche supplémentaire introuvable.' });
+      }
+    }
+
+    const baseRecord = decodeSuppRecord({
+      ...(existingDbRow || localDbCache.taches_supplementaires[existingLocalIdx]),
+      type: 'tache',
+    });
+
+    let targetQuantite = Number(baseRecord.quantite || 0);
+    if (quantite !== undefined && quantite !== null && String(quantite).trim() !== '') {
+      const q = parsePositiveDecimal(quantite);
+      if (q === null || q <= 0) {
+        return res.status(400).json({ success: false, error: 'La quantité doit être strictement positive (> 0).' });
+      }
+      targetQuantite = q;
+    }
+
+    const mergedRecord = {
+      ...baseRecord,
+      date: date ? String(date) : baseRecord.date,
+      unite: unite !== undefined ? String(unite).trim().toUpperCase() : baseRecord.unite,
+      nom_tache: nom_tache !== undefined ? String(nom_tache).trim().toUpperCase() : baseRecord.nom_tache,
+      description: description !== undefined ? (description ? String(description).trim() : null) : baseRecord.description,
+      tache_id: tache_id !== undefined ? (tache_id || null) : baseRecord.tache_id,
+      domaine_id: domaine_id !== undefined ? (domaine_id || null) : baseRecord.domaine_id,
+      serre_id: serre_id !== undefined ? (serre_id || null) : baseRecord.serre_id,
+      observation: observation !== undefined ? (observation ? String(observation).trim() : null) : baseRecord.observation,
+      quantite: targetQuantite,
       updated_at: new Date().toISOString(),
       updated_by_id: auth.admin.id,
       updated_by_nom: auth.admin.nom,
     };
 
-    if (date) updatePayload.date = String(date);
-    if (unite !== undefined) updatePayload.unite = String(unite).trim().toUpperCase();
-    if (nom_tache !== undefined) updatePayload.nom_tache = String(nom_tache).trim().toUpperCase();
-    if (description !== undefined) updatePayload.description = description ? String(description).trim() : null;
-    if (tache_id !== undefined) updatePayload.tache_id = tache_id || null;
-    if (domaine_id !== undefined) updatePayload.domaine_id = domaine_id || null;
-    if (serre_id !== undefined) updatePayload.serre_id = serre_id || null;
-    if (observation !== undefined) updatePayload.observation = observation ? String(observation).trim() : null;
+    if (existingDbRow) {
+      const dbOuvrierId = await resolveSupabaseOuvrierFk(dbClient, companyId, mergedRecord.ouvrier_id);
+      const dbTacheId = await resolveSupabaseTacheFk(dbClient, companyId, mergedRecord.tache_id);
+      const adminUuid = resolveValidProfileUuid(mergedRecord.created_by_id || auth.admin.id);
+      const { table, payload } = buildSupabaseTacheWritePayload(
+        mergedRecord,
+        schemaInfo,
+        dbOuvrierId,
+        dbTacheId,
+        adminUuid
+      );
+      delete payload.id;
+      delete payload.company_id;
+      delete payload.created_at;
 
-    if (quantite !== undefined) {
-      const q = Number(quantite);
-      if (isNaN(q) || q <= 0) {
-        return res.status(400).json({ success: false, error: 'La quantité doit être strictement positive (> 0).' });
-      }
-      updatePayload.quantite = Math.round(q * 100) / 100;
+      const { data, error } = await dbClient
+        .from(table)
+        .update(payload)
+        .eq('id', id)
+        .eq('company_id', companyId)
+        .select()
+        .single();
+
+      if (error) throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
+
+      return res.json({
+        success: true,
+        item: decodeSuppRecord({ ...(data || mergedRecord), type: 'tache' }),
+        message: 'Tâche supplémentaire mise à jour avec succès.',
+      });
+    } else {
+      localDbCache.taches_supplementaires[existingLocalIdx] = mergedRecord;
+      writeDB(localDbCache);
+      return res.json({
+        success: true,
+        item: mergedRecord,
+        message: 'Tâche supplémentaire mise à jour avec succès.',
+      });
     }
-
-    const { data, error } = await dbClient
-      .from('taches_supplementaires')
-      .update(updatePayload)
-      .eq('id', id)
-      .eq('company_id', companyId)
-      .select()
-      .single();
-
-    if (error) throw new Error('Erreur mise à jour PostgreSQL: ' + error.message);
-
-    return res.json({ success: true, item: data, message: 'Tâche supplémentaire mise à jour avec succès.' });
   } catch (err: any) {
     console.error('Erreur PUT /api/taches-supplementaires/:id:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -3006,14 +3984,41 @@ app.delete('/api/taches-supplementaires/:id', async (req: Request, res: Response
 
     const companyId = auth.admin.company_id;
     const dbClient = auth.supabaseClient;
+    const schemaInfo = await getSupplementairesSchemaInfo();
+    const tableName = schemaInfo.hasTachesTable ? 'taches_supplementaires' : 'heures_supplementaires';
 
-    const { error } = await dbClient
-      .from('taches_supplementaires')
+    let delQuery = dbClient
+      .from(tableName)
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
+    if (!schemaInfo.hasTachesTable) {
+      delQuery = delQuery.eq('type', 'tache');
+    }
 
+    const { data: deletedRows, error } = await delQuery.select('id');
     if (error) throw new Error('Erreur suppression PostgreSQL: ' + error.message);
+
+    let deletedLocal = false;
+    try {
+      const local = readDB();
+      if (local.taches_supplementaires) {
+        const before = local.taches_supplementaires.length;
+        local.taches_supplementaires = local.taches_supplementaires.filter(
+          (x: any) => !(x.id === id && (!x.company_id || x.company_id === companyId))
+        );
+        if (local.taches_supplementaires.length < before) {
+          deletedLocal = true;
+          writeDB(local);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if ((!deletedRows || deletedRows.length === 0) && !deletedLocal) {
+      return res.status(404).json({ success: false, error: 'Tâche supplémentaire introuvable.' });
+    }
 
     return res.json({ success: true, message: 'Tâche supplémentaire supprimée avec succès.' });
   } catch (err: any) {
@@ -3033,51 +4038,46 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
   }
 
   try {
-    const { date, startDate, endDate, domaineId, serreId } = req.query;
+    const { date, startDate, endDate, domaineId, serreId, ouvrierId, tacheId, tache, workerSearch } = req.query;
     const companyId = auth.admin.company_id;
     const dbClient = auth.supabaseClient;
+    const filters = {
+      date: date ? String(date) : undefined,
+      startDate: startDate ? String(startDate) : undefined,
+      endDate: endDate ? String(endDate) : undefined,
+      domaineId: domaineId ? String(domaineId) : undefined,
+      serreId: serreId ? String(serreId) : undefined,
+      ouvrierId: ouvrierId ? String(ouvrierId) : undefined,
+      tacheId: tacheId ? String(tacheId) : undefined,
+      tache: tache ? String(tache) : undefined,
+      workerSearch: workerSearch ? String(workerSearch) : undefined,
+    };
 
-    // 1. Récupérer toutes les heures sup
-    let hQuery = dbClient
-      .from('heures_supplementaires')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (date) {
-      hQuery = hQuery.eq('date', String(date));
-    } else if (startDate && endDate) {
-      hQuery = hQuery.gte('date', String(startDate)).lte('date', String(endDate));
-    }
-    if (domaineId && domaineId !== 'ALL') hQuery = hQuery.eq('domaine_id', String(domaineId));
-    if (serreId && serreId !== 'ALL') hQuery = hQuery.eq('serre_id', String(serreId));
-
-    const { data: hData, error: hErr } = await hQuery;
-    if (hErr) throw new Error('Erreur lecture heures: ' + hErr.message);
-
-    // 2. Récupérer toutes les tâches sup
-    let tQuery = dbClient
-      .from('taches_supplementaires')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (date) {
-      tQuery = tQuery.eq('date', String(date));
-    } else if (startDate && endDate) {
-      tQuery = tQuery.gte('date', String(startDate)).lte('date', String(endDate));
-    }
-    if (domaineId && domaineId !== 'ALL') tQuery = tQuery.eq('domaine_id', String(domaineId));
-    if (serreId && serreId !== 'ALL') tQuery = tQuery.eq('serre_id', String(serreId));
-
-    const { data: tData, error: tErr } = await tQuery;
-    if (tErr) throw new Error('Erreur lecture tâches: ' + tErr.message);
+    // 1 & 2. Récupérer toutes les heures sup et tâches sup (Supabase PostgreSQL + archives historiques)
+    const [hData, tData] = await Promise.all([
+      fetchMergedHeuresSupplementaires(dbClient, companyId, filters),
+      fetchMergedTachesSupplementaires(dbClient, companyId, filters),
+    ]);
 
     // 3. Charger le référentiel des ouvriers pour les noms complets et numéros
     const local = readDB();
     const allWorkers: any[] = local.ouvriers || [];
+    try {
+      const { data: dbWorkers } = await dbClient
+        .from('ouvriers')
+        .select('id, numero, nom')
+        .eq('company_id', companyId);
+      if (dbWorkers && dbWorkers.length > 0) {
+        allWorkers.push(...dbWorkers);
+      }
+    } catch {
+      // ignore
+    }
+
     const workerMap = new Map<string, { id: string; numero: number; nom: string }>();
     allWorkers.forEach((w) => {
-      workerMap.set(String(w.id), w);
-      workerMap.set(String(w.numero), w);
+      if (w.id) workerMap.set(String(w.id), w);
+      if (w.numero !== undefined) workerMap.set(String(w.numero), w);
     });
 
     // 4. Regroupement par travailleur : EXACTEMENT 1 SEULE LIGNE PAR OUVRIER
@@ -3086,6 +4086,7 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
       numero_ouvrier: number;
       nom_ouvrier: string;
       total_heures: number;
+      total_remuneration_heures: number;
       taches_groupes: { [key: string]: { nom_tache: string; unite: string; quantite: number } };
       texte_recapitulatif: string;
       nb_operations: number;
@@ -3095,30 +4096,34 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
     const mapSummary = new Map<string, WorkerSummary>();
 
     // Traiter les heures supplémentaires
-    for (const h of hData || []) {
-      const wId = String(h.ouvrier_id || h.numero_ouvrier);
-      let sum = mapSummary.get(wId);
+    for (const h of hData) {
+      const ref = workerMap.get(String(h.ouvrier_id)) || workerMap.get(String(h.numero_ouvrier)) || {
+        id: h.ouvrier_id || `num_${h.numero_ouvrier}`,
+        numero: Number(h.numero_ouvrier) || 0,
+        nom: h.nom_ouvrier || `Ouvrier #${h.numero_ouvrier}`,
+      };
+      const wKey = String(ref.numero || h.numero_ouvrier || h.ouvrier_id);
+      let sum = mapSummary.get(wKey);
       if (!sum) {
-        const ref = workerMap.get(String(h.ouvrier_id)) || workerMap.get(String(h.numero_ouvrier)) || {
-          id: h.ouvrier_id,
-          numero: Number(h.numero_ouvrier) || 0,
-          nom: h.nom_ouvrier || `Ouvrier #${h.numero_ouvrier}`,
-        };
         sum = {
           ouvrier_id: ref.id,
           numero_ouvrier: ref.numero,
           nom_ouvrier: ref.nom,
           total_heures: 0,
+          total_remuneration_heures: 0,
           taches_groupes: {},
           texte_recapitulatif: '',
           nb_operations: 0,
           operations: [],
         };
-        mapSummary.set(wId, sum);
+        mapSummary.set(wKey, sum);
       }
 
       const dur = Number(h.duree_heures !== undefined ? h.duree_heures : (h.heures || 0));
-      sum.total_heures = Math.round((sum.total_heures + dur) * 100) / 100;
+      sum.total_heures = cleanFloatPrecision(sum.total_heures + dur);
+      if (h.remuneration !== undefined && h.remuneration !== null) {
+        sum.total_remuneration_heures = cleanFloatPrecision(sum.total_remuneration_heures + Number(h.remuneration));
+      }
       sum.nb_operations += 1;
       sum.operations.push({
         id: h.id,
@@ -3128,7 +4133,13 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
         quantite_ou_duree: dur,
         valeur: dur,
         unite: 'H',
+        mode_calcul: h.mode_calcul || 'heure',
+        tarif_unitaire: h.tarif_unitaire !== undefined ? h.tarif_unitaire : null,
+        nb_unites: h.nb_unites !== undefined ? h.nb_unites : dur,
+        remuneration: h.remuneration !== undefined ? h.remuneration : (h.montant_total !== undefined ? h.montant_total : null),
+        montant_total: h.montant_total !== undefined ? h.montant_total : (h.remuneration !== undefined ? h.remuneration : null),
         nom_tache: h.nom_tache || 'HEURES SUP',
+        description: null,
         domaine_id: h.domaine_id,
         serre_id: h.serre_id,
         observation: h.observation,
@@ -3138,26 +4149,27 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
     }
 
     // Traiter les tâches supplémentaires (regroupées strictement par tâche et unité sans jamais mélanger)
-    for (const t of tData || []) {
-      const wId = String(t.ouvrier_id || t.numero_ouvrier);
-      let sum = mapSummary.get(wId);
+    for (const t of tData) {
+      const ref = workerMap.get(String(t.ouvrier_id)) || workerMap.get(String(t.numero_ouvrier)) || {
+        id: t.ouvrier_id || `num_${t.numero_ouvrier}`,
+        numero: Number(t.numero_ouvrier) || 0,
+        nom: t.nom_ouvrier || `Ouvrier #${t.numero_ouvrier}`,
+      };
+      const wKey = String(ref.numero || t.numero_ouvrier || t.ouvrier_id);
+      let sum = mapSummary.get(wKey);
       if (!sum) {
-        const ref = workerMap.get(String(t.ouvrier_id)) || workerMap.get(String(t.numero_ouvrier)) || {
-          id: t.ouvrier_id,
-          numero: Number(t.numero_ouvrier) || 0,
-          nom: t.nom_ouvrier || `Ouvrier #${t.numero_ouvrier}`,
-        };
         sum = {
           ouvrier_id: ref.id,
           numero_ouvrier: ref.numero,
           nom_ouvrier: ref.nom,
           total_heures: 0,
+          total_remuneration_heures: 0,
           taches_groupes: {},
           texte_recapitulatif: '',
           nb_operations: 0,
           operations: [],
         };
-        mapSummary.set(wId, sum);
+        mapSummary.set(wKey, sum);
       }
 
       const nomTache = String(t.nom_tache || 'TÂCHE').trim().toUpperCase();
@@ -3168,7 +4180,7 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
       if (!sum.taches_groupes[groupKey]) {
         sum.taches_groupes[groupKey] = { nom_tache: nomTache, unite, quantite: 0 };
       }
-      sum.taches_groupes[groupKey].quantite = Math.round((sum.taches_groupes[groupKey].quantite + q) * 100) / 100;
+      sum.taches_groupes[groupKey].quantite = cleanFloatPrecision(sum.taches_groupes[groupKey].quantite + q);
       sum.nb_operations += 1;
       sum.operations.push({
         id: t.id,
@@ -3179,6 +4191,7 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
         valeur: q,
         unite,
         nom_tache: nomTache,
+        description: t.description || null,
         domaine_id: t.domaine_id,
         serre_id: t.serre_id,
         observation: t.observation,
@@ -3190,18 +4203,24 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
     // 5. Génération de la chaîne de récapitulatif exacte (ex: 2 H + 30 RUBO BALAYAGE + 15 CAISSE TRI)
     const recapList: any[] = [];
     let grandTotalHeures = 0;
+    let grandTotalRemuneration = 0;
     let grandTotalOperations = 0;
 
     for (const item of mapSummary.values()) {
       const parts: string[] = [];
 
-      // Heures supplémentaires
       if (item.total_heures > 0) {
-        parts.push(`${item.total_heures} H`);
-        grandTotalHeures = Math.round((grandTotalHeures + item.total_heures) * 100) / 100;
+        let hLabel = `${item.total_heures} H`;
+        if (item.total_remuneration_heures > 0) {
+          hLabel += ` (${item.total_remuneration_heures} DH)`;
+        }
+        parts.push(hLabel);
+        grandTotalHeures = cleanFloatPrecision(grandTotalHeures + item.total_heures);
+      }
+      if (item.total_remuneration_heures > 0) {
+        grandTotalRemuneration = cleanFloatPrecision(grandTotalRemuneration + item.total_remuneration_heures);
       }
 
-      // Tâches supplémentaires regroupées par tâche + unité
       const taskKeys = Object.keys(item.taches_groupes).sort();
       for (const tk of taskKeys) {
         const tg = item.taches_groupes[tk];
@@ -3214,7 +4233,6 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
       recapList.push(item);
     }
 
-    // Trier par numéro d'ouvrier croissant
     recapList.sort((a, b) => a.numero_ouvrier - b.numero_ouvrier);
 
     return res.json({
@@ -3223,6 +4241,7 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
       totaux: {
         total_ouvriers_concernes: recapList.length,
         grand_total_heures: grandTotalHeures,
+        grand_total_remuneration: grandTotalRemuneration,
         grand_total_operations: grandTotalOperations,
       },
     });
@@ -3243,29 +4262,36 @@ app.get('/api/supplementaires', async (req: Request, res: Response) => {
   }
 
   try {
-    const { date, startDate, endDate, ouvrierId, domaineId, type } = req.query;
+    const { date, startDate, endDate, ouvrierId, domaineId, serreId, tache, type } = req.query;
     const companyId = auth.admin.company_id;
     const dbClient = auth.supabaseClient;
+    const filters = {
+      date: date ? String(date) : undefined,
+      startDate: startDate ? String(startDate) : undefined,
+      endDate: endDate ? String(endDate) : undefined,
+      ouvrierId: ouvrierId ? String(ouvrierId) : undefined,
+      domaineId: domaineId ? String(domaineId) : undefined,
+      serreId: serreId ? String(serreId) : undefined,
+      tache: tache ? String(tache) : undefined,
+    };
 
     let items: any[] = [];
     if (!type || type === 'ALL' || type === 'heures') {
-      let q1 = dbClient.from('heures_supplementaires').select('*').eq('company_id', companyId);
-      if (date) q1 = q1.eq('date', String(date));
-      if (startDate && endDate) q1 = q1.gte('date', String(startDate)).lte('date', String(endDate));
-      if (ouvrierId) q1 = q1.eq('ouvrier_id', String(ouvrierId));
-      if (domaineId && domaineId !== 'ALL') q1 = q1.eq('domaine_id', String(domaineId));
-      const { data: hData } = await q1;
-      if (hData) items = items.concat(hData.map((h: any) => ({ ...h, type: 'heures', quantite: h.duree_heures || h.heures, heures: h.duree_heures || h.heures, unite: 'heure' })));
+      const hData = await fetchMergedHeuresSupplementaires(dbClient, companyId, filters);
+      items = items.concat(
+        hData.map((h: any) => ({
+          ...h,
+          type: 'heures',
+          quantite: h.duree_heures ?? h.heures,
+          heures: h.duree_heures ?? h.heures,
+          unite: h.unite || 'heure',
+        }))
+      );
     }
 
     if (!type || type === 'ALL' || type === 'tache') {
-      let q2 = dbClient.from('taches_supplementaires').select('*').eq('company_id', companyId);
-      if (date) q2 = q2.eq('date', String(date));
-      if (startDate && endDate) q2 = q2.gte('date', String(startDate)).lte('date', String(endDate));
-      if (ouvrierId) q2 = q2.eq('ouvrier_id', String(ouvrierId));
-      if (domaineId && domaineId !== 'ALL') q2 = q2.eq('domaine_id', String(domaineId));
-      const { data: tData } = await q2;
-      if (tData) items = items.concat(tData.map((t: any) => ({ ...t, type: 'tache' })));
+      const tData = await fetchMergedTachesSupplementaires(dbClient, companyId, filters);
+      items = items.concat(tData.map((t: any) => ({ ...t, type: 'tache' })));
     }
 
     items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
@@ -3302,12 +4328,20 @@ app.delete('/api/supplementaires/:id', async (req: Request, res: Response) => {
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  const { id } = req.params;
-  const dbClient = auth.supabaseClient;
-  const companyId = auth.admin.company_id;
-  await dbClient.from('heures_supplementaires').delete().eq('id', id).eq('company_id', companyId);
-  await dbClient.from('taches_supplementaires').delete().eq('id', id).eq('company_id', companyId);
-  return res.json({ success: true, message: 'Opération supprimée.' });
+  try {
+    const { id } = req.params;
+    const dbClient = auth.supabaseClient;
+    const companyId = auth.admin.company_id;
+    const schemaInfo = await getSupplementairesSchemaInfo();
+
+    await dbClient.from('heures_supplementaires').delete().eq('id', id).eq('company_id', companyId);
+    if (schemaInfo.hasTachesTable) {
+      await dbClient.from('taches_supplementaires').delete().eq('id', id).eq('company_id', companyId);
+    }
+    return res.json({ success: true, message: 'Opération supprimée.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // =========================================================================

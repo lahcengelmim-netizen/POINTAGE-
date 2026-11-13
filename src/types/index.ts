@@ -66,6 +66,9 @@ export interface AffectationTache {
   ouvrier_id: string;
   numero_ouvrier: number;
   tache_id: string;
+  domaine_id?: string;
+  serre_id?: string | null;
+  serre_nom?: string | null;
   date: string; // Format ISO YYYY-MM-DD
   timestamp: number;
 }
@@ -78,6 +81,7 @@ export interface PointageStats {
 }
 
 export type TypeSupplementaire = 'heures' | 'tache';
+export type ModeCalculHeuresSupp = 'heure' | 'quart_heure';
 
 export interface HeureSupplementaire {
   id: string;
@@ -100,6 +104,12 @@ export interface HeureSupplementaire {
   updated_at?: string | null;
   updated_by_id?: string | null;
   updated_by_nom?: string | null;
+  // Nouveau mode de calcul et tarification des heures supplémentaires
+  mode_calcul?: ModeCalculHeuresSupp; // 'heure' ou 'quart_heure'
+  tarif_unitaire?: number | null; // Prix unitaire en DH (ex: 30 DH/h ou 10 DH/quart)
+  nb_unites?: number | null; // Nombre saisi (ex: 2 heures ou 4 quarts)
+  remuneration?: number | null; // Rémunération = Prix unitaire × Nombre saisi (ex: 60 DH ou 40 DH)
+  montant_total?: number | null; // Montant total en DH
   // Champs rétro-compatibilité
   type?: TypeSupplementaire;
   heures?: number | null;

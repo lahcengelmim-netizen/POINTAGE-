@@ -59,14 +59,21 @@ export function addToSyncQueue(table: string, data: any) {
 
 // Serres par défaut (configurables par l'administrateur)
 export const DEFAULT_SERRES: Serre[] = [
-  { id: 'serre_1', company_id: 'cie_lahcen_pointeur', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1 },
-  { id: 'serre_2', company_id: 'cie_lahcen_pointeur', code: 'S02', nom: 'Serre 2', actif: true, ordre: 2 },
-  { id: 'serre_3', company_id: 'cie_lahcen_pointeur', code: 'S03', nom: 'Serre 3', actif: true, ordre: 3 },
-  { id: 'serre_4', company_id: 'cie_lahcen_pointeur', code: 'S04', nom: 'Serre 4', actif: true, ordre: 4 },
-  { id: 'serre_5', company_id: 'cie_lahcen_pointeur', code: 'S05', nom: 'Serre 5', actif: true, ordre: 5 },
-  { id: 'serre_6', company_id: 'cie_lahcen_pointeur', code: 'S06', nom: 'Serre 6', actif: true, ordre: 6 },
-  { id: 'serre_7', company_id: 'cie_lahcen_pointeur', code: 'S07', nom: 'Serre 7', actif: true, ordre: 7 },
-  { id: 'serre_8', company_id: 'cie_lahcen_pointeur', code: 'S08', nom: 'Serre 8', actif: true, ordre: 8 },
+  { id: 'serre_1', company_id: 'cie_lahcen_pointeur', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1, domaine_id: 'dom_d2' },
+  { id: 'serre_2', company_id: 'cie_lahcen_pointeur', code: 'S02', nom: 'Serre 2', actif: true, ordre: 2, domaine_id: 'dom_d2' },
+  { id: 'serre_3', company_id: 'cie_lahcen_pointeur', code: 'S03', nom: 'Serre 3', actif: true, ordre: 3, domaine_id: 'dom_d2' },
+  { id: 'serre_4', company_id: 'cie_lahcen_pointeur', code: 'S04', nom: 'Serre 4', actif: true, ordre: 4, domaine_id: 'dom_d2' },
+  { id: 'serre_5', company_id: 'cie_lahcen_pointeur', code: 'S05', nom: 'Serre 5', actif: true, ordre: 5, domaine_id: 'dom_d2' },
+  { id: 'serre_6', company_id: 'cie_lahcen_pointeur', code: 'S06', nom: 'Serre 6', actif: true, ordre: 6, domaine_id: 'dom_d2' },
+  { id: 'serre_7', company_id: 'cie_lahcen_pointeur', code: 'S07', nom: 'Serre 7', actif: true, ordre: 7, domaine_id: 'dom_d2' },
+  { id: 'serre_8', company_id: 'cie_lahcen_pointeur', code: 'S08', nom: 'Serre 8', actif: true, ordre: 8, domaine_id: 'dom_d2' },
+  { id: 'serre_9', company_id: 'cie_lahcen_pointeur', code: 'S09', nom: 'Serre 9', actif: true, ordre: 9, domaine_id: 'dom_d2' },
+  { id: 'serre_10', company_id: 'cie_lahcen_pointeur', code: 'S10', nom: 'Serre 10', actif: true, ordre: 10, domaine_id: 'dom_d2' },
+  { id: 'serre_11', company_id: 'cie_lahcen_pointeur', code: 'S11', nom: 'Serre 11', actif: true, ordre: 11, domaine_id: 'dom_d2' },
+  { id: 'serre_12', company_id: 'cie_lahcen_pointeur', code: 'S12', nom: 'Serre 12', actif: true, ordre: 12, domaine_id: 'dom_d2' },
+  { id: 'serre_13', company_id: 'cie_lahcen_pointeur', code: 'S13', nom: 'Serre 13', actif: true, ordre: 13, domaine_id: 'dom_d2' },
+  { id: 'serre_14', company_id: 'cie_lahcen_pointeur', code: 'S14', nom: 'Serre 14', actif: true, ordre: 14, domaine_id: 'dom_d2' },
+  { id: 'serre_15', company_id: 'cie_lahcen_pointeur', code: 'S15', nom: 'Serre 15', actif: true, ordre: 15, domaine_id: 'dom_d2' },
 ];
 
 // export const DEFAULT_ADMIN_USER: UserAccount = {
@@ -1234,7 +1241,10 @@ export function assignWorkerToTask(
   companyId: string,
   date: string,
   ouvrierId: string,
-  tacheId: string
+  tacheId: string,
+  domaineId?: string,
+  serreId?: string | null,
+  serreNom?: string | null
 ): { success: boolean; error?: string } {
   initStorage();
   // RÈGLE : Un ouvrier absent ne peut pas être affecté à une tâche
@@ -1250,50 +1260,22 @@ export function assignWorkerToTask(
   const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
   const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
 
-  // RÈGLE : UN OUVRIER = UNE SEULE TÂCHE PAR JOUR
-  const existingOther = all.find(
-    (a) =>
-      a.company_id === companyId &&
-      a.date === date &&
-      a.ouvrier_id === ouvrierId &&
-      a.tache_id !== tacheId
-  );
-  if (existingOther) {
-    const taches = getTaches(companyId);
-    const otherTask = taches.find((t) => t.id === existingOther.tache_id);
-    const taskLabel = otherTask ? formatTacheLabel(otherTask) : 'une autre tâche';
-    const ouvriers = getActiveOuvriers(companyId);
-    const ouvrier = ouvriers.find((o) => o.id === ouvrierId);
-    const nom = ouvrier ? ouvrier.nom : `Ouvrier #${pointage.numero_ouvrier}`;
-    return {
-      success: false,
-      error: `${nom} est déjà affecté à ${taskLabel} aujourd'hui. Retirez-le de cette tâche pour le mettre sur une autre.`,
-    };
-  }
-
-  const existing = all.find(
-    (a) =>
-      a.company_id === companyId &&
-      a.date === date &&
-      a.ouvrier_id === ouvrierId &&
-      a.tache_id === tacheId
-  );
-  if (existing) {
-    return { success: true };
-  }
-
   const newAff: AffectationTache = {
     id: `aff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     company_id: companyId,
     ouvrier_id: ouvrierId,
     numero_ouvrier: pointage.numero_ouvrier,
     tache_id: tacheId,
+    domaine_id: domaineId || pointage.domaine_id || getDefaultDomaineId(),
+    serre_id: serreId || null,
+    serre_nom: serreNom || null,
     date,
     timestamp: Date.now(),
   };
 
   all.push(newAff);
   safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(all));
+  addToSyncQueue('affectations', newAff);
   notifyListeners();
   return { success: true };
 }

@@ -407,6 +407,18 @@ export default function App() {
             )
           )}
 
+          {/* ===================== ÉCRAN STOCK PRO (RÉSERVÉ ADMIN) ===================== */}
+          {activeScreen === 'stock' && (
+            isCaporal ? (
+              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            ) : (
+              <StockProDashboard
+                currentUser={activeUser}
+                domaines={domaines}
+              />
+            )
+          )}
+
           {/* ===================== ÉCRAN SUPPLÉMENTAIRES (RÉSERVÉ ADMIN) ===================== */}
           {activeScreen === 'supplementaires' && (
             isCaporal ? (

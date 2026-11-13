@@ -177,9 +177,13 @@ CREATE TABLE IF NOT EXISTS public.heures_supplementaires (
   serre_id TEXT,
   observation TEXT,
   created_by_id UUID REFERENCES public.profiles(id),
-  created_by_nom TEXT,
-  heure_enregistrement TEXT NOT NULL,
-  timestamp BIGINT NOT NULL,
+  heure_enregistrement TEXT,
+  timestamp BIGINT,
+  mode_calcul TEXT DEFAULT 'heure',
+  tarif_unitaire NUMERIC(10, 2),
+  nb_unites NUMERIC(10, 2),
+  remuneration NUMERIC(10, 2),
+  montant_total NUMERIC(10, 2),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

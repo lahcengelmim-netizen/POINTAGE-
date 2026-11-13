@@ -19,13 +19,11 @@ async function getAuthHeaders(): Promise<HeadersInit> {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       headers['Authorization'] = `Bearer ${session.access_token}`;
-      return headers;
     }
   } catch {
-    // fallback
+    // Aucune session active : le serveur rejettera avec HTTP 401
   }
 
-  headers['Authorization'] = 'Bearer dev_caporal_token';
   return headers;
 }
 
@@ -100,6 +98,11 @@ export async function createHeureSupplementaireServer(data: {
   type?: any;
   quantite?: number | null;
   unite?: string;
+  mode_calcul?: 'heure' | 'quart_heure';
+  tarif_unitaire?: number | null;
+  nb_unites?: number | null;
+  remuneration?: number | null;
+  montant_total?: number | null;
 }): Promise<{ success: boolean; item?: HeureSupplementaire; error?: string }> {
   try {
     const headers = await getAuthHeaders();
@@ -122,7 +125,7 @@ export async function createHeureSupplementaireServer(data: {
       type: 'heures',
       quantite: result.item.duree_heures || result.item.heures,
       heures: result.item.duree_heures || result.item.heures,
-      unite: 'heure',
+      unite: result.item.mode_calcul === 'quart_heure' ? 'quart' : 'heure',
     };
 
     storage.mergeHeuresSupplementairesServerData([formattedItem]);
@@ -152,6 +155,11 @@ export async function updateHeureSupplementaireServer(
     type?: any;
     quantite?: number | null;
     unite?: string;
+    mode_calcul?: 'heure' | 'quart_heure';
+    tarif_unitaire?: number | null;
+    nb_unites?: number | null;
+    remuneration?: number | null;
+    montant_total?: number | null;
   }
 ): Promise<{ success: boolean; item?: HeureSupplementaire; error?: string }> {
   try {
@@ -175,7 +183,7 @@ export async function updateHeureSupplementaireServer(
       type: 'heures',
       quantite: result.item.duree_heures || result.item.heures,
       heures: result.item.duree_heures || result.item.heures,
-      unite: 'heure',
+      unite: result.item.mode_calcul === 'quart_heure' ? 'quart' : 'heure',
     };
 
     storage.mergeHeuresSupplementairesServerData([formattedItem]);

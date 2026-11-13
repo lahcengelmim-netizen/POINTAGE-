@@ -18,14 +18,11 @@ async function getAuthHeaders(): Promise<HeadersInit> {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       headers['Authorization'] = `Bearer ${session.access_token}`;
-      return headers;
     }
   } catch {
-    // fallback
+    // Aucune session active : le serveur rejettera avec HTTP 401
   }
 
-  // Token dev fallback
-  headers['Authorization'] = 'Bearer dev_caporal_token';
   return headers;
 }
 
@@ -78,18 +75,19 @@ export async function fetchTachesSupplementairesServer(filters?: {
 }
 
 export async function createTachesSupplementairesServer(data: {
-  ouvriers?: Array<{ id: string; numero: number }>;
+  ouvriers?: Array<{ id: string; numero: number; quantite?: number }>;
   ouvrier_id?: string;
   numero_ouvrier?: number;
   date: string;
   tache_id?: string | null;
   nom_tache: string;
   description?: string | null;
-  quantite: number;
+  quantite?: number;
   unite: string;
   domaine_id?: string | null;
   serre_id?: string | null;
   observation?: string | null;
+  idempotencyKey?: string;
 }): Promise<{ success: boolean; items?: TacheSupplementaire[]; error?: string; count?: number }> {
   try {
     const headers = await getAuthHeaders();
