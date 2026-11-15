@@ -31,16 +31,24 @@ import {
   Table,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { RecolteEntry, Serre, Ouvrier, UserAccount } from '../types';
+import { RecolteEntry, Serre, Ouvrier, UserAccount, Domaine } from '../types';
+import { DEFAULT_DOMAINES, getSerresForDomaine } from '../services/storage';
 
 interface RecolteAdminDashboardProps {
   recoltes: RecolteEntry[];
   serres: Serre[];
+  domaines?: Domaine[];
   ouvriers: Ouvrier[];
   users: UserAccount[];
   selectedDate: string;
   onSelectDate: (date: string) => void;
-  onSaveSerre: (data: { id?: string; code: string; nom: string; actif?: boolean }) => {
+  onSaveSerre: (data: {
+    id?: string;
+    code: string;
+    nom: string;
+    actif?: boolean;
+    domaine_id?: string | null;
+  }) => {
     success: boolean;
     error?: string;
     serre?: Serre;
@@ -53,6 +61,7 @@ interface RecolteAdminDashboardProps {
 export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
   recoltes,
   serres,
+  domaines = DEFAULT_DOMAINES,
   ouvriers,
   users,
   selectedDate,
@@ -79,10 +88,12 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
   >('matrice_ouvriers');
 
   // Modale Gestion Serre
+  const [configDomaineFilter, setConfigDomaineFilter] = useState<string>('ALL');
   const [showSerreModal, setShowSerreModal] = useState(false);
   const [editingSerre, setEditingSerre] = useState<Serre | null>(null);
   const [serreCodeInput, setSerreCodeInput] = useState('');
   const [serreNomInput, setSerreNomInput] = useState('');
+  const [serreDomaineInput, setSerreDomaineInput] = useState<string>('dom_d2');
   const [serreError, setSerreError] = useState<string | null>(null);
   const [serreSuccess, setSerreSuccess] = useState<string | null>(null);
 
@@ -459,6 +470,9 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
     setEditingSerre(null);
     setSerreCodeInput(`S0${serres.length + 1}`);
     setSerreNomInput(`Serre ${serres.length + 1}`);
+    setSerreDomaineInput(
+      configDomaineFilter !== 'ALL' ? configDomaineFilter : domaines[0]?.id || 'dom_d2'
+    );
     setSerreError(null);
     setShowSerreModal(true);
   };
@@ -467,6 +481,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
     setEditingSerre(serre);
     setSerreCodeInput(serre.code);
     setSerreNomInput(serre.nom);
+    setSerreDomaineInput(serre.domaine_id || 'dom_d2');
     setSerreError(null);
     setShowSerreModal(true);
   };
@@ -479,6 +494,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
       id: editingSerre?.id,
       code: serreCodeInput.trim().toUpperCase(),
       nom: serreNomInput.trim(),
+      domaine_id: serreDomaineInput || 'dom_d2',
     });
 
     if (!res.success) {
@@ -656,11 +672,14 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
               className="w-full bg-slate-50 border border-slate-300 rounded-xl p-1.5 font-bold text-slate-800 outline-none"
             >
               <option value="all">Toutes</option>
-              {serres.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.code} - {s.nom}
-                </option>
-              ))}
+              {serres.map((s) => {
+                const domNom = domaines.find((d) => d.id === (s.domaine_id || 'dom_d2'))?.nom || 'D2';
+                return (
+                  <option key={s.id} value={s.id}>
+                    [{domNom}] {s.code} - {s.nom}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -1021,7 +1040,11 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="font-bold text-slate-900 text-xs">
-              Serres de l'exploitation ({serres.length}) :
+              Serres de l'exploitation ({
+                configDomaineFilter === 'ALL'
+                  ? serres.length
+                  : serres.filter((s) => (s.domaine_id || 'dom_d2') === configDomaineFilter).length
+              }) :
             </h3>
             <button
               type="button"
@@ -1033,20 +1056,62 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
             </button>
           </div>
 
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => setConfigDomaineFilter('ALL')}
+              className={`px-2.5 py-1 rounded-xl text-[10px] font-black transition ${
+                configDomaineFilter === 'ALL'
+                  ? 'bg-emerald-700 text-white shadow-2xs'
+                  : 'bg-white border border-slate-200 text-slate-700'
+              }`}
+            >
+              Tous ({serres.length})
+            </button>
+            {domaines.map((dom) => {
+              const count = serres.filter((s) => (s.domaine_id || 'dom_d2') === dom.id).length;
+              const isSelected = configDomaineFilter === dom.id;
+              return (
+                <button
+                  key={dom.id}
+                  type="button"
+                  onClick={() => setConfigDomaineFilter(dom.id)}
+                  className={`px-2.5 py-1 rounded-xl text-[10px] font-black transition ${
+                    isSelected
+                      ? 'bg-emerald-700 text-white shadow-2xs'
+                      : 'bg-white border border-slate-200 text-slate-700'
+                  }`}
+                >
+                  {dom.nom} ({count})
+                </button>
+              );
+            })}
+          </div>
+
           <div className="space-y-1.5">
-            {serres.map((s) => (
+            {(configDomaineFilter === 'ALL'
+              ? serres
+              : serres.filter((s) => (s.domaine_id || 'dom_d2') === configDomaineFilter)
+            ).map((s) => {
+              const domNom = domaines.find((d) => d.id === (s.domaine_id || 'dom_d2'))?.nom || 'D2';
+              return (
               <div
                 key={s.id}
                 className="bg-white rounded-2xl p-2.5 border border-slate-200 shadow-2xs flex items-center justify-between text-xs"
               >
                 <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-xl bg-purple-100 text-purple-900 font-mono font-black flex items-center justify-center text-xs">
+                  <span className="px-2 h-8 rounded-xl bg-purple-100 text-purple-900 font-mono font-black flex items-center justify-center text-[11px]">
                     {s.code}
                   </span>
                   <div>
-                    <span className="font-black text-slate-900">{s.nom}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-black text-slate-900">{s.nom}</span>
+                      <span className="text-[9px] bg-emerald-100 text-emerald-900 px-1.5 py-0.5 rounded-md font-black">
+                        {domNom}
+                      </span>
+                    </div>
                     {!s.actif && (
-                      <span className="ml-2 text-[9px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold">
+                      <span className="text-[9px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold">
                         Désactivée
                       </span>
                     )}
@@ -1083,7 +1148,8 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1106,6 +1172,23 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
             </div>
 
             <form onSubmit={handleSaveSerreSubmit} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                  Domaine :
+                </label>
+                <select
+                  value={serreDomaineInput}
+                  onChange={(e) => setSerreDomaineInput(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2 font-bold text-xs text-slate-900 outline-none focus:border-emerald-600"
+                >
+                  {domaines.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      Domaine {d.nom}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="text-[11px] font-bold text-slate-700 block mb-1">
                   Code court (ex: S01, S02) :

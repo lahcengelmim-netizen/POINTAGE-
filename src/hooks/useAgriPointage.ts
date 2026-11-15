@@ -17,8 +17,14 @@ import {
   Serre,
   RecolteEntry,
   RecolteFilter,
+  AffectationTache,
+  TacheSerreConfig,
 } from '../types';
 import * as storage from '../services/storage';
+import {
+  syncPointageQueueToSupabase,
+  pullReferentielsSerresFromSupabase,
+} from '../services/supabaseSync';
 import { generateWhatsAppRecap } from '../utils/whatsappFormatter';
 import {
   calculerPointageFinancierMatin,
@@ -53,6 +59,17 @@ export function useAgriPointage() {
     });
     return unsubscribe;
   }, []);
+
+  // Synchronisation automatique de la file pointage/affectations et des référentiels domaines/serres
+  useEffect(() => {
+    const syncAll = () => {
+      syncPointageQueueToSupabase().catch(() => {});
+      pullReferentielsSerresFromSupabase(activeCompanyId).catch(() => {});
+    };
+    syncAll();
+    window.addEventListener('online', syncAll);
+    return () => window.removeEventListener('online', syncAll);
+  }, [activeCompanyId]);
 
   // Liste des sociétés
   const companies = useMemo(() => {
@@ -127,16 +144,24 @@ export function useAgriPointage() {
     return storage.getAffectations(activeCompanyId, selectedDate);
   }, [activeCompanyId, selectedDate, updateTick]);
 
+  // Configuration multi-serres des tâches pour la société et la date sélectionnée
+  const tacheSerresConfigs = useMemo<TacheSerreConfig[]>(() => {
+    void updateTick;
+    return storage.getTacheSerresConfigs(activeCompanyId, selectedDate);
+  }, [activeCompanyId, selectedDate, updateTick]);
+
   // Ensemble des IDs d'ouvriers pointés pour la date sélectionnée (présents uniquement)
   const pointesOuvrierIds = useMemo(() => {
     return new Set(pointages.filter((p) => p.present !== false).map((p) => p.ouvrier_id));
   }, [pointages]);
 
-  // Ouvriers pointés avec détails ouvrier + toutes ses tâches + domaine (présents uniquement)
+  // Ouvriers pointés avec détails ouvrier + toutes ses tâches + serre par tâche + domaine (présents uniquement)
   const pointesDetails = useMemo(() => {
     const ouvriersMap = new Map(allOuvriers.map((o) => [o.id, o]));
     const tachesMap = new Map(taches.map((t) => [t.id, t]));
     const domainesMap = new Map(domaines.map((d) => [d.id, d]));
+    const allSerresList = storage.getSerres(activeCompanyId);
+    const serresMap = new Map(allSerresList.map((s) => [s.id, s]));
 
     return pointages
       .filter((ptg) => ptg.present !== false)
@@ -151,15 +176,24 @@ export function useAgriPointage() {
           if (legacyTache) workerTaches.push(legacyTache);
         }
 
+        const affectationDetails = workerAffs.map((aff) => ({
+          affectation: aff,
+          tache: tachesMap.get(aff.tache_id),
+          domaine: domainesMap.get(aff.domaine_id || ptg.domaine_id || defaultDomaineId),
+          serre: aff.serre_id && !aff.serre_id.includes(',') ? serresMap.get(aff.serre_id) : undefined,
+        }));
+
         return {
           pointage: ptg,
           ouvrier: ouvriersMap.get(ptg.ouvrier_id),
           tache: workerTaches[0],
           taches: workerTaches,
+          affectations: workerAffs as AffectationTache[],
+          affectationDetails,
           domaine: domainesMap.get(ptg.domaine_id || defaultDomaineId),
         };
       });
-  }, [pointages, affectations, allOuvriers, taches, domaines, defaultDomaineId]);
+  }, [pointages, affectations, allOuvriers, taches, domaines, defaultDomaineId, activeCompanyId]);
 
   // Détails des heures supplémentaires avec infos ouvrier et tâche
   const heuresSuppDetails = useMemo(() => {
@@ -265,16 +299,21 @@ export function useAgriPointage() {
     (
       ouvrierId: string,
       tacheId: string | null = null,
-      domaineId?: string
+      domaineId?: string,
+      serreId?: string | null,
+      serreNom?: string | null
     ): { success: boolean; message?: string; pointage?: Pointage } => {
       const res = storage.addPointage(
         activeCompanyId,
         ouvrierId,
         selectedDate,
         tacheId,
-        domaineId || defaultDomaineId
+        domaineId || defaultDomaineId,
+        serreId,
+        serreNom
       );
       if (res.success && res.pointage) {
+        syncPointageQueueToSupabase().catch(() => {});
         return { success: true, message: 'Pointage enregistré avec succès !', pointage: res.pointage };
       }
       return { success: false, message: res.error || 'Erreur lors de l\'enregistrement.' };
@@ -282,10 +321,36 @@ export function useAgriPointage() {
     [activeCompanyId, selectedDate, defaultDomaineId]
   );
 
-  // Affectation des ouvriers aux tâches
+  // Affectation des ouvriers et serres multiples aux tâches
   const setTaskWorkers = useCallback(
-    (tacheId: string, ouvrierIds: string[]) => {
-      return storage.setTaskWorkers(activeCompanyId, selectedDate, tacheId, ouvrierIds);
+    (
+      tacheId: string,
+      ouvrierIds: string[],
+      options?: { domaineId?: string; serreIds?: string[]; serreNoms?: string[] }
+    ) => {
+      const res = storage.setTaskWorkers(activeCompanyId, selectedDate, tacheId, ouvrierIds, options);
+      if (res.success) {
+        syncPointageQueueToSupabase().catch(() => {});
+      }
+      return res;
+    },
+    [activeCompanyId, selectedDate]
+  );
+
+  const saveTaskSerres = useCallback(
+    (tacheId: string, domaineId: string, serreIds: string[], serreNoms: string[]) => {
+      const res = storage.updateTacheAffectationsSerres(
+        activeCompanyId,
+        selectedDate,
+        tacheId,
+        domaineId,
+        serreIds,
+        serreNoms
+      );
+      if (res.success) {
+        syncPointageQueueToSupabase().catch(() => {});
+      }
+      return res;
     },
     [activeCompanyId, selectedDate]
   );
@@ -293,16 +358,54 @@ export function useAgriPointage() {
   const removeWorkerFromTask = useCallback(
     (ouvrierId: string, tacheId: string) => {
       storage.removeWorkerFromTask(activeCompanyId, selectedDate, ouvrierId, tacheId);
+      syncPointageQueueToSupabase().catch(() => {});
     },
     [activeCompanyId, selectedDate]
   );
 
   const assignWorkerToTask = useCallback(
-    (ouvrierId: string, tacheId: string) => {
-      return storage.assignWorkerToTask(activeCompanyId, selectedDate, ouvrierId, tacheId);
+    (
+      ouvrierId: string,
+      tacheId: string,
+      domaineId?: string,
+      serreId?: string | null,
+      serreNom?: string | null
+    ) => {
+      const res = storage.assignWorkerToTask(
+        activeCompanyId,
+        selectedDate,
+        ouvrierId,
+        tacheId,
+        domaineId,
+        serreId,
+        serreNom
+      );
+      if (res.success) {
+        syncPointageQueueToSupabase().catch(() => {});
+      }
+      return res;
     },
     [activeCompanyId, selectedDate]
   );
+
+  const updateAffectation = useCallback(
+    (
+      affectationId: string,
+      updates: { tacheId?: string; domaineId?: string; serreId?: string | null; serreNom?: string | null }
+    ) => {
+      const res = storage.updateAffectationTache(affectationId, updates);
+      if (res.success) {
+        syncPointageQueueToSupabase().catch(() => {});
+      }
+      return res;
+    },
+    []
+  );
+
+  const removeAffectation = useCallback((affectationId: string) => {
+    storage.removeAffectationById(affectationId);
+    syncPointageQueueToSupabase().catch(() => {});
+  }, []);
 
   // Sauvegarde et nettoyage complet
   const getLastBackupDate = useCallback(() => {
@@ -629,7 +732,7 @@ export function useAgriPointage() {
   }, [activeCompanyId, updateTick]);
 
   const saveSerre = useCallback(
-    (data: { id?: string; code: string; nom: string; actif?: boolean }) => {
+    (data: { id?: string; code: string; nom: string; actif?: boolean; domaine_id?: string | null }) => {
       return storage.saveSerre(activeCompanyId, data);
     },
     [activeCompanyId]
@@ -702,6 +805,7 @@ export function useAgriPointage() {
     defaultDomaineId,
     pointages,
     affectations,
+    tacheSerresConfigs,
     pointesDetails,
     pointesOuvrierIds,
     heuresSupplementaires,
@@ -713,8 +817,11 @@ export function useAgriPointage() {
     checkWorkerByNumber,
     pointWorker,
     setTaskWorkers,
+    saveTaskSerres,
     removeWorkerFromTask,
     assignWorkerToTask,
+    updateAffectation,
+    removeAffectation,
     getLastBackupDate,
     recordBackupDate,
     clearAllDataPermanently,

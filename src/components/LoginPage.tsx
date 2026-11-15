@@ -1,10 +1,8 @@
 /**
- * Page d'Authentification dédiée pour AGRIPOINTAGE
- * - Affichage du logo et du nom officiel AGRIPOINTAGE
- * - Authentification sécurisée via Supabase Auth
- * - Formulaire pour Administrateurs et Caporaux (Email & Mot de passe)
- * - Gestion des erreurs d'authentification sans exposition de secrets
- * - Guide de liaison des comptes existants sans perte de données
+ * Page d'Authentification dédiée pour LAHCEN POINTEUR
+ * - Affichage du logo officiel LAHCEN POINTEUR – POINTAGE AGRICOLE sans déformation
+ * - Arrière-plan moderne vert agricole et blanc avec touches orange
+ * - Authentification sécurisée via Supabase Auth & Biométrie WebAuthn
  */
 
 import React, { useState, useEffect } from 'react';
@@ -18,7 +16,6 @@ import {
   AlertCircle,
   HelpCircle,
   X,
-  Sparkles,
   UserCheck,
   Key,
   Fingerprint,
@@ -30,6 +27,9 @@ import {
   registerBiometricCredential,
   StoredBiometricCredential,
 } from '../services/webAuthnService';
+
+const OFFICIAL_LOGO_SRC =
+  '/assets/aistudio/Logo_d_application_agricole_avec_pointage_4d078075.png';
 
 export const LoginPage: React.FC = () => {
   const { login, loginWithBiometrics } = useUser();
@@ -115,54 +115,75 @@ export const LoginPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col justify-center items-center p-4 selection:bg-emerald-500 selection:text-white relative overflow-hidden">
-      {/* Arrière-plan décoratif agricole */}
-      <div className="absolute -top-32 -left-32 w-96 h-96 bg-emerald-600/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute -bottom-32 -right-32 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+    <div className="min-h-screen bg-gradient-to-b from-emerald-50 via-white to-emerald-100/70 text-slate-900 flex flex-col justify-center items-center px-4 py-6 sm:py-10 selection:bg-emerald-600 selection:text-white relative overflow-x-hidden">
+      {/* Bandeau supérieur vert agricole épuré (aucune surcharge visuelle) */}
+      <div
+        aria-hidden="true"
+        className="absolute inset-x-0 top-0 h-56 sm:h-64 bg-gradient-to-br from-emerald-950 via-emerald-900 to-green-800 border-b-4 border-orange-500/90 pointer-events-none"
+      />
+      <div
+        aria-hidden="true"
+        className="absolute -bottom-24 right-0 w-80 h-80 bg-emerald-200/40 rounded-full blur-3xl pointer-events-none"
+      />
 
-      {/* Conteneur principal de la carte de connexion */}
-      <div className="w-full max-w-md bg-slate-800/90 backdrop-blur-md rounded-3xl border border-slate-700/80 shadow-2xl overflow-hidden relative z-10 my-auto">
-        {/* En-tête de Marque AGRIPOINTAGE */}
-        <div className="p-6 sm:p-8 text-center bg-linear-to-b from-slate-800 to-slate-800/60 border-b border-slate-700/60">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-linear-to-tr from-emerald-600 to-emerald-400 text-white font-black shadow-xl shadow-emerald-900/40 mb-4 ring-4 ring-emerald-500/20 animate-in zoom-in duration-300">
-            <span className="text-3xl tracking-tighter font-black">🌾</span>
+      {/* Conteneur principal centré — adapté mobile, tablette et ordinateur */}
+      <div className="w-full max-w-md sm:max-w-[460px] bg-white rounded-3xl border border-emerald-200/90 shadow-2xl shadow-emerald-950/15 overflow-hidden relative z-10 my-auto">
+        {/* En-tête officiel avec Logo LAHCEN POINTEUR centré */}
+        <div className="px-5 pt-6 pb-5 sm:px-8 sm:pt-7 sm:pb-6 text-center bg-white border-b border-emerald-100">
+          <div className="mx-auto w-full max-w-[240px] sm:max-w-[300px] flex items-center justify-center mb-3">
+            <img
+              src={OFFICIAL_LOGO_SRC}
+              alt="LAHCEN POINTEUR – POINTAGE AGRICOLE"
+              width={1536}
+              height={1024}
+              loading="eager"
+              decoding="async"
+              fetchPriority="high"
+              className="w-full h-auto max-h-40 sm:max-h-48 object-contain select-none"
+            />
           </div>
 
-          <h1 className="text-2xl sm:text-3xl font-black text-white tracking-wider uppercase font-mono mb-1">
-            AGRI<span className="text-emerald-400">POINTAGE</span>
+          <h1 className="text-lg sm:text-xl font-black text-emerald-950 tracking-wider uppercase leading-tight">
+            LAHCEN <span className="text-orange-600">POINTEUR</span>
           </h1>
-          <p className="text-xs font-semibold text-slate-400 tracking-wide">
-            Système Pro de Pointage & Gestion Agricole
-          </p>
+          <div className="mt-1 flex items-center justify-center gap-2">
+            <span className="h-0.5 w-6 bg-emerald-600 rounded-full" />
+            <p className="text-[11px] sm:text-xs font-extrabold text-emerald-700 tracking-[0.18em] uppercase">
+              POINTAGE AGRICOLE
+            </p>
+            <span className="h-0.5 w-6 bg-orange-500 rounded-full" />
+          </div>
 
-          <div className="mt-4 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[11px] font-bold">
-            <ShieldCheck className="w-3.5 h-3.5" />
+          <div className="mt-3.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
             <span>Authentification Sécurisée Supabase Auth</span>
           </div>
         </div>
 
         {/* Corps du Formulaire */}
-        <div className="p-6 sm:p-8 space-y-5">
+        <div className="p-5 sm:p-8 space-y-5 bg-white">
           {/* Message d'erreur */}
           {error && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-3.5 text-xs text-red-300 font-medium flex items-start gap-2.5 animate-in fade-in">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div className="bg-red-50 border border-red-200 rounded-2xl p-3.5 text-xs text-red-800 font-semibold flex items-start gap-2.5 animate-in fade-in">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
               <div className="leading-relaxed">{error}</div>
             </div>
           )}
 
           {/* Option de Connexion Rapide par Empreinte si déjà enregistrée sur cet appareil */}
           {bioSupported && storedBioCred && (
-            <div className="p-4 bg-emerald-950/40 border border-emerald-500/30 rounded-2xl text-center space-y-2.5 animate-in fade-in">
-              <div className="flex items-center justify-center gap-2 text-xs font-bold text-emerald-300">
-                <Fingerprint className="w-5 h-5 text-emerald-400 animate-pulse" />
-                <span>الدخول بالبصمة للمستخدم : <strong>{storedBioCred.nom}</strong></span>
+            <div className="p-4 bg-emerald-50/90 border border-emerald-200 rounded-2xl text-center space-y-2.5 animate-in fade-in">
+              <div className="flex items-center justify-center gap-2 text-xs font-bold text-emerald-900">
+                <Fingerprint className="w-5 h-5 text-emerald-700 animate-pulse" />
+                <span>
+                  الدخول بالبصمة للمستخدم : <strong>{storedBioCred.nom}</strong>
+                </span>
               </div>
               <button
                 type="button"
                 onClick={handleBiometricLogin}
                 disabled={bioLoading}
-                className="w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-500 active:scale-98 disabled:opacity-50 text-white font-black text-xs sm:text-sm rounded-xl shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2 transition cursor-pointer"
+                className="w-full py-3 px-4 bg-emerald-700 hover:bg-emerald-800 active:scale-98 disabled:opacity-50 text-white font-black text-xs sm:text-sm rounded-xl shadow-md shadow-emerald-900/20 flex items-center justify-center gap-2 transition cursor-pointer"
               >
                 {bioLoading ? (
                   <>
@@ -171,12 +192,12 @@ export const LoginPage: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <Fingerprint className="w-5 h-5 text-emerald-200" />
+                    <Fingerprint className="w-5 h-5 text-orange-300" />
                     <span>فتح التطبيق بالبصمة (Connexion par empreinte)</span>
                   </>
                 )}
               </button>
-              <p className="text-[10px] text-slate-400 font-medium">
+              <p className="text-[10px] text-emerald-800/80 font-medium">
                 أو استخدم البريد الإلكتروني وكلمة المرور أدناه لاسترجاع الدخول.
               </p>
             </div>
@@ -185,8 +206,8 @@ export const LoginPage: React.FC = () => {
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Champ E-mail / Identifiant */}
             <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5 flex items-center gap-1.5">
-                <Mail className="w-3.5 h-3.5 text-emerald-400" />
+              <label className="block text-xs font-bold uppercase tracking-wider text-emerald-950 mb-1.5 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-emerald-700" />
                 <span>Adresse E-mail ou Identifiant</span>
               </label>
               <div className="relative">
@@ -194,21 +215,21 @@ export const LoginPage: React.FC = () => {
                   type="text"
                   value={emailOrUsername}
                   onChange={(e) => setEmailOrUsername(e.target.value)}
-                  placeholder="ex: admin@agripointage.ma ou lahcengelmim@gmail.com"
+                  placeholder="ex: lahcengelmim@gmail.com ou identifiant"
                   autoCapitalize="none"
                   autoCorrect="off"
                   required
-                  className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-3 pl-10 text-sm font-semibold text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition"
+                  className="w-full bg-emerald-50/40 border border-emerald-200 rounded-xl px-4 py-3 pl-10 text-sm font-semibold text-slate-900 placeholder-slate-400 focus:outline-hidden focus:bg-white focus:border-emerald-700 focus:ring-2 focus:ring-emerald-600/20 transition"
                 />
-                <Mail className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5 pointer-events-none" />
+                <Mail className="w-4 h-4 text-emerald-700/70 absolute left-3.5 top-3.5 pointer-events-none" />
               </div>
             </div>
 
             {/* Champ Mot de passe */}
             <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5 flex items-center justify-between">
+              <label className="block text-xs font-bold uppercase tracking-wider text-emerald-950 mb-1.5 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
-                  <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                  <Lock className="w-3.5 h-3.5 text-emerald-700" />
                   Mot de passe
                 </span>
               </label>
@@ -219,13 +240,14 @@ export const LoginPage: React.FC = () => {
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
                   required
-                  className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-3 pl-10 pr-10 text-sm font-semibold text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition"
+                  className="w-full bg-emerald-50/40 border border-emerald-200 rounded-xl px-4 py-3 pl-10 pr-10 text-sm font-semibold text-slate-900 placeholder-slate-400 focus:outline-hidden focus:bg-white focus:border-emerald-700 focus:ring-2 focus:ring-emerald-600/20 transition"
                 />
-                <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5 pointer-events-none" />
+                <Lock className="w-4 h-4 text-emerald-700/70 absolute left-3.5 top-3.5 pointer-events-none" />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3.5 top-3.5 text-slate-400 hover:text-white transition cursor-pointer"
+                  className="absolute right-3.5 top-3.5 text-slate-500 hover:text-emerald-800 transition cursor-pointer"
+                  aria-label="Afficher ou masquer le mot de passe"
                 >
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -234,33 +256,31 @@ export const LoginPage: React.FC = () => {
 
             {/* Case à cocher optionnelle pour la biométrie */}
             {bioSupported ? (
-              <label className="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer pt-1 selection:bg-none">
+              <label className="flex items-center gap-2.5 text-xs text-slate-700 cursor-pointer pt-1 selection:bg-none">
                 <input
                   type="checkbox"
                   checked={enableBioCheckbox}
                   onChange={(e) => setEnableBioCheckbox(e.target.checked)}
-                  className="w-4 h-4 rounded-md border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500/30 cursor-pointer"
+                  className="w-4 h-4 rounded-md border-emerald-300 bg-white text-emerald-700 focus:ring-emerald-600/30 cursor-pointer accent-emerald-700"
                 />
-                <span className="font-semibold text-slate-200">
+                <span className="font-semibold text-emerald-950">
                   تفعيل الدخول بالبصمة على هذا الجهاز
                 </span>
               </label>
             ) : (
               bioSupported === false && (
-                <div className="p-2.5 bg-slate-900/60 border border-slate-700/60 rounded-xl text-[11px] text-slate-400 flex items-center gap-2">
-                  <Fingerprint className="w-4 h-4 text-slate-500 shrink-0" />
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600 flex items-center gap-2">
+                  <Fingerprint className="w-4 h-4 text-slate-400 shrink-0" />
                   <span>هذا الجهاز أو المتصفح لا يدعم المصادقة بالبصمة (WebAuthn).</span>
                 </div>
               )
             )}
 
             {/* Bouton de Soumission */}
-
-            {/* Bouton de Soumission */}
             <button
               type="submit"
               disabled={loading}
-              className="w-full mt-2 py-3.5 px-4 bg-linear-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 active:scale-98 disabled:opacity-50 text-white font-black text-sm rounded-xl shadow-lg shadow-emerald-900/30 transition flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+              className="w-full mt-2 py-3.5 px-4 bg-gradient-to-r from-emerald-900 via-emerald-800 to-green-700 hover:from-emerald-800 hover:to-green-600 active:scale-98 disabled:opacity-50 text-white font-black text-sm rounded-xl shadow-lg shadow-emerald-950/20 border-b-2 border-orange-500 transition flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
             >
               {loading ? (
                 <>
@@ -269,76 +289,76 @@ export const LoginPage: React.FC = () => {
                 </>
               ) : (
                 <>
-                  <Key className="w-4 h-4" />
-                  <span>Se connecter à AGRIPOINTAGE</span>
+                  <Key className="w-4 h-4 text-orange-300" />
+                  <span>Se connecter à LAHCEN POINTEUR</span>
                 </>
               )}
             </button>
           </form>
 
           {/* Bouton d'aide / Explications de liaison de compte */}
-          <div className="pt-2 text-center border-t border-slate-700/60">
+          <div className="pt-3 text-center border-t border-emerald-100">
             <button
               type="button"
               onClick={() => setShowGuideModal(true)}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-emerald-400 font-medium transition cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-xs text-emerald-800 hover:text-orange-600 font-semibold transition cursor-pointer"
             >
-              <HelpCircle className="w-3.5 h-3.5 text-emerald-400" />
+              <HelpCircle className="w-3.5 h-3.5 text-orange-500" />
               <span>Comment connecter un compte existant ?</span>
             </button>
           </div>
         </div>
 
         {/* Pied de page */}
-        <div className="px-6 py-3 bg-slate-900/60 border-t border-slate-700/40 text-center text-[11px] text-slate-500 font-medium">
-          Exploitation Agricole Lahcen Pointeur — Version Pro
+        <div className="px-6 py-3 bg-emerald-950 text-center text-[11px] text-emerald-100/90 font-semibold">
+          LAHCEN POINTEUR — Pointage Agricole Pro
         </div>
       </div>
 
       {/* MODALE D'EXPLICATION POUR LA LIAISON SÉCURISÉE DES COMPTES */}
       {showGuideModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-slate-800 border border-slate-700 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl text-slate-200 text-xs leading-relaxed">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-700">
-              <div className="flex items-center gap-2 font-black text-white text-sm">
-                <UserCheck className="w-5 h-5 text-emerald-400" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-emerald-950/75 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white border border-emerald-200 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl text-slate-700 text-xs leading-relaxed">
+            <div className="flex items-center justify-between pb-3 border-b border-emerald-100">
+              <div className="flex items-center gap-2 font-black text-emerald-950 text-sm">
+                <UserCheck className="w-5 h-5 text-emerald-700" />
                 <span>Guide de Liaison des Comptes Supabase</span>
               </div>
               <button
                 type="button"
                 onClick={() => setShowGuideModal(false)}
-                className="text-slate-400 hover:text-white transition cursor-pointer p-1"
+                className="text-slate-400 hover:text-emerald-900 transition cursor-pointer p-1"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="space-y-2.5">
-              <p className="text-slate-300 font-medium">
+              <p className="text-slate-700 font-medium">
                 Pour garantir la sécurité et la confidentialité des données de l'exploitation agricole, chaque compte (Administrateur ou Caporal) est authentifié directement via <strong>Supabase Auth</strong>.
               </p>
 
-              <div className="p-3 bg-slate-900/80 rounded-2xl border border-slate-700/80 space-y-1.5">
-                <p className="font-bold text-emerald-400 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
+              <div className="p-3 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-1.5">
+                <p className="font-bold text-emerald-800 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
                   1. Comptes Administrateurs :
                 </p>
-                <p className="text-[11px] text-slate-400">
-                  Connectez-vous avec votre adresse e-mail d'administration Supabase Auth (ex: <code className="text-amber-300 font-mono">lahcengelmim@gmail.com</code>).
+                <p className="text-[11px] text-slate-600">
+                  Connectez-vous avec votre adresse e-mail d'administration Supabase Auth (ex: <code className="text-orange-700 font-mono font-bold">lahcengelmim@gmail.com</code>).
                 </p>
               </div>
 
-              <div className="p-3 bg-slate-900/80 rounded-2xl border border-slate-700/80 space-y-1.5">
-                <p className="font-bold text-emerald-400 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
+              <div className="p-3 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-1.5">
+                <p className="font-bold text-emerald-800 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
                   2. Comptes Caporaux / العمال :
                 </p>
-                <p className="text-[11px] text-slate-400">
-                  Saisissez votre e-mail dédié ou votre identifiant de caporal. Le profil correspondant est chargé automatiquement depuis la table <code className="text-emerald-300 font-mono">profiles</code> avec vos droits spécifiques.
+                <p className="text-[11px] text-slate-600">
+                  Saisissez votre e-mail dédié ou votre identifiant de caporal. Le profil correspondant est chargé automatiquement depuis la table <code className="text-emerald-800 font-mono font-bold">profiles</code> avec vos droits spécifiques.
                 </p>
               </div>
 
-              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-amber-200 text-[11px]">
+              <div className="p-3 bg-orange-50 border border-orange-200 rounded-2xl text-orange-900 text-[11px]">
                 <strong>Remarque importante :</strong> Aucune donnée historique (pointages, récoltes, stock) n'est modifiée ou supprimée. Les comptes créés sur Supabase Auth sont automatiquement rattachés à leur profil existant par UUID.
               </div>
             </div>
@@ -346,7 +366,7 @@ export const LoginPage: React.FC = () => {
             <button
               type="button"
               onClick={() => setShowGuideModal(false)}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-xl transition cursor-pointer"
+              className="w-full py-2.5 bg-emerald-800 hover:bg-emerald-900 text-white font-black rounded-xl transition cursor-pointer"
             >
               J'ai compris
             </button>

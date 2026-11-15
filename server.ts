@@ -81,6 +81,7 @@ interface ServerDB {
     nom: string;
     actif: boolean;
     ordre: number;
+    domaine_id?: string | null;
   }>;
   ouvriers?: Array<{
     id: string;
@@ -312,6 +313,33 @@ const DEFAULT_DB: ServerDB = {
     { id: 'serre_13', company_id: 'cie_lahcen_pointeur', code: 'S13', nom: 'Serre 13', actif: true, ordre: 13, domaine_id: 'dom_d2' },
     { id: 'serre_14', company_id: 'cie_lahcen_pointeur', code: 'S14', nom: 'Serre 14', actif: true, ordre: 14, domaine_id: 'dom_d2' },
     { id: 'serre_15', company_id: 'cie_lahcen_pointeur', code: 'S15', nom: 'Serre 15', actif: true, ordre: 15, domaine_id: 'dom_d2' },
+    { id: 'serre_16', company_id: 'cie_lahcen_pointeur', code: 'S16', nom: 'SERRE 16', actif: true, ordre: 16, domaine_id: 'dom_d3' },
+    { id: 'serre_17', company_id: 'cie_lahcen_pointeur', code: 'S17', nom: 'SERRE 17', actif: true, ordre: 17, domaine_id: 'dom_d3' },
+    { id: 'serre_18', company_id: 'cie_lahcen_pointeur', code: 'S18', nom: 'SERRE 18', actif: true, ordre: 18, domaine_id: 'dom_d3' },
+    { id: 'serre_19', company_id: 'cie_lahcen_pointeur', code: 'S19', nom: 'SERRE 19', actif: true, ordre: 19, domaine_id: 'dom_d3' },
+    { id: 'serre_20', company_id: 'cie_lahcen_pointeur', code: 'S20', nom: 'SERRE 20', actif: true, ordre: 20, domaine_id: 'dom_d3' },
+    { id: 'serre_21', company_id: 'cie_lahcen_pointeur', code: 'S21', nom: 'SERRE 21', actif: true, ordre: 21, domaine_id: 'dom_d3' },
+    { id: 'serre_22', company_id: 'cie_lahcen_pointeur', code: 'S22', nom: 'SERRE 22', actif: true, ordre: 22, domaine_id: 'dom_d3' },
+    { id: 'serre_d5_23', company_id: 'cie_lahcen_pointeur', code: 'D5-S23', nom: 'SERRE 23', actif: true, ordre: 23, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_24', company_id: 'cie_lahcen_pointeur', code: 'D5-S24', nom: 'SERRE 24', actif: true, ordre: 24, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_25', company_id: 'cie_lahcen_pointeur', code: 'D5-S25', nom: 'SERRE 25', actif: true, ordre: 25, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_26', company_id: 'cie_lahcen_pointeur', code: 'D5-S26', nom: 'SERRE 26', actif: true, ordre: 26, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_27', company_id: 'cie_lahcen_pointeur', code: 'D5-S27', nom: 'SERRE 27', actif: true, ordre: 27, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_28', company_id: 'cie_lahcen_pointeur', code: 'D5-S28', nom: 'SERRE 28', actif: true, ordre: 28, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_29', company_id: 'cie_lahcen_pointeur', code: 'D5-S29', nom: 'SERRE 29', actif: true, ordre: 29, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_30', company_id: 'cie_lahcen_pointeur', code: 'D5-S30', nom: 'SERRE 30', actif: true, ordre: 30, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_31', company_id: 'cie_lahcen_pointeur', code: 'D5-S31', nom: 'SERRE 31', actif: true, ordre: 31, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_32', company_id: 'cie_lahcen_pointeur', code: 'D5-S32', nom: 'SERRE 32', actif: true, ordre: 32, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_33', company_id: 'cie_lahcen_pointeur', code: 'D5-S33', nom: 'SERRE 33', actif: true, ordre: 33, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_34', company_id: 'cie_lahcen_pointeur', code: 'D5-S34', nom: 'SERRE 34', actif: true, ordre: 34, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_35', company_id: 'cie_lahcen_pointeur', code: 'D5-S35', nom: 'SERRE 35', actif: true, ordre: 35, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_36', company_id: 'cie_lahcen_pointeur', code: 'D5-S36', nom: 'SERRE 36', actif: true, ordre: 36, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_37', company_id: 'cie_lahcen_pointeur', code: 'D5-S37', nom: 'SERRE 37', actif: true, ordre: 37, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_38', company_id: 'cie_lahcen_pointeur', code: 'D5-S38', nom: 'SERRE 38', actif: true, ordre: 38, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_39', company_id: 'cie_lahcen_pointeur', code: 'D5-S39', nom: 'SERRE 39', actif: true, ordre: 39, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_40', company_id: 'cie_lahcen_pointeur', code: 'D5-S40', nom: 'SERRE 40', actif: true, ordre: 40, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_41', company_id: 'cie_lahcen_pointeur', code: 'D5-S41', nom: 'SERRE 41', actif: true, ordre: 41, domaine_id: 'dom_d5' },
+    { id: 'serre_d5_42', company_id: 'cie_lahcen_pointeur', code: 'D5-S42', nom: 'SERRE 42', actif: true, ordre: 42, domaine_id: 'dom_d5' },
   ],
   recoltes: [],
   stock_produits: [],
@@ -678,14 +706,64 @@ app.post('/api/recolte', (req: Request, res: Response) => {
   }
 });
 
-// Récupérer les serres configurées
-app.get('/api/serres', (req: Request, res: Response) => {
+// Récupérer les serres configurées (depuis Supabase en priorité, avec fallback local complété)
+app.get('/api/serres', async (req: Request, res: Response) => {
   try {
-    const { companyId } = req.query;
-    const db = readDB();
-    const list = companyId
-      ? db.serres.filter((s) => s.company_id === companyId || !s.company_id)
-      : db.serres;
+    const { companyId, domaineId } = req.query;
+    let list: any[] = [];
+
+    const isAnomalousSerre23 = (s: any) =>
+      s?.id === 'serre_23' &&
+      (!s.domaine_id || s.domaine_id === 'dom_d3' || String(s.code || '').toUpperCase() === 'S23');
+
+    if (supabaseAdmin) {
+      let query = supabaseAdmin.from('serres').select('*').order('ordre', { ascending: true });
+      if (companyId) {
+        query = query.eq('company_id', String(companyId));
+      }
+      const { data, error } = await query;
+      if (!error && Array.isArray(data) && data.length > 0) {
+        list = data.filter((s) => !isAnomalousSerre23(s));
+      }
+    }
+
+    if (list.length === 0) {
+      const db = readDB();
+      const canonicalById = new Map(DEFAULT_DB.serres.map((s) => [s.id, s]));
+      const mergedMap = new Map<string, any>();
+
+      for (const defS of DEFAULT_DB.serres) {
+        if (!companyId || defS.company_id === companyId) {
+          mergedMap.set(defS.id, { ...defS });
+        }
+      }
+
+      for (const localS of db.serres || []) {
+        if (!localS || isAnomalousSerre23(localS)) continue;
+        if (companyId && localS.company_id && localS.company_id !== companyId) continue;
+        const canon = canonicalById.get(localS.id);
+        mergedMap.set(localS.id, {
+          ...canon,
+          ...localS,
+          domaine_id: localS.domaine_id || canon?.domaine_id || null,
+          ordre: canon?.ordre ?? localS.ordre,
+        });
+      }
+
+      list = Array.from(mergedMap.values()).sort((a, b) => (a.ordre || 0) - (b.ordre || 0));
+    }
+
+    if (domaineId) {
+      const targetDom = String(domaineId).trim().toLowerCase();
+      const isD2 = targetDom === 'dom_d2' || targetDom === 'd2';
+      list = list.filter((s) => {
+        const sDom = (s.domaine_id || '').trim().toLowerCase();
+        if (!sDom) return isD2;
+        return sDom === targetDom || `dom_${sDom}` === targetDom || sDom === `dom_${targetDom}`;
+      });
+    }
+
+    list.sort((a, b) => (a.ordre || 0) - (b.ordre || 0));
     res.json({ success: true, serres: list });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: 'Erreur serres' });

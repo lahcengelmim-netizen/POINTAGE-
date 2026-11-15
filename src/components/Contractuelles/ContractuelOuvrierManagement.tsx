@@ -42,6 +42,7 @@ import {
   deleteContractuelOuvrier,
   importContractuelOuvriers,
 } from '../../services/contractuelService';
+import { getSerresForDomaine } from '../../services/storage';
 
 interface ContractuelOuvrierManagementProps {
   domaines: Domaine[];
@@ -549,7 +550,16 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
           <div>
             <select
               value={selectedDomaineFilter}
-              onChange={(e) => setSelectedDomaineFilter(e.target.value)}
+              onChange={(e) => {
+                const nextDom = e.target.value;
+                setSelectedDomaineFilter(nextDom);
+                if (nextDom !== 'ALL' && selectedSerreFilter !== 'ALL') {
+                  const allowed = getSerresForDomaine(serres, nextDom, domaines);
+                  if (!allowed.some((s) => s.id === selectedSerreFilter)) {
+                    setSelectedSerreFilter('ALL');
+                  }
+                }
+              }}
               className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:bg-white focus:border-emerald-500"
             >
               <option value="ALL">Tous les domaines</option>
@@ -569,7 +579,10 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
               className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:bg-white focus:border-emerald-500"
             >
               <option value="ALL">Toutes les serres</option>
-              {serres.map((s) => (
+              {(selectedDomaineFilter !== 'ALL'
+                ? getSerresForDomaine(serres, selectedDomaineFilter, domaines)
+                : serres.filter((s) => s.actif !== false)
+              ).map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.nom} ({s.code})
                 </option>
@@ -1255,7 +1268,20 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                       </label>
                       <select
                         value={editingOuvrier.domaine_id || domaines[0]?.id}
-                        onChange={(e) => setEditingOuvrier({ ...editingOuvrier, domaine_id: e.target.value })}
+                        onChange={(e) => {
+                          const nextDom = e.target.value;
+                          const allowed = getSerresForDomaine(serres, nextDom, domaines);
+                          const keepSerre =
+                            editingOuvrier.serre_id &&
+                            allowed.some((s) => s.id === editingOuvrier.serre_id)
+                              ? editingOuvrier.serre_id
+                              : null;
+                          setEditingOuvrier({
+                            ...editingOuvrier,
+                            domaine_id: nextDom,
+                            serre_id: keepSerre,
+                          });
+                        }}
                         className="w-full bg-white border border-slate-300 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-800 outline-none"
                       >
                         {domaines.map((d) => (
@@ -1277,7 +1303,11 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                       className="w-full bg-white border border-slate-300 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-800 outline-none"
                     >
                       <option value="">-- Aucune / Variable --</option>
-                      {serres.map((s) => (
+                      {getSerresForDomaine(
+                        serres,
+                        editingOuvrier.domaine_id || domaines[0]?.id || 'dom_d2',
+                        domaines
+                      ).map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.nom} ({s.code})
                         </option>

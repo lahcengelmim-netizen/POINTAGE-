@@ -33,12 +33,14 @@ import {
   Sparkles,
   Save,
 } from 'lucide-react';
-import { Ouvrier, Serre, RecolteEntry, UserAccount } from '../types';
+import { Ouvrier, Serre, RecolteEntry, UserAccount, Domaine } from '../types';
+import { DEFAULT_DOMAINES, getSerresForDomaine } from '../services/storage';
 
 interface RecolteCaporalProps {
   currentUser: UserAccount;
   activeOuvriers: Ouvrier[];
   serres: Serre[];
+  domaines?: Domaine[];
   recoltes: RecolteEntry[];
   selectedDate: string;
   onSelectDate: (date: string) => void;
@@ -78,6 +80,7 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
   currentUser,
   activeOuvriers,
   serres,
+  domaines = DEFAULT_DOMAINES,
   recoltes,
   selectedDate,
   onSelectDate,
@@ -140,15 +143,29 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
   // --------------------------------------------------------------------------
   // ÉTAPE 2 : CHOIX DES SERRES
   // --------------------------------------------------------------------------
-  const activeSerres = useMemo(() => {
-    const list = serres.filter((s) => s.actif);
+  const activeSerres = useMemo<Serre[]>(() => {
+    const list = serres.filter((s) => s.actif !== false);
+    const fallbackCompanyId = currentUser?.company_id || '';
     return list.length > 0
       ? list
       : [
-          { id: 'serre_1', code: 'S01', nom: 'Serre 1', actif: true, ordre: 1 },
-          { id: 'serre_2', code: 'S02', nom: 'Serre 2', actif: true, ordre: 2 },
+          { id: 'serre_1', company_id: fallbackCompanyId, code: 'S01', nom: 'Serre 1', actif: true, ordre: 1, domaine_id: 'dom_d2' },
+          { id: 'serre_2', company_id: fallbackCompanyId, code: 'S02', nom: 'Serre 2', actif: true, ordre: 2, domaine_id: 'dom_d2' },
         ];
-  }, [serres]);
+  }, [serres, currentUser?.company_id]);
+
+  const [selectedDomaineStep2, setSelectedDomaineStep2] = useState<string>('ALL');
+
+  const domaineNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    domaines.forEach((d) => map.set(d.id, d.nom));
+    return map;
+  }, [domaines]);
+
+  const displayedSerresStep2 = useMemo(() => {
+    if (selectedDomaineStep2 === 'ALL') return activeSerres;
+    return getSerresForDomaine(activeSerres, selectedDomaineStep2, domaines);
+  }, [activeSerres, selectedDomaineStep2, domaines]);
 
   const [selectedSerreIds, setSelectedSerreIds] = useState<Set<string>>(new Set());
 
@@ -328,7 +345,7 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
             nom_ouvrier: worker.nom,
             caisses: qty,
             type_operation: operationType,
-            domaine_id: 'dom_d2',
+            domaine_id: serre.domaine_id || 'dom_d2',
           });
         }
       });
@@ -449,6 +466,7 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
         caisses: parsed,
         serre_id: editSerreIdValue,
         serre_nom: targetSerreObj?.nom || editingEntry.serre_nom,
+        domaine_id: targetSerreObj?.domaine_id || editingEntry.domaine_id || 'dom_d2',
       },
       { id: currentUser.id, nom: currentUser.nom }
     );
@@ -840,10 +858,45 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
                 </span>
               </div>
 
+              {/* FILTRE PAR DOMAINE (D2, D3, D5...) */}
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDomaineStep2('ALL')}
+                  className={`px-2.5 py-1.5 rounded-xl text-[11px] font-black transition ${
+                    selectedDomaineStep2 === 'ALL'
+                      ? 'bg-emerald-700 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  Tous ({activeSerres.length})
+                </button>
+                {domaines.map((dom) => {
+                  const count = getSerresForDomaine(activeSerres, dom.id, domaines).length;
+                  if (count === 0) return null;
+                  const active = selectedDomaineStep2 === dom.id;
+                  return (
+                    <button
+                      key={dom.id}
+                      type="button"
+                      onClick={() => setSelectedDomaineStep2(dom.id)}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-black transition ${
+                        active
+                          ? 'bg-emerald-700 text-white shadow-xs'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      {dom.nom} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+
               {/* GRILLE DES SERRES AVEC GROS BOUTONS ÉLÉGANTS */}
               <div className="grid grid-cols-2 gap-2.5">
-                {activeSerres.map((serre) => {
+                {displayedSerresStep2.map((serre) => {
                   const isSelected = selectedSerreIds.has(serre.id);
+                  const domLabel = domaineNameById.get(serre.domaine_id || 'dom_d2') || 'D2';
                   return (
                     <button
                       key={serre.id}
@@ -855,16 +908,25 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
                           : 'bg-slate-50 hover:bg-slate-100 text-slate-900 border-slate-200'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1">
+                          <span
+                            className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${
+                              isSelected ? 'bg-emerald-800 text-emerald-100' : 'bg-slate-200 text-slate-700'
+                            }`}
+                          >
+                            {serre.code}
+                          </span>
+                          <span
+                            className={`text-[9px] font-black px-1.5 py-0.5 rounded-md ${
+                              isSelected ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {domLabel}
+                          </span>
+                        </div>
                         <span
-                          className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${
-                            isSelected ? 'bg-emerald-800 text-emerald-100' : 'bg-slate-200 text-slate-700'
-                          }`}
-                        >
-                          {serre.code}
-                        </span>
-                        <span
-                          className={`w-6 h-6 rounded-lg flex items-center justify-center font-black text-xs ${
+                          className={`w-6 h-6 rounded-lg flex items-center justify-center font-black text-xs shrink-0 ${
                             isSelected ? 'bg-white text-emerald-700' : 'border border-slate-300 text-transparent'
                           }`}
                         >

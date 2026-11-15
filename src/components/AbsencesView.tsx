@@ -6,7 +6,7 @@
 
 import React, { useState } from 'react';
 import { UserX, Search, CheckCircle, Info, Sparkles } from 'lucide-react';
-import { Ouvrier, Tache, Domaine } from '../types';
+import { Ouvrier, Tache, Domaine, Serre } from '../types';
 import { TaskModal } from './TaskModal';
 
 interface AbsencesViewProps {
@@ -15,8 +15,15 @@ interface AbsencesViewProps {
   totalPointes: number;
   taches: Tache[];
   domaines?: Domaine[];
+  serres?: Serre[];
   defaultDomaineId?: string;
-  onPointWorker: (ouvrierId: string, tacheId?: string | null, domaineId?: string) => {
+  onPointWorker: (
+    ouvrierId: string,
+    tacheId?: string | null,
+    domaineId?: string,
+    serreId?: string | null,
+    serreNom?: string | null
+  ) => {
     success: boolean;
     message?: string;
   };
@@ -30,6 +37,7 @@ export const AbsencesView: React.FC<AbsencesViewProps> = ({
   totalPointes,
   taches,
   domaines = [],
+  serres = [],
   defaultDomaineId = 'dom_d2',
   onPointWorker,
 }) => {
@@ -51,9 +59,12 @@ export const AbsencesView: React.FC<AbsencesViewProps> = ({
     setTaskModalOpen(true);
   };
 
-  const handleConfirmLatePointage = (tacheId: string | null, domaineId: string) => {
+  const handleConfirmLatePointage = (
+    tacheId: string | null,
+    domaineId: string
+  ) => {
     if (!selectedAbsent) return;
-    const res = onPointWorker(selectedAbsent.id, tacheId, domaineId);
+    const res = onPointWorker(selectedAbsent.id, tacheId, domaineId, null, null);
     if (res.success) {
       setJustPointedMessage(`✓ Retardataire pointé : #${selectedAbsent.numero} ${selectedAbsent.nom}`);
       setTimeout(() => setJustPointedMessage(null), 3000);
@@ -197,7 +208,7 @@ export const AbsencesView: React.FC<AbsencesViewProps> = ({
         )}
       </div>
 
-      {/* Modale d'affectation de tâche si pointage d'un retardataire */}
+      {/* Modale d'affectation de tâche si pointage d'un retardataire (sans serre) */}
       <TaskModal
         isOpen={taskModalOpen}
         ouvrier={selectedAbsent}
@@ -206,6 +217,10 @@ export const AbsencesView: React.FC<AbsencesViewProps> = ({
         defaultDomaineId={defaultDomaineId}
         onSelectTask={handleConfirmLatePointage}
         onCancelPointage={() => {
+          setTaskModalOpen(false);
+          setSelectedAbsent(null);
+        }}
+        onClose={() => {
           setTaskModalOpen(false);
           setSelectedAbsent(null);
         }}

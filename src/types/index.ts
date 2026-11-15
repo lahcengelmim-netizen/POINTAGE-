@@ -69,8 +69,21 @@ export interface AffectationTache {
   domaine_id?: string;
   serre_id?: string | null;
   serre_nom?: string | null;
+  serres_ids?: string[];
+  serres_noms?: string[];
   date: string; // Format ISO YYYY-MM-DD
   timestamp: number;
+}
+
+export interface TacheSerreConfig {
+  id: string;
+  company_id: string;
+  date: string; // Format ISO YYYY-MM-DD
+  tache_id: string;
+  domaine_id: string;
+  serre_ids: string[];
+  serre_noms: string[];
+  updated_at: number;
 }
 
 export interface PointageStats {
@@ -214,6 +227,7 @@ export interface Serre {
   nom: string; // ex: 'Serre 1', 'Serre Tomates'
   actif: boolean;
   ordre: number;
+  domaine_id?: string | null;
 }
 
 export type RecolteOperationType = 'RECOLTE' | 'CHARGEMENT' | 'DECHARGEMENT';

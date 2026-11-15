@@ -14,6 +14,24 @@ import {
   Banknote,
 } from 'lucide-react';
 import { CalculFinancierPointageResult } from '../utils/pointageFinancier';
+import { AffectationTache, Domaine, Ouvrier, Pointage, Serre, Tache } from '../types';
+import { formatTacheLabel } from '../utils/tacheUtils';
+import { formatDateJJMM } from '../utils/whatsappFormatter';
+
+interface RecapAffectationDetail {
+  affectation: AffectationTache;
+  tache?: Tache;
+  domaine?: Domaine;
+  serre?: Serre;
+}
+
+interface RecapPointageDetail {
+  pointage: Pointage;
+  ouvrier?: Ouvrier;
+  tache?: Tache;
+  domaine?: Domaine;
+  affectationDetails?: RecapAffectationDetail[];
+}
 
 interface RecapWhatsAppProps {
   recapText: string;
@@ -22,14 +40,17 @@ interface RecapWhatsAppProps {
   totalAbsents: number;
   totalSupp?: number;
   pointageFinancier?: CalculFinancierPointageResult;
+  pointesDetails?: RecapPointageDetail[];
 }
 
 export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
   recapText,
+  selectedDate,
   totalPointes,
   totalAbsents,
   totalSupp = 0,
   pointageFinancier,
+  pointesDetails = [],
 }) => {
   const [copied, setCopied] = useState(false);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
@@ -217,6 +238,78 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
           </ul>
         </div>
       </div>
+
+      {/* Récapitulatif journalier détaillé : Nom ouvrier | Tâche | Serre | Domaine | Date */}
+      {pointesDetails.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
+          <div className="px-3 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+            <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
+              Récapitulatif détaillé (Tâches &amp; Serres)
+            </span>
+            <span className="text-[11px] font-bold text-slate-500">
+              {formatDateJJMM(selectedDate)}
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-[11px]">
+              <thead>
+                <tr className="bg-slate-100 text-slate-600 border-b border-slate-200 font-black">
+                  <th className="py-2 px-2.5">Nom ouvrier</th>
+                  <th className="py-2 px-2">Tâche</th>
+                  <th className="py-2 px-2">Serre</th>
+                  <th className="py-2 px-2">Domaine</th>
+                  <th className="py-2 px-2.5">Date</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {[...pointesDetails]
+                  .sort((a, b) => a.pointage.numero_ouvrier - b.pointage.numero_ouvrier)
+                  .flatMap((item) => {
+                    const ouvrierLabel = `#${item.pointage.numero_ouvrier} ${
+                      item.ouvrier?.nom || `Ouvrier #${item.pointage.numero_ouvrier}`
+                    }`;
+                    const dateCell = formatDateJJMM(item.pointage.date || selectedDate);
+                    const defaultDomLabel = item.domaine?.nom || 'D2';
+                    const affs = item.affectationDetails || [];
+
+                    if (affs.length > 0) {
+                      return affs.map(({ affectation, tache, domaine, serre }) => (
+                        <tr key={affectation.id} className="hover:bg-slate-50/70">
+                          <td className="py-2 px-2.5 font-bold text-slate-900">{ouvrierLabel}</td>
+                          <td className="py-2 px-2 font-bold text-slate-800">
+                            {tache ? formatTacheLabel(tache) : affectation.tache_id}
+                          </td>
+                          <td className="py-2 px-2 font-black text-emerald-800">
+                            {serre?.nom || affectation.serre_nom || '—'}
+                          </td>
+                          <td className="py-2 px-2 font-bold text-blue-800">
+                            {domaine?.nom || defaultDomLabel}
+                          </td>
+                          <td className="py-2 px-2.5 text-slate-500 font-mono">{dateCell}</td>
+                        </tr>
+                      ));
+                    }
+
+                    return [
+                      <tr key={item.pointage.id} className="hover:bg-slate-50/70">
+                        <td className="py-2 px-2.5 font-bold text-slate-900">{ouvrierLabel}</td>
+                        <td className="py-2 px-2 font-semibold text-slate-700">
+                          {item.tache ? formatTacheLabel(item.tache) : <span className="italic text-slate-400">Sans tâche</span>}
+                        </td>
+                        <td className="py-2 px-2 text-slate-500">
+                          {item.pointage.serre_nom || '—'}
+                        </td>
+                        <td className="py-2 px-2 font-bold text-blue-800">{defaultDomLabel}</td>
+                        <td className="py-2 px-2.5 text-slate-500 font-mono">{dateCell}</td>
+                      </tr>,
+                    ];
+                  })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Bouton secondaire d'envoi SMS */}
       <div className="text-center pt-1">

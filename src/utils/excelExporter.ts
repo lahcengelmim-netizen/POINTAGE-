@@ -23,7 +23,7 @@
  */
 
 import * as XLSX from 'xlsx';
-import { Company, Ouvrier, Tache, Domaine, Pointage, AffectationTache, HeureSupplementaire } from '../types';
+import { Company, Ouvrier, Tache, Domaine, Serre, Pointage, AffectationTache, HeureSupplementaire } from '../types';
 import * as storage from '../services/storage';
 
 export interface ExportPeriodParams {
@@ -160,6 +160,8 @@ export function exportPointageExcel(
     const ouvrierMap = new Map<string, Ouvrier>(ouvriers.map((o) => [o.id, o]));
     const tacheMap = new Map<string, Tache>(taches.map((t) => [t.id, t]));
     const domaineMap = new Map<string, Domaine>(domaines.map((d) => [d.id, d]));
+    const companySerres: Serre[] = storage.getSerres(company.id);
+    const serreMap = new Map<string, Serre>(companySerres.map((s) => [s.id, s]));
 
     // Liste des ouvriers actifs de la société (référence pour absences)
     const activeWorkers = ouvriers.filter((o) => o.actif);
@@ -169,6 +171,7 @@ export function exportPointageExcel(
       domaineNom: string;
       numeroOuvrier: number;
       codeTache: string;
+      serreNom: string;
       cells: (string | number)[];
     }
 
@@ -231,12 +234,13 @@ export function exportPointageExcel(
 
         if (!isPresent) {
           // --- OUVRIER ABSENT ---
-          // Une seule ligne, Présence = "Absent", Code tâche et Tâche vides
+          // Une seule ligne, Présence = "Absent", Code tâche, Tâche et Serre vides
           rows.push({
             dateRaw: dateIso,
             domaineNom: workerDomNom,
             numeroOuvrier: ouvrier.numero,
             codeTache: '',
+            serreNom: '',
             cells: [
               dateCell,
               workerDomNom,
@@ -245,27 +249,88 @@ export function exportPointageExcel(
               'Absent',
               '',
               '',
+              '',
               heuresSuppText,
             ],
           });
         } else {
           // --- OUVRIER PRÉSENT ---
-          // Trouver toutes les tâches affectées à cet ouvrier pour cette date
+          // Trouver toutes les affectations (tâche + serre) de cet ouvrier pour cette date
           const workerAffs = dayAffectations.filter((a) => a.ouvrier_id === ouvrier.id);
 
-          // Rétrocompatibilité : si aucune affectation mais pointage.tache_id existe
-          const tacheIds: string[] = workerAffs.map((a) => a.tache_id);
-          if (tacheIds.length === 0 && pointage?.tache_id) {
-            tacheIds.push(pointage.tache_id);
-          }
+          if (workerAffs.length > 0) {
+            // Un ouvrier affecté à plusieurs tâches/serres : une ligne par couple (tâche, serre)
+            workerAffs.forEach((aff) => {
+              const t = tacheMap.get(aff.tache_id);
+              const code = t?.code?.trim() || '';
+              const nom = t?.nom?.trim() || '';
+              const affDomNom = aff.domaine_id
+                ? (domaineMap.get(aff.domaine_id)?.nom || workerDomNom)
+                : workerDomNom;
+              const serreNom =
+                aff.serre_nom?.trim() ||
+                (aff.serre_id ? serreMap.get(aff.serre_id)?.nom?.trim() : '') ||
+                '';
 
-          if (tacheIds.length === 0) {
+              rows.push({
+                dateRaw: dateIso,
+                domaineNom: affDomNom,
+                numeroOuvrier: ouvrier.numero,
+                codeTache: code,
+                serreNom,
+                cells: [
+                  dateCell,
+                  affDomNom,
+                  ouvrier.numero,
+                  ouvrier.nom,
+                  'Présent',
+                  code,
+                  nom,
+                  serreNom,
+                  heuresSuppText,
+                ],
+              });
+            });
+          } else if (pointage?.tache_id) {
+            // Rétrocompatibilité avec les anciens pointages sans affectations multiples
+            const t = tacheMap.get(pointage.tache_id);
+            const code = t?.code?.trim() || '';
+            const nom = t?.nom?.trim() || '';
+            const serreNom =
+              pointage.serre_nom?.trim() ||
+              (pointage.serre_id ? serreMap.get(pointage.serre_id)?.nom?.trim() : '') ||
+              '';
+
+            rows.push({
+              dateRaw: dateIso,
+              domaineNom: workerDomNom,
+              numeroOuvrier: ouvrier.numero,
+              codeTache: code,
+              serreNom,
+              cells: [
+                dateCell,
+                workerDomNom,
+                ouvrier.numero,
+                ouvrier.nom,
+                'Présent',
+                code,
+                nom,
+                serreNom,
+                heuresSuppText,
+              ],
+            });
+          } else {
             // Présent sans aucune tâche : une seule ligne, Code tâche et Tâche vides
+            const legacySerreNom =
+              pointage?.serre_nom?.trim() ||
+              (pointage?.serre_id ? serreMap.get(pointage.serre_id)?.nom?.trim() : '') ||
+              '';
             rows.push({
               dateRaw: dateIso,
               domaineNom: workerDomNom,
               numeroOuvrier: ouvrier.numero,
               codeTache: '',
+              serreNom: legacySerreNom,
               cells: [
                 dateCell,
                 workerDomNom,
@@ -274,59 +339,33 @@ export function exportPointageExcel(
                 'Présent',
                 '',
                 '',
+                legacySerreNom,
                 heuresSuppText,
               ],
-            });
-          } else {
-            // Un ouvrier affecté à plusieurs tâches : une ligne par tâche
-            tacheIds.forEach((tId) => {
-              const t = tacheMap.get(tId);
-              const code = t?.code?.trim() || '';
-              const nom = t?.nom?.trim() || '';
-
-              rows.push({
-                dateRaw: dateIso,
-                domaineNom: workerDomNom,
-                numeroOuvrier: ouvrier.numero,
-                codeTache: code,
-                cells: [
-                  dateCell,
-                  workerDomNom,
-                  ouvrier.numero,
-                  ouvrier.nom,
-                  'Présent',
-                  code,
-                  nom,
-                  heuresSuppText,
-                ],
-              });
             });
           }
         }
       });
     });
 
-    // 3. Tri selon spécification :
-    // "Trier par date, puis par domaine, puis par numéro d'ouvrier, puis par code tâche."
+    // 3. Tri : Date -> Domaine -> N° ouvrier -> Code tâche -> Serre
     rows.sort((a, b) => {
-      // 1. Date (chronologique)
       if (a.dateRaw !== b.dateRaw) {
         return a.dateRaw.localeCompare(b.dateRaw);
       }
-      // 2. Domaine
       if (a.domaineNom !== b.domaineNom) {
         return a.domaineNom.localeCompare(b.domaineNom);
       }
-      // 3. Numéro d'ouvrier (numérique croissant)
       if (a.numeroOuvrier !== b.numeroOuvrier) {
         return a.numeroOuvrier - b.numeroOuvrier;
       }
-      // 4. Code tâche
-      return a.codeTache.localeCompare(b.codeTache);
+      if (a.codeTache !== b.codeTache) {
+        return a.codeTache.localeCompare(b.codeTache);
+      }
+      return a.serreNom.localeCompare(b.serreNom);
     });
 
-    // 4. Colonnes dans l'ordre exact :
-    // Date | Domaine | N° ouvrier | Nom et prénom | Présence | Code tâche | Tâche | Heures supplémentaires
+    // 4. Colonnes : Date | Domaine | N° ouvrier | Nom et prénom | Présence | Code tâche | Tâche | Serre | Heures supplémentaires
     const headers = [
       'Date',
       'Domaine',
@@ -335,6 +374,7 @@ export function exportPointageExcel(
       'Présence',
       'Code tâche',
       'Tâche',
+      'Serre',
       'Heures supplémentaires',
     ];
 

@@ -19,18 +19,30 @@ import {
   ChevronUp,
   Fuel,
   Banknote,
+  Plus,
+  Warehouse,
+  X,
 } from 'lucide-react';
-import { Ouvrier, Tache, Pointage, Domaine } from '../types/index';
+import { Ouvrier, Tache, Pointage, Domaine, Serre, AffectationTache } from '../types/index';
 import { TaskModal } from './TaskModal';
 import { formatTacheLabel } from '../utils/tacheUtils';
 import { CalculFinancierPointageResult } from '../utils/pointageFinancier';
 import * as storage from '../services/storage';
+
+interface AffectationDetailItem {
+  affectation: AffectationTache;
+  tache?: Tache;
+  domaine?: Domaine;
+  serre?: Serre;
+}
 
 interface PointageDetailsItem {
   pointage: Pointage;
   ouvrier?: Ouvrier;
   tache?: Tache;
   taches?: Tache[];
+  affectations?: AffectationTache[];
+  affectationDetails?: AffectationDetailItem[];
   domaine?: Domaine;
 }
 
@@ -40,6 +52,7 @@ interface PointageMatinProps {
   pointesDetails: PointageDetailsItem[];
   taches: Tache[];
   domaines?: Domaine[];
+  serres?: Serre[];
   defaultDomaineId?: string;
   checkWorkerByNumber: (numero: number) => {
     valid: boolean;
@@ -48,11 +61,29 @@ interface PointageMatinProps {
     isAlreadyPointed?: boolean;
     existingPointage?: Pointage;
   };
-  onPointWorker: (ouvrierId: string, tacheId?: string | null, domaineId?: string) => {
+  onPointWorker: (
+    ouvrierId: string,
+    tacheId?: string | null,
+    domaineId?: string,
+    serreId?: string | null,
+    serreNom?: string | null
+  ) => {
     success: boolean;
     message?: string;
     pointage?: Pointage;
   };
+  onAssignWorkerToTask?: (
+    ouvrierId: string,
+    tacheId: string,
+    domaineId?: string,
+    serreId?: string | null,
+    serreNom?: string | null
+  ) => { success: boolean; error?: string; affectation?: AffectationTache };
+  onUpdateAffectation?: (
+    affectationId: string,
+    updates: { tacheId?: string; domaineId?: string; serreId?: string | null; serreNom?: string | null }
+  ) => { success: boolean; error?: string };
+  onRemoveAffectation?: (affectationId: string) => void;
   onUpdatePointage?: (pointageId: string, updates: { tacheId?: string | null; domaineId?: string }) => void;
   onUpdateTask: (pointageId: string, tacheId: string | null) => void;
   onRemovePointage: (pointageId: string) => void;
@@ -81,9 +112,13 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
   pointesDetails,
   taches,
   domaines = [],
+  serres = [],
   defaultDomaineId = 'dom_d2',
   checkWorkerByNumber,
   onPointWorker,
+  onAssignWorkerToTask,
+  onUpdateAffectation,
+  onRemoveAffectation,
   onUpdatePointage,
   onUpdateTask,
   onRemovePointage,
@@ -115,12 +150,13 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
   } | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // État de la modale de tâche (utilisée lors de l'édition manuelle)
+  // État de la modale d'affectation de tâche (sans serre)
   const [taskModalOpen, setTaskModalOpen] = useState<boolean>(false);
   const [pendingOuvrier, setPendingOuvrier] = useState<Ouvrier | null>(null);
   const [pendingPointageId, setPendingPointageId] = useState<string | null>(null);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [editCurrentTacheId, setEditCurrentTacheId] = useState<string | null>(null);
+  const [editingAffectationId, setEditingAffectationId] = useState<string | null>(null);
 
   // Onglet bas : 'pointes' (présents) par défaut selon la spécification
   const [activeTab, setActiveTab] = useState<'pointes' | 'restants'>('pointes');
@@ -175,22 +211,21 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
       return;
     }
 
-    // Ouvrier valide et non pointé : Enregistrer le pointage immédiat (la tâche n'est pas obligatoire)
+    // Ouvrier valide et non pointé : Enregistrer directement le pointage sans aucune serre
     const targetOuvrier = verification.ouvrier!;
-    const res = onPointWorker(targetOuvrier.id, null, selectedSessionDomaineId);
+    const res = onPointWorker(targetOuvrier.id, null, selectedSessionDomaineId, null, null);
 
     if (res.success && res.pointage) {
-      // Vider le champ de saisie
       setInputNumber('');
       setSearchQuery('');
       setShowSearchList(false);
-
-      const domNom = domaines.find((d) => d.id === selectedSessionDomaineId)?.nom || 'D2';
-      setSuccessMessage(`✓ Ouvrier #${targetOuvrier.numero} (${targetOuvrier.nom}) pointé présent (${domNom}) !`);
-
+      const domaineNom = domaines.find((d) => d.id === selectedSessionDomaineId)?.nom || 'D2';
+      setSuccessMessage(
+        `✓ Pointage enregistré : #${targetOuvrier.numero} ${targetOuvrier.nom} (${domaineNom})`
+      );
       setTimeout(() => {
         setSuccessMessage(null);
-      }, 3000);
+      }, 3500);
     } else {
       setErrorMessage(res.message || 'Erreur lors de l\'enregistrement du pointage');
     }
@@ -201,18 +236,48 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
     handleValidateNumber(ouvrier.numero.toString());
   };
 
-  // Affectation de tâche et validation du domaine
-  const handleSelectTask = (tacheId: string | null, domaineId: string) => {
-    if (pendingPointageId) {
-      if (onUpdatePointage) {
-        onUpdatePointage(pendingPointageId, { tacheId, domaineId });
-      } else {
-        onUpdateTask(pendingPointageId, tacheId);
-      }
+  // Affectation d'une tâche (sans sélection de serre dans Pointage Matin)
+  const handleSelectTask = (
+    tacheId: string | null,
+    domaineId: string,
+    _serreId?: string | null,
+    _serreNom?: string | null,
+    options?: { keepOpen?: boolean }
+  ): { success: boolean; error?: string } => {
+    setSelectedSessionDomaineId(domaineId);
+
+    if (pendingPointageId && onUpdatePointage) {
+      onUpdatePointage(pendingPointageId, { domaineId });
     }
 
-    // Mémoriser le domaine choisi pour les prochains pointages de cette session
-    setSelectedSessionDomaineId(domaineId);
+    if (tacheId && pendingOuvrier) {
+      if (editingAffectationId && onUpdateAffectation) {
+        const res = onUpdateAffectation(editingAffectationId, {
+          tacheId,
+          domaineId,
+        });
+        if (!res.success) {
+          return res;
+        }
+      } else if (onAssignWorkerToTask) {
+        const res = onAssignWorkerToTask(
+          pendingOuvrier.id,
+          tacheId,
+          domaineId,
+          null,
+          null
+        );
+        if (!res.success) {
+          return res;
+        }
+      } else if (pendingPointageId) {
+        if (onUpdatePointage) {
+          onUpdatePointage(pendingPointageId, { tacheId, domaineId });
+        } else {
+          onUpdateTask(pendingPointageId, tacheId);
+        }
+      }
+    }
 
     const ouvrierNom = pendingOuvrier?.nom || 'Ouvrier';
     const num = pendingOuvrier?.numero;
@@ -221,14 +286,19 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
     const domaineNom = domaines.find((d) => d.id === domaineId)?.nom || 'D2';
 
     setSuccessMessage(`✓ Pointage validé : #${num} ${ouvrierNom} ➔ [${domaineNom} • ${tacheNom}]`);
-    setTaskModalOpen(false);
-    setPendingOuvrier(null);
-    setPendingPointageId(null);
 
-    // Effacer le message de succès après 3.5 secondes
+    if (!options?.keepOpen) {
+      setTaskModalOpen(false);
+      setPendingOuvrier(null);
+      setPendingPointageId(null);
+      setEditingAffectationId(null);
+    }
+
     setTimeout(() => {
       setSuccessMessage(null);
     }, 3500);
+
+    return { success: true };
   };
 
   // Annuler le pointage en cours
@@ -239,16 +309,38 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
     setTaskModalOpen(false);
     setPendingOuvrier(null);
     setPendingPointageId(null);
+    setEditingAffectationId(null);
     setErrorMessage('Pointage annulé.');
   };
 
-  // Modifier la tâche et le domaine d'un ouvrier déjà pointé
-  const handleEditPointageTask = (detail: PointageDetailsItem) => {
+  // Fermer simplement la modale sans supprimer le pointage
+  const handleCloseTaskModal = () => {
+    setTaskModalOpen(false);
+    setPendingOuvrier(null);
+    setPendingPointageId(null);
+    setEditingAffectationId(null);
+  };
+
+  // Ouvrir la modale pour ajouter une tâche à un ouvrier déjà pointé (sans serre)
+  const handleOpenAddTaskForWorker = (detail: PointageDetailsItem) => {
     if (!detail.ouvrier) return;
     setPendingOuvrier(detail.ouvrier);
     setPendingPointageId(detail.pointage.id);
-    setEditCurrentTacheId(detail.pointage.tache_id || null);
+    setEditCurrentTacheId(null);
     setEditCurrentDomaineId(detail.pointage.domaine_id || defaultDomaineId || 'dom_d2');
+    setEditingAffectationId(null);
+    setIsEditMode(true);
+    setTaskModalOpen(true);
+  };
+
+  // Ouvrir la modale pour modifier la tâche d'une affectation
+  const handleEditAffectation = (detail: PointageDetailsItem, aff: AffectationTache) => {
+    if (!detail.ouvrier) return;
+    setPendingOuvrier(detail.ouvrier);
+    setPendingPointageId(detail.pointage.id);
+    setEditCurrentTacheId(aff.tache_id);
+    setEditCurrentDomaineId(aff.domaine_id || detail.pointage.domaine_id || defaultDomaineId || 'dom_d2');
+    setEditingAffectationId(aff.id);
     setIsEditMode(true);
     setTaskModalOpen(true);
   };
@@ -878,77 +970,122 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
                 {[...pointesDetails]
                   .sort((a, b) => a.pointage.numero_ouvrier - b.pointage.numero_ouvrier)
                   .map((item) => {
+                  const affDetails = item.affectationDetails || [];
                   return (
                     <div
                       key={item.pointage.id}
-                      className="p-2.5 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-2 shadow-2xs hover:border-slate-300 transition"
+                      className="p-2.5 bg-white border border-slate-200 rounded-xl shadow-2xs hover:border-slate-300 transition space-y-1.5"
                     >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white font-black text-sm flex items-center justify-center shrink-0">
-                          {item.pointage.numero_ouvrier}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="font-bold text-xs text-slate-800 truncate">
-                            {item.ouvrier?.nom || `Ouvrier #${item.pointage.numero_ouvrier}`}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white font-black text-sm flex items-center justify-center shrink-0">
+                            {item.pointage.numero_ouvrier}
                           </div>
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mt-0.5 flex-wrap">
-                            <span className="flex items-center gap-0.5">
-                              <Clock className="w-3 h-3 text-slate-400" />
-                              {item.pointage.heure}
-                            </span>
-                            <span>•</span>
-                            <span className="font-black bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded-md text-[9px] border border-blue-200">
-                              {item.domaine ? item.domaine.nom : (domaines.find((d) => d.id === item.pointage.domaine_id)?.nom || 'D2')}
-                            </span>
-                            <span>•</span>
-                            {item.taches && item.taches.length > 0 ? (
-                              item.taches.map((t) => (
-                                <span
-                                  key={t.id}
-                                  className="inline-flex items-center gap-1 font-bold px-1.5 py-0.2 rounded-md text-white text-[9px]"
-                                  style={{ backgroundColor: t.couleur || '#16a34a' }}
-                                >
-                                  <Tag className="w-2.5 h-2.5" />
-                                  {formatTacheLabel(t)}
-                                </span>
-                              ))
-                            ) : item.tache ? (
-                              <span
-                                className="inline-flex items-center gap-1 font-bold px-1.5 py-0.2 rounded-md text-white text-[9px]"
-                                style={{ backgroundColor: item.tache.couleur || '#16a34a' }}
-                              >
-                                <Tag className="w-2.5 h-2.5" />
-                                {formatTacheLabel(item.tache)}
+                          <div className="min-w-0">
+                            <div className="font-bold text-xs text-slate-800 truncate">
+                              {item.ouvrier?.nom || `Ouvrier #${item.pointage.numero_ouvrier}`}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mt-0.5 flex-wrap">
+                              <span className="flex items-center gap-0.5">
+                                <Clock className="w-3 h-3 text-slate-400" />
+                                {item.pointage.heure}
                               </span>
-                            ) : (
-                              <span className="text-slate-400 italic">Sans tâche</span>
-                            )}
+                              <span>•</span>
+                              <span className="font-black bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded-md text-[9px] border border-blue-200">
+                                {item.domaine ? item.domaine.nom : (domaines.find((d) => d.id === item.pointage.domaine_id)?.nom || 'D2')}
+                              </span>
+                            </div>
                           </div>
+                        </div>
+
+                        {/* Actions : Ajouter tâche ou Supprimer pointage */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenAddTaskForWorker(item)}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-black text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
+                            title="Ajouter une tâche"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Tâche</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (window.confirm(`Annuler le pointage de l'ouvrier #${item.pointage.numero_ouvrier} ?`)) {
+                                onRemovePointage(item.pointage.id);
+                              }
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
+                            title="Annuler ce pointage"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
                       </div>
 
-                      {/* Actions : Modifier tâche ou Supprimer pointage */}
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleEditPointageTask(item)}
-                          className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
-                          title="Modifier la tâche"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (window.confirm(`Annuler le pointage de l'ouvrier #${item.pointage.numero_ouvrier} ?`)) {
-                              onRemovePointage(item.pointage.id);
-                            }
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                          title="Annuler ce pointage"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                      {/* Liste des tâches et serres associées à cet ouvrier */}
+                      <div className="pl-10 flex flex-wrap gap-1.5">
+                        {affDetails.length > 0 ? (
+                          affDetails.map(({ affectation, tache, domaine, serre }) => {
+                            const serreLabel = serre?.nom || affectation.serre_nom;
+                            const domLabel = domaine?.nom;
+                            return (
+                              <div
+                                key={affectation.id}
+                                className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-0.5 text-[10px]"
+                              >
+                                <span
+                                  className="inline-flex items-center gap-1 font-bold px-1.5 py-0.2 rounded-md text-white text-[9px]"
+                                  style={{ backgroundColor: tache?.couleur || '#16a34a' }}
+                                >
+                                  <Tag className="w-2.5 h-2.5" />
+                                  {tache ? formatTacheLabel(tache) : affectation.tache_id}
+                                </span>
+                                {serreLabel && (
+                                  <span className="inline-flex items-center gap-0.5 font-black text-emerald-900 bg-emerald-100 px-1.5 py-0.2 rounded-md text-[9px]">
+                                    <Warehouse className="w-2.5 h-2.5 text-emerald-700" />
+                                    {serreLabel}
+                                  </span>
+                                )}
+                                {domLabel && (
+                                  <span className="text-[9px] font-bold text-slate-500">
+                                    {domLabel}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditAffectation(item, affectation)}
+                                  className="text-slate-400 hover:text-emerald-700 p-0.5 cursor-pointer"
+                                  title="Modifier cette tâche"
+                                >
+                                  <Edit2 className="w-2.5 h-2.5" />
+                                </button>
+                                {onRemoveAffectation && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onRemoveAffectation(affectation.id)}
+                                    className="text-slate-400 hover:text-red-600 p-0.5 cursor-pointer"
+                                    title="Supprimer cette tâche"
+                                  >
+                                    <X className="w-2.5 h-2.5" />
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })
+                        ) : item.tache ? (
+                          <span
+                            className="inline-flex items-center gap-1 font-bold px-1.5 py-0.2 rounded-md text-white text-[9px]"
+                            style={{ backgroundColor: item.tache.couleur || '#16a34a' }}
+                          >
+                            <Tag className="w-2.5 h-2.5" />
+                            {formatTacheLabel(item.tache)}
+                            {item.pointage.serre_nom ? ` • ${item.pointage.serre_nom}` : ''}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-400 italic">Sans tâche</span>
+                        )}
                       </div>
                     </div>
                   );
@@ -959,18 +1096,27 @@ export const PointageMatin: React.FC<PointageMatinProps> = ({
         )}
       </div>
 
-      {/* MODALE D'AFFECTATION DE TÂCHE ET DOMAINE */}
+      {/* MODALE D'AFFECTATION DE TÂCHE (SANS SERRE) */}
       <TaskModal
         isOpen={taskModalOpen}
         ouvrier={pendingOuvrier}
         taches={taches}
         domaines={domaines}
-        currentTacheId={isEditMode ? editCurrentTacheId : null}
-        currentDomaineId={isEditMode ? editCurrentDomaineId : selectedSessionDomaineId}
+        existingAffectations={
+          pendingOuvrier
+            ? pointesDetails.find((d) => d.ouvrier?.id === pendingOuvrier.id)?.affectations || []
+            : []
+        }
+        currentTacheId={editCurrentTacheId}
+        currentDomaineId={editCurrentDomaineId || selectedSessionDomaineId}
         defaultDomaineId={defaultDomaineId}
         onSelectTask={handleSelectTask}
+        onRemoveAffectation={onRemoveAffectation}
         onCancelPointage={!isEditMode ? handleCancelPendingPointage : undefined}
+        onClose={handleCloseTaskModal}
         isEditMode={isEditMode}
+        editingAffectationId={editingAffectationId}
+        allowMultiTask={Boolean(onAssignWorkerToTask)}
       />
     </div>
   );

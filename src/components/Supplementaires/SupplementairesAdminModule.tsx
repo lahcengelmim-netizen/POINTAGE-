@@ -2056,7 +2056,19 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                   </label>
                   <select
                     value={filterDomaine}
-                    onChange={(e) => setFilterDomaine(e.target.value)}
+                    onChange={(e) => {
+                      const nextDom = e.target.value;
+                      setFilterDomaine(nextDom);
+                      if (nextDom !== 'ALL' && filterSerre) {
+                        const allowed = storage.getSerresForDomaine(serres, nextDom, domaines);
+                        const match = allowed.some(
+                          (s) =>
+                            s.nom.toLowerCase() === filterSerre.trim().toLowerCase() ||
+                            s.code.toLowerCase() === filterSerre.trim().toLowerCase()
+                        );
+                        if (!match) setFilterSerre('');
+                      }
+                    }}
                     className="w-full text-xs font-bold px-2.5 py-2 rounded-lg border border-slate-200 bg-white focus:border-amber-500 focus:outline-hidden"
                   >
                     <option value="ALL">Tous les domaines</option>
@@ -2081,7 +2093,10 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                     className="w-full text-xs font-bold px-2.5 py-2 rounded-lg border border-slate-200 bg-white focus:border-amber-500 focus:outline-hidden"
                   />
                   <datalist id="filter-serres-list">
-                    {serres.map((s) => (
+                    {(filterDomaine !== 'ALL'
+                      ? storage.getSerresForDomaine(serres, filterDomaine, domaines)
+                      : serres.filter((s) => s.actif !== false)
+                    ).map((s) => (
                       <option key={s.id} value={s.nom} />
                     ))}
                   </datalist>

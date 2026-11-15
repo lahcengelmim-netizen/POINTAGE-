@@ -40,6 +40,7 @@ import {
   getContractuelPointages,
   exportContractuellesExcel,
 } from '../../services/contractuelService';
+import { getSerresForDomaine } from '../../services/storage';
 
 interface ContractuelAdminDashboardProps {
   domaines: Domaine[];
@@ -423,7 +424,16 @@ export const ContractuelAdminDashboard: React.FC<ContractuelAdminDashboardProps>
             <span className="text-[9px] font-black uppercase text-slate-500 block">Domaine</span>
             <select
               value={selectedDomaineId}
-              onChange={(e) => setSelectedDomaineId(e.target.value)}
+              onChange={(e) => {
+                const nextDom = e.target.value;
+                setSelectedDomaineId(nextDom);
+                if (nextDom !== 'ALL' && selectedSerreId !== 'ALL') {
+                  const allowed = getSerresForDomaine(serres, nextDom, domaines);
+                  if (!allowed.some((s) => s.id === selectedSerreId)) {
+                    setSelectedSerreId('ALL');
+                  }
+                }
+              }}
               className="w-full bg-transparent text-xs font-bold text-slate-800 outline-none"
             >
               <option value="ALL">Tous les domaines</option>
@@ -444,7 +454,10 @@ export const ContractuelAdminDashboard: React.FC<ContractuelAdminDashboardProps>
               className="w-full bg-transparent text-xs font-bold text-slate-800 outline-none"
             >
               <option value="ALL">Toutes les serres</option>
-              {serres.map((s) => (
+              {(selectedDomaineId !== 'ALL'
+                ? getSerresForDomaine(serres, selectedDomaineId, domaines)
+                : serres.filter((s) => s.actif !== false)
+              ).map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.nom} ({s.code})
                 </option>

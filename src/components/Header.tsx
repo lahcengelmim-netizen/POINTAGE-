@@ -43,9 +43,16 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Barre supérieure principale */}
       <div className="px-3 py-2.5 flex items-center justify-between gap-2">
         {/* Logo & Titre unique : Lahcen Pointeur */}
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center shrink-0 border border-white/20">
-            <span className="text-xl">🌱</span>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-12 h-8 rounded-lg bg-white p-0.5 flex items-center justify-center shrink-0 border border-orange-400/50 shadow-xs">
+            <img
+              src="/assets/aistudio/Logo_d_application_agricole_avec_pointage_4d078075.png"
+              alt="Lahcen Pointeur"
+              width={1536}
+              height={1024}
+              decoding="async"
+              className="w-full h-full object-contain"
+            />
           </div>
 
           <div className="min-w-0">

@@ -45,6 +45,7 @@ export default function App() {
     defaultDomaineId,
     pointages,
     affectations,
+    tacheSerresConfigs,
     pointesDetails,
     heuresSupplementaires,
     allHeuresSupplementaires,
@@ -55,8 +56,11 @@ export default function App() {
     checkWorkerByNumber,
     pointWorker,
     setTaskWorkers,
+    saveTaskSerres,
     removeWorkerFromTask,
     assignWorkerToTask,
+    updateAffectation,
+    removeAffectation,
     updatePointage,
     updateTask,
     saveDomaine,
@@ -152,15 +156,26 @@ export default function App() {
   // Protection d'écran d'accès obligatoire avant ouverture de l'application
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4 selection:bg-emerald-500 font-sans">
-        <div className="w-20 h-20 rounded-3xl bg-linear-to-tr from-emerald-600 to-emerald-400 text-white flex items-center justify-center text-4xl shadow-xl shadow-emerald-900/40 mb-4 animate-pulse ring-4 ring-emerald-500/20">
-          🌾
+      <div className="min-h-screen bg-gradient-to-b from-emerald-50 via-white to-emerald-100 text-emerald-950 flex flex-col items-center justify-center p-4 selection:bg-emerald-600 font-sans">
+        <div className="w-full max-w-[240px] sm:max-w-[280px] bg-white rounded-3xl p-4 shadow-xl border border-emerald-200/80 mb-4 flex items-center justify-center">
+          <img
+            src="/assets/aistudio/Logo_d_application_agricole_avec_pointage_4d078075.png"
+            alt="LAHCEN POINTEUR – POINTAGE AGRICOLE"
+            width={1536}
+            height={1024}
+            loading="eager"
+            decoding="async"
+            className="w-full h-auto max-h-40 object-contain"
+          />
         </div>
-        <h1 className="text-2xl font-black font-mono tracking-wider mb-2 uppercase">
-          AGRI<span className="text-emerald-400">POINTAGE</span>
+        <h1 className="text-xl font-black tracking-wider mb-1 uppercase text-emerald-950">
+          LAHCEN <span className="text-orange-600">POINTEUR</span>
         </h1>
-        <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
-          <div className="w-4 h-4 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin" />
+        <p className="text-[11px] font-bold tracking-widest uppercase text-emerald-700 mb-3">
+          POINTAGE AGRICOLE
+        </p>
+        <div className="flex items-center gap-2 text-xs font-semibold text-emerald-800">
+          <div className="w-4 h-4 border-2 border-emerald-600/30 border-t-emerald-700 rounded-full animate-spin" />
           <span>Vérification de la session en cours...</span>
         </div>
       </div>
@@ -233,6 +248,7 @@ export default function App() {
                   currentUser={activeUser}
                   activeOuvriers={activeOuvriers}
                   serres={serres}
+                  domaines={domaines}
                   recoltes={allRecoltes}
                   selectedDate={selectedDate}
                   onSelectDate={setSelectedDate}
@@ -273,6 +289,7 @@ export default function App() {
                     <RecolteAdminDashboard
                       recoltes={allRecoltes}
                       serres={serres}
+                      domaines={domaines}
                       ouvriers={allOuvriers}
                       users={users}
                       selectedDate={selectedDate}
@@ -287,6 +304,7 @@ export default function App() {
                       currentUser={activeUser}
                       activeOuvriers={activeOuvriers}
                       serres={serres}
+                      domaines={domaines}
                       recoltes={allRecoltes}
                       selectedDate={selectedDate}
                       onSelectDate={setSelectedDate}
@@ -337,9 +355,13 @@ export default function App() {
                 pointesDetails={pointesDetails}
                 taches={taches}
                 domaines={domaines}
+                serres={serres}
                 defaultDomaineId={defaultDomaineId}
                 checkWorkerByNumber={checkWorkerByNumber}
                 onPointWorker={pointWorker}
+                onAssignWorkerToTask={assignWorkerToTask}
+                onUpdateAffectation={updateAffectation}
+                onRemoveAffectation={removeAffectation}
                 onUpdatePointage={updatePointage}
                 onUpdateTask={updateTask}
                 onRemovePointage={removePointage}
@@ -364,8 +386,11 @@ export default function App() {
                 activeOuvriers={activeOuvriers}
                 affectationsDuJour={affectations}
                 domaines={domaines}
+                serres={serres}
+                tacheSerresConfigs={tacheSerresConfigs}
                 defaultDomaineId={defaultDomaineId}
                 onSetTaskWorkers={setTaskWorkers}
+                onSaveTaskSerres={saveTaskSerres}
                 onRemoveWorkerFromTask={removeWorkerFromTask}
                 onNavigateToPointage={() => setActiveScreen('pointage')}
                 selectedDate={selectedDate}
@@ -383,6 +408,7 @@ export default function App() {
                 totalPointes={stats.pointes}
                 taches={taches}
                 domaines={domaines}
+                serres={serres}
                 defaultDomaineId={defaultDomaineId}
                 onPointWorker={pointWorker}
                 onUpdateTask={updateTask}
@@ -465,6 +491,7 @@ export default function App() {
                 totalAbsents={stats.restants}
                 totalSupp={heuresSupplementaires.length}
                 pointageFinancier={pointageFinancier}
+                pointesDetails={pointesDetails}
               />
             )
           )}
@@ -535,6 +562,7 @@ export default function App() {
           isOpen={showLoginModal}
           onClose={() => setShowLoginModal(false)}
           currentUser={activeUser}
+          companyName={currentCompany.nom}
           onLoginSuccess={(user) => {
             switchUser(user);
             if (user.role === 'caporal_contractuelles' || user.module_attribue === 'contractuelles') {

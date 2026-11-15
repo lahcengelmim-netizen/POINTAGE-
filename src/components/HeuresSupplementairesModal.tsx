@@ -56,6 +56,7 @@ import {
   UserAccount,
 } from '../types';
 import { syncAndFetchHeuresSupplementairesServer } from '../services/heuresSupplementairesService';
+import { getSerresForDomaine } from '../services/storage';
 
 export interface HeuresSuppDetailItem {
   item: HeureSupplementaire;
@@ -1008,13 +1009,14 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:bg-white focus:border-amber-500 focus:outline-hidden"
                     >
                       <option value="">Sélectionner une serre...</option>
-                      {serres
-                        .filter((s) => s.actif !== false)
-                        .map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.nom} ({s.code})
-                          </option>
-                        ))}
+                      {(hDomaineId
+                        ? getSerresForDomaine(serres, hDomaineId, domaines)
+                        : serres.filter((s) => s.actif !== false)
+                      ).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nom} ({s.code})
+                        </option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -1276,13 +1278,14 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:bg-white focus:border-purple-500 focus:outline-hidden"
                     >
                       <option value="">Sélectionner une serre...</option>
-                      {serres
-                        .filter((s) => s.actif !== false)
-                        .map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.nom} ({s.code})
-                          </option>
-                        ))}
+                      {(tDomaineId
+                        ? getSerresForDomaine(serres, tDomaineId, domaines)
+                        : serres.filter((s) => s.actif !== false)
+                      ).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nom} ({s.code})
+                        </option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -1891,7 +1894,16 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                   <label className="block font-bold text-slate-600 mb-1">Domaine</label>
                   <select
                     value={editDomaineId}
-                    onChange={(e) => setEditDomaineId(e.target.value)}
+                    onChange={(e) => {
+                      const nextDom = e.target.value;
+                      setEditDomaineId(nextDom);
+                      if (nextDom && editSerreId) {
+                        const valid = getSerresForDomaine(serres, nextDom, domaines).some(
+                          (s) => s.id === editSerreId
+                        );
+                        if (!valid) setEditSerreId('');
+                      }
+                    }}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 font-semibold text-slate-800"
                   >
                     <option value="">Aucun</option>
@@ -1911,9 +1923,12 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 font-semibold text-slate-800"
                   >
                     <option value="">Aucune</option>
-                    {serres.map((s) => (
+                    {(editDomaineId
+                      ? getSerresForDomaine(serres, editDomaineId, domaines)
+                      : serres.filter((s) => s.actif !== false)
+                    ).map((s) => (
                       <option key={s.id} value={s.id}>
-                        {s.nom}
+                        {s.nom} ({s.code})
                       </option>
                     ))}
                   </select>

@@ -1,14 +1,20 @@
 /**
- * ÉCRAN 2 — ÉCRAN TÂCHES (AFFECTATION APRÈS LE POINTAGE)
+ * ÉCRAN 2 — ÉCRAN TÂCHES (AFFECTATION APRÈS LE POINTAGE + MULTI-SERRES PAR TÂCHE)
  *
  * Spécifications :
- * - Écran séparé accessible depuis le menu principal
- * - Recherche de tâche par code OU par nom, insensible casse et accents, temps réel
- * - Affichage du nombre d'ouvriers affectés à chaque tâche aujourd'hui
- * - RÈGLE STRICTE :
+ * - L'affectation des serres se fait uniquement dans l'écran TÂCHES.
+ * - Parcours :
+ *   1. Sélectionner la tâche.
+ *   2. Choisir le domaine (D1..D5) : affiche uniquement les serres configurées pour ce domaine.
+ *      - Domaine D2 : ses 15 serres existantes.
+ *      - Domaine D3 : SERRE 16 à SERRE 23.
+ *   3. Sélectionner plusieurs serres simultanément (« Tout sélectionner », « Tout désélectionner », compteur).
+ *   4. Afficher clairement toutes les serres sélectionnées.
+ *   5. Enregistrer la tâche avec les serres choisies (et optionnellement les ouvriers).
+ * - RÈGLE STRICTE OUVRIERS :
  *   1. Un ouvrier présent sans AUCUNE tâche aujourd'hui apparaît dans la liste "Ajouter des ouvriers" de TOUTES les tâches.
- *   2. Un ouvrier présent affecté à UNE tâche aujourd'hui n'apparaît QUE dans cette tâche (zone "Ouvriers affectés"). Il disparaît de la liste "Ajouter des ouvriers" de TOUTES les tâches.
- *   3. Pour le déplacer vers une autre tâche : il faut d'abord le retirer de sa tâche actuelle avec "Retirer". Après ce retrait, il redevient visible dans la liste "Ajouter" de toutes les tâches.
+ *   2. Un ouvrier présent affecté à UNE tâche aujourd'hui n'apparaît QUE dans cette tâche (zone "Ouvriers affectés").
+ *   3. Pour le déplacer vers une autre tâche : il faut d'abord le retirer de sa tâche actuelle avec "Retirer".
  *   4. Les absents sont totalement exclus de toutes les listes.
  */
 
@@ -20,12 +26,24 @@ import {
   X,
   ChevronLeft,
   ArrowRight,
-  Plus,
-  CheckCircle2,
   AlertTriangle,
+  Warehouse,
+  MapPin,
+  CheckSquare,
+  Square,
+  Save,
 } from 'lucide-react';
-import { Ouvrier, Tache, Pointage, AffectationTache, Domaine } from '../types';
+import {
+  Ouvrier,
+  Tache,
+  Pointage,
+  AffectationTache,
+  Domaine,
+  Serre,
+  TacheSerreConfig,
+} from '../types';
 import { formatTacheLabel } from '../utils/tacheUtils';
+import { getSerresForDomaine } from '../services/storage';
 
 interface EcranTachesProps {
   taches: Tache[];
@@ -33,8 +51,20 @@ interface EcranTachesProps {
   activeOuvriers: Ouvrier[];
   affectationsDuJour: AffectationTache[];
   domaines: Domaine[];
+  serres: Serre[];
+  tacheSerresConfigs?: TacheSerreConfig[];
   defaultDomaineId: string;
-  onSetTaskWorkers: (tacheId: string, ouvrierIds: string[]) => { success: boolean; error?: string } | void;
+  onSetTaskWorkers: (
+    tacheId: string,
+    ouvrierIds: string[],
+    options?: { domaineId?: string; serreIds?: string[]; serreNoms?: string[] }
+  ) => { success: boolean; error?: string } | void;
+  onSaveTaskSerres?: (
+    tacheId: string,
+    domaineId: string,
+    serreIds: string[],
+    serreNoms: string[]
+  ) => { success: boolean; updatedCount: number } | void;
   onRemoveWorkerFromTask: (ouvrierId: string, tacheId: string) => void;
   onNavigateToPointage: () => void;
   selectedDate: string;
@@ -48,20 +78,59 @@ function normalize(str: string): string {
     .trim();
 }
 
+function extractSerreIdsFromAff(aff: AffectationTache): string[] {
+  if (Array.isArray(aff.serres_ids) && aff.serres_ids.length > 0) {
+    return Array.from(new Set(aff.serres_ids.filter(Boolean)));
+  }
+  if (aff.serre_id) {
+    return Array.from(
+      new Set(
+        aff.serre_id
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+  return [];
+}
+
+function extractSerreNomsFromAff(aff: AffectationTache): string[] {
+  if (Array.isArray(aff.serres_noms) && aff.serres_noms.length > 0) {
+    return Array.from(new Set(aff.serres_noms.filter(Boolean)));
+  }
+  if (aff.serre_nom) {
+    return Array.from(
+      new Set(
+        aff.serre_nom
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+  return [];
+}
+
 export const EcranTaches: React.FC<EcranTachesProps> = ({
   taches,
   pointagesDuJour,
   activeOuvriers,
   affectationsDuJour,
   domaines,
+  serres,
+  tacheSerresConfigs = [],
   defaultDomaineId,
   onSetTaskWorkers,
+  onSaveTaskSerres,
   onRemoveWorkerFromTask,
   onNavigateToPointage,
   selectedDate,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTask, setSelectedTask] = useState<Tache | null>(null);
+  const [selectedDomaineId, setSelectedDomaineId] = useState<string>(defaultDomaineId || 'dom_d2');
+  const [selectedSerreIds, setSelectedSerreIds] = useState<string[]>([]);
   const [selectedWorkerIds, setSelectedWorkerIds] = useState<string[]>([]);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [workerToRemove, setWorkerToRemove] = useState<{
@@ -83,6 +152,89 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
   const domaineMap = useMemo(
     () => new Map<string, Domaine>(domaines.map((d) => [d.id, d])),
     [domaines]
+  );
+
+  // Map des configurations multi-serres par tache_id
+  const taskSerreConfigMap = useMemo(
+    () => new Map<string, TacheSerreConfig>(tacheSerresConfigs.map((c) => [c.tache_id, c])),
+    [tacheSerresConfigs]
+  );
+
+  // Map des serres par ID
+  const serreByIdMap = useMemo(
+    () => new Map<string, Serre>(serres.map((s) => [s.id, s])),
+    [serres]
+  );
+
+  // Résoudre le domaine et les serres configurées pour chaque tâche (affiché dans les cartes + initialisation sélection)
+  const resolvedSerresByTask = useMemo(() => {
+    const map = new Map<
+      string,
+      { domaineId: string; domaineNom: string; serreIds: string[]; serreNoms: string[] }
+    >();
+
+    taches.forEach((tache) => {
+      const cfg = taskSerreConfigMap.get(tache.id);
+      const taskAffs = affectationsDuJour.filter((a) => a.tache_id === tache.id);
+
+      const resolvedDomId =
+        cfg?.domaine_id ||
+        taskAffs.find((a) => a.domaine_id)?.domaine_id ||
+        tache.domaine_id ||
+        defaultDomaineId ||
+        'dom_d2';
+
+      const domObj = domaineMap.get(resolvedDomId);
+      const domaineNom = domObj ? domObj.nom : 'D2';
+
+      let serreIds: string[] = [];
+      let serreNoms: string[] = [];
+
+      if (cfg) {
+        serreIds = Array.from(new Set(cfg.serre_ids.filter(Boolean)));
+        serreNoms =
+          cfg.serre_noms.length > 0
+            ? Array.from(new Set(cfg.serre_noms.filter(Boolean)))
+            : serreIds.map((id) => serreByIdMap.get(id)?.nom || id);
+      } else if (taskAffs.length > 0) {
+        const idSet = new Set<string>();
+        const nomSet = new Set<string>();
+        taskAffs.forEach((aff) => {
+          extractSerreIdsFromAff(aff).forEach((id) => idSet.add(id));
+          extractSerreNomsFromAff(aff).forEach((nom) => nomSet.add(nom));
+        });
+        serreIds = Array.from(idSet);
+        serreNoms =
+          nomSet.size > 0
+            ? Array.from(nomSet)
+            : serreIds.map((id) => serreByIdMap.get(id)?.nom || id);
+      }
+
+      map.set(tache.id, {
+        domaineId: resolvedDomId,
+        domaineNom,
+        serreIds,
+        serreNoms,
+      });
+    });
+
+    return map;
+  }, [taches, taskSerreConfigMap, affectationsDuJour, defaultDomaineId, domaineMap, serreByIdMap]);
+
+  // Serres disponibles STRICTEMENT filtrées pour le domaine sélectionné dans l'écran Tâches
+  const availableSerresForDomaine = useMemo(() => {
+    return getSerresForDomaine(serres, selectedDomaineId, domaines);
+  }, [serres, selectedDomaineId, domaines]);
+
+  // Serres effectivement sélectionnées (filtrées uniquement dans le domaine actif pour éviter tout mélange D2/D3)
+  const selectedSerresObjects = useMemo(() => {
+    const selectedSet = new Set(selectedSerreIds);
+    return availableSerresForDomaine.filter((s) => selectedSet.has(s.id));
+  }, [availableSerresForDomaine, selectedSerreIds]);
+
+  const activeDomaineObj = useMemo(
+    () => domaineMap.get(selectedDomaineId) || domaines[0],
+    [domaineMap, selectedDomaineId, domaines]
   );
 
   // 1. Ouvriers PRÉSENTS aujourd'hui (les absents sont totalement exclus)
@@ -203,16 +355,48 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
       const affectesNums = listeAffectes.map((a) => a.numero_ouvrier).sort((a, b) => a - b);
       const ajouterNums = listeAjouter.map((p) => p.ouvrier.numero).sort((a, b) => a - b);
       console.log(
-        `[SELECTION TÂCHE ${selectedTask.code || selectedTask.nom}] Date: ${selectedDate} | Zone Affectés (${affectesNums.length}): [${affectesNums.join(', ')}] | Zone Ajouter (${ajouterNums.length}): [${ajouterNums.join(', ')}]`
+        `[SELECTION TÂCHE ${selectedTask.code || selectedTask.nom}] Date: ${selectedDate} | Domaine: ${selectedDomaineId} | Serres (${selectedSerresObjects.length}): [${selectedSerresObjects.map((s) => s.nom).join(', ')}] | Affectés (${affectesNums.length}): [${affectesNums.join(', ')}] | Ajouter (${ajouterNums.length}): [${ajouterNums.join(', ')}]`
       );
     }
-  }, [selectedTask, selectedDate, listeAffectes, listeAjouter]);
+  }, [selectedTask, selectedDate, selectedDomaineId, selectedSerresObjects, listeAffectes, listeAjouter]);
 
   // ---------------- ACTIONS ----------------
 
   const handleOpenAssignTask = (tache: Tache) => {
+    const resolved = resolvedSerresByTask.get(tache.id);
+    const initialDomId = resolved?.domaineId || defaultDomaineId || 'dom_d2';
+    const domainSerres = getSerresForDomaine(serres, initialDomId, domaines);
+    const domainSerreIdSet = new Set(domainSerres.map((s) => s.id));
+    const initialSerres = (resolved?.serreIds || []).filter((id) => domainSerreIdSet.has(id));
+
     setSelectedTask(tache);
+    setSelectedDomaineId(initialDomId);
+    setSelectedSerreIds(initialSerres);
     setSelectedWorkerIds([]);
+  };
+
+  const handleSelectDomaine = (newDomaineId: string) => {
+    setSelectedDomaineId(newDomaineId);
+    const nextDomainSerres = getSerresForDomaine(serres, newDomaineId, domaines);
+    const nextValidIds = new Set(nextDomainSerres.map((s) => s.id));
+    // Ne jamais mélanger les serres d'un autre domaine
+    setSelectedSerreIds((prev) => prev.filter((id) => nextValidIds.has(id)));
+  };
+
+  const handleToggleSerre = (serreId: string) => {
+    setSelectedSerreIds((prev) =>
+      prev.includes(serreId)
+        ? prev.filter((id) => id !== serreId)
+        : Array.from(new Set([...prev, serreId]))
+    );
+  };
+
+  const handleSelectAllSerres = () => {
+    setSelectedSerreIds(availableSerresForDomaine.map((s) => s.id));
+  };
+
+  const handleDeselectAllSerres = () => {
+    setSelectedSerreIds([]);
   };
 
   const handleToggleWorker = (ouvrierId: string) => {
@@ -242,29 +426,63 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
     setSelectedWorkerIds([]);
   };
 
-  const handleSaveAssignment = () => {
-    if (!selectedTask || selectedWorkerIds.length === 0) return;
+  const handleSaveTaskAndSerres = () => {
+    if (!selectedTask) return;
+
+    const validSerreIds = selectedSerresObjects.map((s) => s.id);
+    const validSerreNoms = selectedSerresObjects.map((s) => s.nom);
+    const taskLabel = formatTacheLabel(selectedTask);
+    const domNom = activeDomaineObj?.nom || 'D2';
 
     const currentAssigned = workersByTask.get(selectedTask.id) || [];
     const currentAssignedIds = currentAssigned.map((w) => w.ouvrierId);
 
-    const finalWorkerIds = Array.from(
-      new Set([...currentAssignedIds, ...selectedWorkerIds])
-    );
+    if (selectedWorkerIds.length > 0) {
+      const finalWorkerIds = Array.from(
+        new Set([...currentAssignedIds, ...selectedWorkerIds])
+      );
 
-    const res = onSetTaskWorkers(selectedTask.id, finalWorkerIds);
-    if (res && res.success === false && res.error) {
-      setBlockingAlertMessage(res.error);
-      return;
+      const res = onSetTaskWorkers(selectedTask.id, finalWorkerIds, {
+        domaineId: selectedDomaineId,
+        serreIds: validSerreIds,
+        serreNoms: validSerreNoms,
+      });
+      if (res && res.success === false && res.error) {
+        setBlockingAlertMessage(res.error);
+        return;
+      }
+
+      const serresSummary =
+        validSerreNoms.length > 0
+          ? ` • ${validSerreNoms.length} serre(s) (${validSerreNoms.join(', ')})`
+          : '';
+      setFeedbackMessage(
+        `✓ "${taskLabel}" enregistrée [${domNom}${serresSummary}] avec ${selectedWorkerIds.length} nouvel(s) ouvrier(s)`
+      );
+      setSelectedWorkerIds([]);
+    } else if (onSaveTaskSerres) {
+      onSaveTaskSerres(selectedTask.id, selectedDomaineId, validSerreIds, validSerreNoms);
+      const serresSummary =
+        validSerreNoms.length > 0
+          ? `${validSerreNoms.length} serre(s) : ${validSerreNoms.join(', ')}`
+          : 'aucune serre';
+      setFeedbackMessage(
+        `✓ Serres enregistrées pour "${taskLabel}" (${domNom} • ${serresSummary})`
+      );
+    } else {
+      const res = onSetTaskWorkers(selectedTask.id, currentAssignedIds, {
+        domaineId: selectedDomaineId,
+        serreIds: validSerreIds,
+        serreNoms: validSerreNoms,
+      });
+      if (res && res.success === false && res.error) {
+        setBlockingAlertMessage(res.error);
+        return;
+      }
+      setFeedbackMessage(`✓ Tâche "${taskLabel}" enregistrée (${domNom})`);
     }
 
-    const taskLabel = formatTacheLabel(selectedTask);
-    setFeedbackMessage(
-      `✓ ${selectedWorkerIds.length} ouvrier(s) affecté(s) à "${taskLabel}"`
-    );
-
-    setSelectedWorkerIds([]);
-    setTimeout(() => setFeedbackMessage(null), 3500);
+    setTimeout(() => setFeedbackMessage(null), 4000);
   };
 
   const handleTriggerRemove = (ouvrierId: string, tacheId: string, workerNum: number, workerNom?: string) => {
@@ -290,7 +508,7 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
             <Tag className="w-4 h-4" />
           </div>
           <div>
-            <h2 className="text-sm font-black text-slate-800">Affectation des Tâches</h2>
+            <h2 className="text-sm font-black text-slate-800">Tâches & Affectation des Serres</h2>
             <p className="text-[11px] text-slate-500">
               {presentsAujourdhui.length} ouvrier(s) présent(s) aujourd'hui
             </p>
@@ -301,7 +519,7 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
           <button
             type="button"
             onClick={onNavigateToPointage}
-            className="text-xs bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold px-2.5 py-1.5 rounded-xl transition"
+            className="text-xs bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold px-2.5 py-1.5 rounded-xl transition cursor-pointer"
           >
             Pointer d'abord ➔
           </button>
@@ -337,7 +555,7 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
             <button
               type="button"
               onClick={() => setSearchQuery('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs p-1"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs p-1 cursor-pointer"
             >
               ✕
             </button>
@@ -396,6 +614,156 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
             <span className="text-xs font-black bg-emerald-100 text-emerald-900 px-2.5 py-1 rounded-xl shrink-0 font-mono">
               {listeAffectes.length} affecté(s)
             </span>
+          </div>
+
+          {/* ZONE A : SÉLECTION DU DOMAINE ET DES SERRES MULTIPLES */}
+          <div className="bg-emerald-50/50 border border-emerald-200 rounded-2xl p-3 space-y-3">
+            {/* Sélecteur de domaine */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-black text-slate-800">
+                <span className="flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>1. Domaine :</span>
+                </span>
+                <span className="text-emerald-900 bg-white px-2 py-0.5 rounded-md border border-emerald-200 text-[11px]">
+                  {activeDomaineObj?.nom || 'D2'} ({availableSerresForDomaine.length} serre{availableSerresForDomaine.length > 1 ? 's' : ''})
+                </span>
+              </div>
+
+              <div className="grid grid-cols-5 gap-1.5">
+                {domaines.map((d) => {
+                  const isDomSelected = selectedDomaineId === d.id;
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => handleSelectDomaine(d.id)}
+                      className={`h-9 rounded-xl font-black text-xs flex items-center justify-center transition active:scale-95 border-2 cursor-pointer ${
+                        isDomSelected
+                          ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm ring-2 ring-emerald-300'
+                          : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'
+                      }`}
+                    >
+                      {d.nom}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Sélection multiple des serres du domaine actif */}
+            <div className="space-y-2 pt-2 border-t border-emerald-200/70">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                  <Warehouse className="w-4 h-4 text-emerald-700" />
+                  <span>2. Serres ({activeDomaineObj?.nom || 'D2'}) — Sélection multiple :</span>
+                </span>
+                <span className="text-[11px] font-black bg-emerald-700 text-white px-2.5 py-0.5 rounded-lg shadow-2xs">
+                  {selectedSerresObjects.length} serre{selectedSerresObjects.length > 1 ? 's' : ''} sélectionnée{selectedSerresObjects.length > 1 ? 's' : ''}
+                </span>
+              </div>
+
+              {/* Boutons Tout sélectionner / Tout désélectionner */}
+              {availableSerresForDomaine.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSelectAllSerres}
+                    className="flex-1 py-1.5 px-2.5 rounded-xl bg-white hover:bg-emerald-100 text-emerald-900 border border-emerald-300 font-black text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Tout sélectionner</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeselectAllSerres}
+                    className="flex-1 py-1.5 px-2.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Square className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Tout désélectionner</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Liste des serres disponibles pour le domaine choisi */}
+              {availableSerresForDomaine.length === 0 ? (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 font-semibold">
+                  Aucune serre configurée pour le domaine{' '}
+                  <strong>{activeDomaineObj?.nom || selectedDomaineId}</strong>. Vous pouvez enregistrer la tâche directement sans serre.
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-56 overflow-y-auto pr-0.5">
+                  {availableSerresForDomaine.map((serre) => {
+                    const isChecked = selectedSerreIds.includes(serre.id);
+                    return (
+                      <button
+                        key={serre.id}
+                        type="button"
+                        onClick={() => handleToggleSerre(serre.id)}
+                        aria-pressed={isChecked}
+                        className={`p-2 rounded-xl border-2 text-left transition active:scale-95 cursor-pointer flex items-center justify-between gap-1.5 ${
+                          isChecked
+                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm ring-2 ring-emerald-300'
+                            : 'bg-white hover:bg-emerald-50 text-slate-800 border-slate-200 hover:border-emerald-400'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div
+                            className={`text-[10px] font-mono font-black ${
+                              isChecked ? 'text-emerald-100' : 'text-emerald-700'
+                            }`}
+                          >
+                            {serre.code}
+                          </div>
+                          <div className="text-xs font-black truncate">{serre.nom}</div>
+                        </div>
+                        <div
+                          className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 border ${
+                            isChecked
+                              ? 'bg-white text-emerald-700 border-white'
+                              : 'bg-slate-50 text-transparent border-slate-300'
+                          }`}
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Récapitulatif clair de toutes les serres sélectionnées */}
+              <div className="bg-white border border-emerald-200 rounded-xl p-2.5 space-y-1.5">
+                <div className="text-[11px] font-black text-emerald-950 flex items-center justify-between">
+                  <span>Serres sélectionnées ({selectedSerresObjects.length}) :</span>
+                  <span className="text-[10px] font-bold text-slate-500">{activeDomaineObj?.nom || 'D2'}</span>
+                </div>
+                {selectedSerresObjects.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 italic">
+                    Aucune serre sélectionnée (optionnel)
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedSerresObjects.map((serre) => (
+                      <span
+                        key={serre.id}
+                        className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-950 border border-emerald-300 px-2 py-0.5 rounded-lg text-[11px] font-black"
+                      >
+                        <span>{serre.nom}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSerre(serre.id)}
+                          className="text-emerald-700 hover:text-red-600 cursor-pointer"
+                          title={`Retirer ${serre.nom}`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* ZONE 1 : OUVRIERS AFFECTÉS À CETTE TÂCHE */}
@@ -491,7 +859,7 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
                 )}
               </div>
             ) : (
-              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+              <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
                 {listeAjouter.map((p) => {
                   const autreTache = workerOtherTaskMap.get(p.ouvrier.id);
                   const bloque = !!autreTache;
@@ -501,11 +869,11 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
                       key={p.ouvrier.id}
                       onClick={() => handleClickWorkerItem(p.ouvrier.id, p.ouvrier.nom)}
                       className={`flex items-center justify-between p-3 rounded-lg border ${
-                        bloque ? "opacity-60 bg-gray-100 cursor-not-allowed" : "cursor-pointer"
+                        bloque ? 'opacity-60 bg-gray-100 cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-50/40'
                       }`}
                     >
                       <div>
-                        <div className="font-semibold">
+                        <div className="font-semibold text-xs">
                           {p.ouvrier.numero} - {p.ouvrier.nom}
                         </div>
                         {bloque && (
@@ -524,16 +892,19 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
               </div>
             )}
 
-            {/* Boutons d'action pour valider l'ajout */}
+            {/* Bouton principal d'enregistrement (enregistre les serres sélectionnées + les ouvriers cochés s'il y en a) */}
             <div className="flex gap-2 pt-2">
               <button
                 type="button"
-                onClick={handleSaveAssignment}
-                disabled={selectedWorkerIds.length === 0}
-                className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 text-white disabled:text-slate-400 font-black text-xs py-3 rounded-xl shadow-md disabled:shadow-none transition active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
+                onClick={handleSaveTaskAndSerres}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs py-3 px-3 rounded-xl shadow-md transition active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <Plus className="w-4 h-4" />
-                <span>Valider l'ajout ({selectedWorkerIds.length})</span>
+                <Save className="w-4 h-4 shrink-0" />
+                <span className="truncate">
+                  {selectedWorkerIds.length > 0
+                    ? `Enregistrer (${selectedWorkerIds.length} ouvrier(s) • ${selectedSerresObjects.length} serre(s))`
+                    : `Enregistrer la tâche (${selectedSerresObjects.length} serre(s))`}
+                </span>
               </button>
               <button
                 type="button"
@@ -549,7 +920,7 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
           </div>
         </div>
       ) : (
-        /* LISTE DES TÂCHES AVEC LEURS OUVRIERS AFFECTÉS */
+        /* LISTE DES TÂCHES AVEC LEURS SERRES ET OUVRIERS AFFECTÉS */
         <div className="space-y-2">
           {filteredTaches.length === 0 ? (
             <div className="p-8 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
@@ -563,6 +934,7 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
             filteredTaches.map((tache) => {
               const assignedCount = affectationsCountByTask.get(tache.id) || 0;
               const assignedWorkers = workersByTask.get(tache.id) || [];
+              const taskSerreInfo = resolvedSerresByTask.get(tache.id);
 
               return (
                 <div
@@ -598,6 +970,25 @@ export const EcranTaches: React.FC<EcranTachesProps> = ({
                       <ArrowRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
+
+                  {/* Serres sélectionnées pour cette tâche */}
+                  {taskSerreInfo && taskSerreInfo.serreNoms.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-black bg-blue-50 text-blue-900 border border-blue-200 px-1.5 py-0.5 rounded-md">
+                        <MapPin className="w-2.5 h-2.5" />
+                        {taskSerreInfo.domaineNom}
+                      </span>
+                      {taskSerreInfo.serreNoms.map((serreNom) => (
+                        <span
+                          key={serreNom}
+                          className="inline-flex items-center gap-1 text-[10px] font-black bg-emerald-50 text-emerald-900 border border-emerald-200 px-1.5 py-0.5 rounded-md"
+                        >
+                          <Warehouse className="w-2.5 h-2.5 text-emerald-700" />
+                          {serreNom}
+                        </span>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Compteur et liste des ouvriers affectés */}
                   <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">

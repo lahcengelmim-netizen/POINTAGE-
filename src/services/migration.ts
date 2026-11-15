@@ -24,8 +24,18 @@ export async function runDataMigration(): Promise<{ success: boolean; message: s
       const raw = localStorage.getItem(item.key);
       if (!raw) continue;
 
-      const data = JSON.parse(raw);
+      let data = JSON.parse(raw);
       if (!Array.isArray(data)) continue;
+
+      if (item.table === 'serres') {
+        data = data.filter(
+          (s: any) =>
+            !(
+              s?.id === 'serre_23' &&
+              (!s.domaine_id || s.domaine_id === 'dom_d3' || String(s.code || '').toUpperCase() === 'S23')
+            )
+        );
+      }
 
       console.log(`Migrating ${data.length} items to ${item.table}...`);
       

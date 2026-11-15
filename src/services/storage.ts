@@ -16,6 +16,7 @@ import {
   GazoilConfig,
   GazoilMouvementType,
   AffectationTache,
+  TacheSerreConfig,
   UserAccount,
   UserRole,
   Serre,
@@ -36,6 +37,7 @@ export const STORAGE_KEYS = {
   TACHES: 'agripointage_taches_v1',
   POINTAGES: 'agripointage_pointages_v1',
   AFFECTATIONS: 'agripointage_affectations_v1',
+  TACHE_SERRES: 'agripointage_tache_serres_v1',
   HEURES_SUPP: 'agripointage_heures_supp_v1',
   TACHES_SUPP: 'agripointage_taches_supp_v1',
   GAZOIL_CONFIG: 'agripointage_gazoil_config_v1',
@@ -47,15 +49,70 @@ export const STORAGE_KEYS = {
   SERRES: 'agripointage_serres_v1',
   RECOLTE: 'agripointage_recolte_v1',
   SYNC_QUEUE: 'agripointage_sync_queue_v1',
+  POINTAGE_SYNC_QUEUE: 'agripointage_pointage_sync_queue_v1',
 };
 
+export function addToPointageSyncQueue(
+  table: string,
+  data: any,
+  action: 'upsert' | 'delete' = 'upsert'
+) {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE);
+    const queue: any[] = raw ? JSON.parse(raw) : [];
+    queue.push({ table, action, data, timestamp: Date.now() });
+    localStorage.setItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE, JSON.stringify(queue));
+  } catch (err) {
+    console.error('Erreur addToPointageSyncQueue:', err);
+  }
+}
+
 export function addToSyncQueue(table: string, data: any) {
+  if (table === 'pointages' || table === 'affectations') {
+    addToPointageSyncQueue(table, data, 'upsert');
+    return;
+  }
   const raw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
   const queue: any[] = raw ? JSON.parse(raw) : [];
   queue.push({ table, data, timestamp: Date.now() });
   localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(queue));
 }
 
+
+// Serres Domaine D3 (7 serres : SERRE 16 à SERRE 22)
+export const DEFAULT_D3_SERRES: Serre[] = [
+  { id: 'serre_16', company_id: 'cie_lahcen_pointeur', code: 'S16', nom: 'SERRE 16', actif: true, ordre: 16, domaine_id: 'dom_d3' },
+  { id: 'serre_17', company_id: 'cie_lahcen_pointeur', code: 'S17', nom: 'SERRE 17', actif: true, ordre: 17, domaine_id: 'dom_d3' },
+  { id: 'serre_18', company_id: 'cie_lahcen_pointeur', code: 'S18', nom: 'SERRE 18', actif: true, ordre: 18, domaine_id: 'dom_d3' },
+  { id: 'serre_19', company_id: 'cie_lahcen_pointeur', code: 'S19', nom: 'SERRE 19', actif: true, ordre: 19, domaine_id: 'dom_d3' },
+  { id: 'serre_20', company_id: 'cie_lahcen_pointeur', code: 'S20', nom: 'SERRE 20', actif: true, ordre: 20, domaine_id: 'dom_d3' },
+  { id: 'serre_21', company_id: 'cie_lahcen_pointeur', code: 'S21', nom: 'SERRE 21', actif: true, ordre: 21, domaine_id: 'dom_d3' },
+  { id: 'serre_22', company_id: 'cie_lahcen_pointeur', code: 'S22', nom: 'SERRE 22', actif: true, ordre: 22, domaine_id: 'dom_d3' },
+];
+
+// Serres Domaine D5 (20 serres : SERRE 23 à SERRE 42)
+export const DEFAULT_D5_SERRES: Serre[] = [
+  { id: 'serre_d5_23', company_id: 'cie_lahcen_pointeur', code: 'D5-S23', nom: 'SERRE 23', actif: true, ordre: 23, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_24', company_id: 'cie_lahcen_pointeur', code: 'D5-S24', nom: 'SERRE 24', actif: true, ordre: 24, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_25', company_id: 'cie_lahcen_pointeur', code: 'D5-S25', nom: 'SERRE 25', actif: true, ordre: 25, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_26', company_id: 'cie_lahcen_pointeur', code: 'D5-S26', nom: 'SERRE 26', actif: true, ordre: 26, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_27', company_id: 'cie_lahcen_pointeur', code: 'D5-S27', nom: 'SERRE 27', actif: true, ordre: 27, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_28', company_id: 'cie_lahcen_pointeur', code: 'D5-S28', nom: 'SERRE 28', actif: true, ordre: 28, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_29', company_id: 'cie_lahcen_pointeur', code: 'D5-S29', nom: 'SERRE 29', actif: true, ordre: 29, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_30', company_id: 'cie_lahcen_pointeur', code: 'D5-S30', nom: 'SERRE 30', actif: true, ordre: 30, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_31', company_id: 'cie_lahcen_pointeur', code: 'D5-S31', nom: 'SERRE 31', actif: true, ordre: 31, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_32', company_id: 'cie_lahcen_pointeur', code: 'D5-S32', nom: 'SERRE 32', actif: true, ordre: 32, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_33', company_id: 'cie_lahcen_pointeur', code: 'D5-S33', nom: 'SERRE 33', actif: true, ordre: 33, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_34', company_id: 'cie_lahcen_pointeur', code: 'D5-S34', nom: 'SERRE 34', actif: true, ordre: 34, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_35', company_id: 'cie_lahcen_pointeur', code: 'D5-S35', nom: 'SERRE 35', actif: true, ordre: 35, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_36', company_id: 'cie_lahcen_pointeur', code: 'D5-S36', nom: 'SERRE 36', actif: true, ordre: 36, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_37', company_id: 'cie_lahcen_pointeur', code: 'D5-S37', nom: 'SERRE 37', actif: true, ordre: 37, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_38', company_id: 'cie_lahcen_pointeur', code: 'D5-S38', nom: 'SERRE 38', actif: true, ordre: 38, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_39', company_id: 'cie_lahcen_pointeur', code: 'D5-S39', nom: 'SERRE 39', actif: true, ordre: 39, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_40', company_id: 'cie_lahcen_pointeur', code: 'D5-S40', nom: 'SERRE 40', actif: true, ordre: 40, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_41', company_id: 'cie_lahcen_pointeur', code: 'D5-S41', nom: 'SERRE 41', actif: true, ordre: 41, domaine_id: 'dom_d5' },
+  { id: 'serre_d5_42', company_id: 'cie_lahcen_pointeur', code: 'D5-S42', nom: 'SERRE 42', actif: true, ordre: 42, domaine_id: 'dom_d5' },
+];
 
 // Serres par défaut (configurables par l'administrateur)
 export const DEFAULT_SERRES: Serre[] = [
@@ -74,6 +131,8 @@ export const DEFAULT_SERRES: Serre[] = [
   { id: 'serre_13', company_id: 'cie_lahcen_pointeur', code: 'S13', nom: 'Serre 13', actif: true, ordre: 13, domaine_id: 'dom_d2' },
   { id: 'serre_14', company_id: 'cie_lahcen_pointeur', code: 'S14', nom: 'Serre 14', actif: true, ordre: 14, domaine_id: 'dom_d2' },
   { id: 'serre_15', company_id: 'cie_lahcen_pointeur', code: 'S15', nom: 'Serre 15', actif: true, ordre: 15, domaine_id: 'dom_d2' },
+  ...DEFAULT_D3_SERRES,
+  ...DEFAULT_D5_SERRES,
 ];
 
 // export const DEFAULT_ADMIN_USER: UserAccount = {
@@ -221,6 +280,115 @@ export function safeSetItem(key: string, value: string): { success: boolean; err
   }
 }
 
+function isAnomalousDuplicateSerre23(s: Partial<Serre> | null | undefined): boolean {
+  if (!s || s.id !== 'serre_23') return false;
+  const dom = (s.domaine_id || '').trim().toLowerCase();
+  const code = (s.code || '').trim().toUpperCase();
+  return !dom || dom === 'dom_d3' || code === 'S23';
+}
+
+function migrateLegacySerre23References(): void {
+  const replaceSerreIdToken = (val?: string | null): { next: string | null | undefined; changed: boolean } => {
+    if (!val || !val.includes('serre_23')) return { next: val, changed: false };
+    const tokens = val
+      .split(',')
+      .map((part) => (part.trim() === 'serre_23' ? 'serre_d5_23' : part.trim()))
+      .filter(Boolean);
+    const deduped = Array.from(new Set(tokens));
+    const joined = deduped.join(',');
+    return { next: joined, changed: joined !== val };
+  };
+
+  // 1. Pointages, Récoltes, Heures Sup, Tâches Sup
+  const singleKeys = [
+    STORAGE_KEYS.POINTAGES,
+    STORAGE_KEYS.RECOLTE,
+    STORAGE_KEYS.HEURES_SUPP,
+    STORAGE_KEYS.TACHES_SUPP,
+  ];
+  singleKeys.forEach((key) => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw || !raw.includes('serre_23')) return;
+      const list = JSON.parse(raw);
+      if (!Array.isArray(list)) return;
+      let changed = false;
+      const nextList = list.map((item: any) => {
+        if (item && item.serre_id === 'serre_23') {
+          changed = true;
+          return {
+            ...item,
+            serre_id: 'serre_d5_23',
+            ...(item.serre_nom !== undefined ? { serre_nom: item.serre_nom || 'SERRE 23' } : {}),
+          };
+        }
+        return item;
+      });
+      if (changed) safeSetItem(key, JSON.stringify(nextList));
+    } catch {
+      // ignore
+    }
+  });
+
+  // 2. Affectations (serre_id possiblement multi-valeurs + serres_ids)
+  try {
+    const rawAff = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+    if (rawAff && rawAff.includes('serre_23')) {
+      const affs = JSON.parse(rawAff);
+      if (Array.isArray(affs)) {
+        let changed = false;
+        const nextAffs = affs.map((a: any) => {
+          if (!a) return a;
+          let itemChanged = false;
+          const updated = { ...a };
+          const resStr = replaceSerreIdToken(a.serre_id);
+          if (resStr.changed) {
+            updated.serre_id = resStr.next;
+            itemChanged = true;
+          }
+          if (Array.isArray(a.serres_ids) && a.serres_ids.includes('serre_23')) {
+            updated.serres_ids = Array.from(
+              new Set(a.serres_ids.map((id: string) => (id === 'serre_23' ? 'serre_d5_23' : id)))
+            );
+            itemChanged = true;
+          }
+          if (itemChanged) changed = true;
+          return updated;
+        });
+        if (changed) safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(nextAffs));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. TacheSerreConfig (serre_ids[])
+  try {
+    const rawTs = localStorage.getItem(STORAGE_KEYS.TACHE_SERRES);
+    if (rawTs && rawTs.includes('serre_23')) {
+      const configs = JSON.parse(rawTs);
+      if (Array.isArray(configs)) {
+        let changed = false;
+        const nextConfigs = configs.map((c: any) => {
+          if (c && Array.isArray(c.serre_ids) && c.serre_ids.includes('serre_23')) {
+            changed = true;
+            return {
+              ...c,
+              serre_ids: Array.from(
+                new Set(c.serre_ids.map((id: string) => (id === 'serre_23' ? 'serre_d5_23' : id)))
+              ),
+            };
+          }
+          return c;
+        });
+        if (changed) safeSetItem(STORAGE_KEYS.TACHE_SERRES, JSON.stringify(nextConfigs));
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 // Initialisation idempotente
 export function initStorage(): void {
   try {
@@ -300,64 +468,73 @@ export function initStorage(): void {
     if (!localStorage.getItem(STORAGE_KEYS.AFFECTATIONS)) {
       safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify([]));
     }
-    // RÈGLE STRICTE : UN OUVRIER = UNE SEULE TÂCHE PAR JOUR
-    // Déduplication automatique des affectations et synchronisation bidirectionnelle avec POINTAGES
+    // MULTI-TÂCHES & MULTI-SERRES : Un ouvrier peut avoir plusieurs tâches avec chacune sa serre dans la journée.
+    // Migration douce sans perte de données + synchronisation rétrocompatible avec POINTAGES
     try {
       const rawAff = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
       const affs: AffectationTache[] = rawAff ? JSON.parse(rawAff) : [];
       const rawPtgs = localStorage.getItem(STORAGE_KEYS.POINTAGES);
       const ptgs: Pointage[] = rawPtgs ? JSON.parse(rawPtgs) : [];
 
-      // 1. Déduplication stricte des affectations par (company_id, date, ouvrier_id)
-      // On garde uniquement la plus récente
+      // 1. Conserver toutes les affectations valides (uniquement filtrer les doublons d'id exacts)
       const cleanAffs: AffectationTache[] = [];
-      const seenWorkerDate = new Set<string>();
-      const sortedAffs = [...affs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      const seenAffIds = new Set<string>();
+      const workersWithAffs = new Set<string>();
 
-      sortedAffs.forEach((a) => {
-        const key = `${a.company_id}_${a.date}_${a.ouvrier_id}`;
-        if (!seenWorkerDate.has(key) && a.tache_id) {
-          seenWorkerDate.add(key);
+      affs.forEach((a) => {
+        if (a && a.id && a.tache_id && !seenAffIds.has(a.id)) {
+          seenAffIds.add(a.id);
+          workersWithAffs.add(`${a.company_id}_${a.date}_${a.ouvrier_id}`);
           cleanAffs.push(a);
         }
       });
 
-      // 2. Synchroniser les pointages anciens ayant tache_id vers cleanAffs si non encore présent
+      // 2. Synchroniser les pointages anciens ayant tache_id vers cleanAffs uniquement si l'ouvrier n'a pas encore d'affectation ce jour-là
+      let affsModified = cleanAffs.length !== affs.length;
       ptgs.forEach((p) => {
         if (p.tache_id && p.present !== false) {
           const key = `${p.company_id}_${p.date}_${p.ouvrier_id}`;
-          if (!seenWorkerDate.has(key)) {
-            seenWorkerDate.add(key);
+          if (!workersWithAffs.has(key)) {
+            workersWithAffs.add(key);
             cleanAffs.push({
               id: `aff_sync_${p.id}`,
               company_id: p.company_id,
               ouvrier_id: p.ouvrier_id,
               numero_ouvrier: p.numero_ouvrier,
               tache_id: p.tache_id,
+              domaine_id: p.domaine_id,
+              serre_id: p.serre_id || null,
+              serre_nom: p.serre_nom || null,
               date: p.date,
               timestamp: p.timestamp || Date.now(),
             });
+            affsModified = true;
           }
         }
       });
 
-      // 3. Aligner pointages.tache_id exactement sur cleanAffs
-      const affMap = new Map<string, string>();
+      // 3. Aligner pointages.tache_id sur la première affectation active pour rétrocompatibilité (sans jamais supprimer les autres affectations)
+      const firstAffMap = new Map<string, string>();
       cleanAffs.forEach((a) => {
-        affMap.set(`${a.company_id}_${a.date}_${a.ouvrier_id}`, a.tache_id);
+        const key = `${a.company_id}_${a.date}_${a.ouvrier_id}`;
+        if (!firstAffMap.has(key)) {
+          firstAffMap.set(key, a.tache_id);
+        }
       });
 
       let ptgsModified = false;
       ptgs.forEach((p) => {
         const key = `${p.company_id}_${p.date}_${p.ouvrier_id}`;
-        const activeTacheId = affMap.get(key) || null;
-        if (p.tache_id !== activeTacheId) {
-          p.tache_id = activeTacheId;
+        const firstTacheId = firstAffMap.get(key) || null;
+        if (p.tache_id !== firstTacheId) {
+          p.tache_id = firstTacheId;
           ptgsModified = true;
         }
       });
 
-      safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(cleanAffs));
+      if (affsModified) {
+        safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(cleanAffs));
+      }
       if (ptgsModified) {
         safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(ptgs));
       }
@@ -379,9 +556,71 @@ export function initStorage(): void {
     // if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
     //   safeSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(DEFAULT_ADMIN_USER));
     // }
+    if (!localStorage.getItem(STORAGE_KEYS.TACHE_SERRES)) {
+      safeSetItem(STORAGE_KEYS.TACHE_SERRES, JSON.stringify([]));
+    }
     if (!localStorage.getItem(STORAGE_KEYS.SERRES)) {
       safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(DEFAULT_SERRES));
+    } else {
+      // Migration idempotente vers la configuration officielle 42 serres :
+      // D2 (15 serres: 1..15), D3 (7 serres: 16..22), D5 (20 serres: 23..42).
+      // Supprime uniquement le doublon erroné serre_23 dans D3 et conserve toute serre personnalisée.
+      try {
+        const parsedSerres: Serre[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.SERRES) || '[]');
+        let serresUpdated = false;
+        const canonicalById = new Map(DEFAULT_SERRES.map((s) => [s.id, s]));
+
+        // 1. Retirer l'enregistrement erroné serre_23 de D3 et normaliser domaine_id/ordre des serres canoniques
+        const cleanedSerres: Serre[] = [];
+        for (const s of parsedSerres) {
+          if (isAnomalousDuplicateSerre23(s)) {
+            serresUpdated = true;
+            continue;
+          }
+          const canon = canonicalById.get(s.id);
+          if (canon) {
+            const needsDomaineFix = !s.domaine_id || (canon.domaine_id && s.domaine_id !== canon.domaine_id);
+            const needsOrdreFix = s.ordre !== canon.ordre;
+            if (needsDomaineFix || needsOrdreFix) {
+              cleanedSerres.push({
+                ...s,
+                domaine_id: canon.domaine_id,
+                ordre: canon.ordre,
+              });
+              serresUpdated = true;
+              continue;
+            }
+          }
+          cleanedSerres.push(s);
+        }
+
+        // 2. Injecter les serres canoniques manquantes (D2, D3, D5) sans créer de doublons
+        DEFAULT_SERRES.forEach((defSerre) => {
+          const targetDom = (defSerre.domaine_id || '').trim().toLowerCase();
+          const exists = cleanedSerres.some((s) => {
+            if (s.id === defSerre.id) return true;
+            const sDom = (s.domaine_id || '').trim().toLowerCase();
+            return (
+              sDom === targetDom &&
+              (s.code.trim().toUpperCase() === defSerre.code.toUpperCase() ||
+                s.nom.trim().toUpperCase() === defSerre.nom.toUpperCase())
+            );
+          });
+          if (!exists) {
+            cleanedSerres.push(defSerre);
+            serresUpdated = true;
+          }
+        });
+
+        if (serresUpdated) {
+          cleanedSerres.sort((a, b) => a.ordre - b.ordre);
+          safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(cleanedSerres));
+        }
+      } catch {
+        // ignore
+      }
     }
+    migrateLegacySerre23References();
     if (!localStorage.getItem(STORAGE_KEYS.RECOLTE)) {
       safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify([]));
     }
@@ -962,7 +1201,9 @@ export function addPointage(
   ouvrierId: string,
   date: string,
   tacheId: string | null = null,
-  domaineId?: string
+  domaineId?: string,
+  serreId?: string | null,
+  serreNom?: string | null
 ): AddPointageResult {
   const allRaw = localStorage.getItem(STORAGE_KEYS.POINTAGES);
   const all: Pointage[] = allRaw ? JSON.parse(allRaw) : [];
@@ -1005,9 +1246,33 @@ export function addPointage(
       existing.present = true;
       existing.domaine_id = targetDomaineId;
       existing.tache_id = tacheId;
+      existing.serre_id = serreId || null;
+      existing.serre_nom = serreNom || null;
       existing.heure = heure;
       existing.timestamp = now.getTime();
       safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+      addToPointageSyncQueue('pointages', existing, 'upsert');
+
+      if (tacheId) {
+        const rawAff = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+        const allAff: AffectationTache[] = rawAff ? JSON.parse(rawAff) : [];
+        const newAff: AffectationTache = {
+          id: `aff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          company_id: companyId,
+          ouvrier_id: ouvrierId,
+          numero_ouvrier: ouvrier.numero,
+          tache_id: tacheId,
+          domaine_id: targetDomaineId,
+          serre_id: serreId || null,
+          serre_nom: serreNom || null,
+          date,
+          timestamp: now.getTime(),
+        };
+        allAff.push(newAff);
+        safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(allAff));
+        addToPointageSyncQueue('affectations', newAff, 'upsert');
+      }
+
       notifyListeners();
       return { success: true, pointage: existing };
     }
@@ -1022,13 +1287,36 @@ export function addPointage(
     present: true,
     tache_id: tacheId,
     domaine_id: targetDomaineId,
+    serre_id: serreId || null,
+    serre_nom: serreNom || null,
     heure,
     timestamp: now.getTime(),
   };
 
   all.push(newPointage);
   safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
-  addToSyncQueue('pointages', newPointage);
+  addToPointageSyncQueue('pointages', newPointage, 'upsert');
+
+  if (tacheId) {
+    const rawAff = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+    const allAff: AffectationTache[] = rawAff ? JSON.parse(rawAff) : [];
+    const newAff: AffectationTache = {
+      id: `aff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      company_id: companyId,
+      ouvrier_id: ouvrierId,
+      numero_ouvrier: ouvrier.numero,
+      tache_id: tacheId,
+      domaine_id: targetDomaineId,
+      serre_id: serreId || null,
+      serre_nom: serreNom || null,
+      date,
+      timestamp: now.getTime(),
+    };
+    allAff.push(newAff);
+    safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(allAff));
+    addToPointageSyncQueue('affectations', newAff, 'upsert');
+  }
+
   notifyListeners();
 
   return { success: true, pointage: newPointage };
@@ -1036,7 +1324,7 @@ export function addPointage(
 
 export function updatePointage(
   pointageId: string,
-  updates: { tache_id?: string | null; domaine_id?: string }
+  updates: { tache_id?: string | null; domaine_id?: string; serre_id?: string | null; serre_nom?: string | null }
 ): void {
   const allRaw = localStorage.getItem(STORAGE_KEYS.POINTAGES);
   const all: Pointage[] = allRaw ? JSON.parse(allRaw) : [];
@@ -1048,8 +1336,14 @@ export function updatePointage(
     if (updates.domaine_id !== undefined) {
       all[idx].domaine_id = updates.domaine_id;
     }
+    if (updates.serre_id !== undefined) {
+      all[idx].serre_id = updates.serre_id;
+    }
+    if (updates.serre_nom !== undefined) {
+      all[idx].serre_nom = updates.serre_nom;
+    }
     safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
-    addToSyncQueue('pointages', all[idx]);
+    addToPointageSyncQueue('pointages', all[idx], 'upsert');
     notifyListeners();
   }
 }
@@ -1068,15 +1362,22 @@ export function deletePointage(pointageId: string): void {
   const target = all.find((p) => p.id === pointageId);
   all = all.filter((p) => p.id !== pointageId);
   safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+  if (target) {
+    addToPointageSyncQueue('pointages', { id: target.id }, 'delete');
+  }
 
   // Supprimer également les affectations de tâches de cet ouvrier pour cette date
   if (target) {
     const rawAff = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
-    let allAff: AffectationTache[] = rawAff ? JSON.parse(rawAff) : [];
-    allAff = allAff.filter(
-      (a) => !(a.ouvrier_id === target.ouvrier_id && a.date === target.date)
+    const allAff: AffectationTache[] = rawAff ? JSON.parse(rawAff) : [];
+    const removedAffs = allAff.filter(
+      (a) => a.company_id === target.company_id && a.ouvrier_id === target.ouvrier_id && a.date === target.date
     );
-    safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(allAff));
+    const remainingAff = allAff.filter(
+      (a) => !(a.company_id === target.company_id && a.ouvrier_id === target.ouvrier_id && a.date === target.date)
+    );
+    safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(remainingAff));
+    removedAffs.forEach((a) => addToPointageSyncQueue('affectations', { id: a.id }, 'delete'));
   }
 
   notifyListeners();
@@ -1245,7 +1546,7 @@ export function assignWorkerToTask(
   domaineId?: string,
   serreId?: string | null,
   serreNom?: string | null
-): { success: boolean; error?: string } {
+): { success: boolean; error?: string; affectation?: AffectationTache } {
   initStorage();
   // RÈGLE : Un ouvrier absent ne peut pas être affecté à une tâche
   const pointages = getPointages(companyId, date);
@@ -1257,8 +1558,30 @@ export function assignWorkerToTask(
     };
   }
 
+  const targetDomaineId = domaineId || pointage.domaine_id || getDefaultDomaineId();
+  const targetSerreId = serreId || null;
+  const targetSerreNom = serreNom || null;
+
   const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
   const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
+
+  // Éviter le doublon exact (même ouvrier + même tâche + même domaine + même serre le même jour)
+  const exactDuplicate = all.find(
+    (a) =>
+      a.company_id === companyId &&
+      a.date === date &&
+      a.ouvrier_id === ouvrierId &&
+      a.tache_id === tacheId &&
+      (a.domaine_id || pointage.domaine_id || getDefaultDomaineId()) === targetDomaineId &&
+      (a.serre_id || null) === targetSerreId
+  );
+
+  if (exactDuplicate) {
+    return {
+      success: false,
+      error: 'Cette tâche avec cette serre est déjà enregistrée pour cet ouvrier aujourd\'hui.',
+    };
+  }
 
   const newAff: AffectationTache = {
     id: `aff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1266,18 +1589,116 @@ export function assignWorkerToTask(
     ouvrier_id: ouvrierId,
     numero_ouvrier: pointage.numero_ouvrier,
     tache_id: tacheId,
-    domaine_id: domaineId || pointage.domaine_id || getDefaultDomaineId(),
-    serre_id: serreId || null,
-    serre_nom: serreNom || null,
+    domaine_id: targetDomaineId,
+    serre_id: targetSerreId,
+    serre_nom: targetSerreNom,
     date,
     timestamp: Date.now(),
   };
 
   all.push(newAff);
   safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(all));
-  addToSyncQueue('affectations', newAff);
+  addToPointageSyncQueue('affectations', newAff, 'upsert');
+
+  // Rétrocompatibilité pointage.tache_id si non encore renseigné (sans affecter de serre au pointage du matin)
+  if (!pointage.tache_id) {
+    const rawPtgs = localStorage.getItem(STORAGE_KEYS.POINTAGES);
+    const allPtgs: Pointage[] = rawPtgs ? JSON.parse(rawPtgs) : [];
+    const ptgIdx = allPtgs.findIndex((p) => p.id === pointage.id);
+    if (ptgIdx >= 0) {
+      allPtgs[ptgIdx].tache_id = tacheId;
+      safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(allPtgs));
+      addToPointageSyncQueue('pointages', allPtgs[ptgIdx], 'upsert');
+    }
+  }
+
   notifyListeners();
-  return { success: true };
+  return { success: true, affectation: newAff };
+}
+
+export function updateAffectationTache(
+  affectationId: string,
+  updates: {
+    tacheId?: string;
+    domaineId?: string;
+    serreId?: string | null;
+    serreNom?: string | null;
+  }
+): { success: boolean; error?: string; affectation?: AffectationTache } {
+  initStorage();
+  const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+  const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  const idx = all.findIndex((a) => a.id === affectationId);
+  if (idx < 0) {
+    return { success: false, error: 'Affectation introuvable.' };
+  }
+
+  const current = all[idx];
+  const nextTacheId = updates.tacheId !== undefined ? updates.tacheId : current.tache_id;
+  const nextDomaineId = updates.domaineId !== undefined ? updates.domaineId : current.domaine_id;
+  const nextSerreId = updates.serreId !== undefined ? updates.serreId : (current.serre_id ?? null);
+  const nextSerreNom = updates.serreNom !== undefined ? updates.serreNom : (current.serre_nom ?? null);
+
+  const duplicate = all.find(
+    (a) =>
+      a.id !== affectationId &&
+      a.company_id === current.company_id &&
+      a.date === current.date &&
+      a.ouvrier_id === current.ouvrier_id &&
+      a.tache_id === nextTacheId &&
+      (a.domaine_id || '') === (nextDomaineId || '') &&
+      (a.serre_id || null) === (nextSerreId || null)
+  );
+  if (duplicate) {
+    return {
+      success: false,
+      error: 'Une affectation identique existe déjà pour cet ouvrier aujourd\'hui.',
+    };
+  }
+
+  const updated: AffectationTache = {
+    ...current,
+    tache_id: nextTacheId,
+    domaine_id: nextDomaineId,
+    serre_id: nextSerreId,
+    serre_nom: nextSerreNom,
+    timestamp: Date.now(),
+  };
+
+  all[idx] = updated;
+  safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(all));
+  addToPointageSyncQueue('affectations', updated, 'upsert');
+  notifyListeners();
+  return { success: true, affectation: updated };
+}
+
+export function removeAffectationById(affectationId: string): void {
+  initStorage();
+  const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+  const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  const target = all.find((a) => a.id === affectationId);
+  if (!target) return;
+
+  const remaining = all.filter((a) => a.id !== affectationId);
+  safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(remaining));
+  addToPointageSyncQueue('affectations', { id: affectationId }, 'delete');
+
+  // Mettre à jour pointage.tache_id pour rétrocompatibilité
+  const nextForWorker = remaining.find(
+    (a) => a.company_id === target.company_id && a.date === target.date && a.ouvrier_id === target.ouvrier_id
+  );
+  const rawPtgs = localStorage.getItem(STORAGE_KEYS.POINTAGES);
+  const allPtgs: Pointage[] = rawPtgs ? JSON.parse(rawPtgs) : [];
+  const ptgIdx = allPtgs.findIndex(
+    (p) => p.company_id === target.company_id && p.date === target.date && p.ouvrier_id === target.ouvrier_id
+  );
+  if (ptgIdx >= 0) {
+    allPtgs[ptgIdx].tache_id = nextForWorker ? nextForWorker.tache_id : null;
+    safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(allPtgs));
+    addToPointageSyncQueue('pointages', allPtgs[ptgIdx], 'upsert');
+  }
+
+  notifyListeners();
 }
 
 export function removeWorkerFromTask(
@@ -1288,8 +1709,15 @@ export function removeWorkerFromTask(
 ): void {
   initStorage();
   const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
-  let all: AffectationTache[] = raw ? JSON.parse(raw) : [];
-  all = all.filter(
+  const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  const removed = all.filter(
+    (a) =>
+      a.company_id === companyId &&
+      a.date === date &&
+      a.ouvrier_id === ouvrierId &&
+      a.tache_id === tacheId
+  );
+  const remaining = all.filter(
     (a) =>
       !(
         a.company_id === companyId &&
@@ -1298,29 +1726,125 @@ export function removeWorkerFromTask(
         a.tache_id === tacheId
       )
   );
-  safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(all));
+  safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(remaining));
+  removed.forEach((a) => addToPointageSyncQueue('affectations', { id: a.id }, 'delete'));
   notifyListeners();
+}
+
+export function getTacheSerresConfigs(companyId: string, date: string): TacheSerreConfig[] {
+  initStorage();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.TACHE_SERRES);
+    const all: TacheSerreConfig[] = raw ? JSON.parse(raw) : [];
+    return all.filter((c) => c.company_id === companyId && c.date === date);
+  } catch {
+    return [];
+  }
+}
+
+export function saveTacheSerreConfig(
+  companyId: string,
+  date: string,
+  tacheId: string,
+  domaineId: string,
+  serreIds: string[],
+  serreNoms: string[]
+): TacheSerreConfig {
+  initStorage();
+  const raw = localStorage.getItem(STORAGE_KEYS.TACHE_SERRES);
+  const all: TacheSerreConfig[] = raw ? JSON.parse(raw) : [];
+  const uniqueIds = Array.from(new Set(serreIds.filter(Boolean)));
+  const uniqueNoms = Array.from(new Set(serreNoms.filter(Boolean)));
+
+  const idx = all.findIndex(
+    (c) => c.company_id === companyId && c.date === date && c.tache_id === tacheId
+  );
+
+  const nextConfig: TacheSerreConfig = {
+    id: idx >= 0 ? all[idx].id : `ts_${companyId}_${date}_${tacheId}`,
+    company_id: companyId,
+    date,
+    tache_id: tacheId,
+    domaine_id: domaineId || getDefaultDomaineId(),
+    serre_ids: uniqueIds,
+    serre_noms: uniqueNoms,
+    updated_at: Date.now(),
+  };
+
+  if (idx >= 0) {
+    all[idx] = nextConfig;
+  } else {
+    all.push(nextConfig);
+  }
+
+  safeSetItem(STORAGE_KEYS.TACHE_SERRES, JSON.stringify(all));
+  return nextConfig;
+}
+
+export function updateTacheAffectationsSerres(
+  companyId: string,
+  date: string,
+  tacheId: string,
+  domaineId: string,
+  serreIds: string[],
+  serreNoms: string[]
+): { success: boolean; updatedCount: number } {
+  initStorage();
+  const uniqueIds = Array.from(new Set(serreIds.filter(Boolean)));
+  const uniqueNoms = Array.from(new Set(serreNoms.filter(Boolean)));
+  saveTacheSerreConfig(companyId, date, tacheId, domaineId, uniqueIds, uniqueNoms);
+
+  const serreIdStr = uniqueIds.length > 0 ? uniqueIds.join(',') : null;
+  const serreNomStr = uniqueNoms.length > 0 ? uniqueNoms.join(', ') : null;
+
+  const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+  const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  let updatedCount = 0;
+
+  all.forEach((aff, idx) => {
+    if (aff.company_id === companyId && aff.date === date && aff.tache_id === tacheId) {
+      const updatedAff: AffectationTache = {
+        ...aff,
+        domaine_id: domaineId,
+        serre_id: serreIdStr,
+        serre_nom: serreNomStr,
+        serres_ids: uniqueIds,
+        serres_noms: uniqueNoms,
+        timestamp: Date.now(),
+      };
+      all[idx] = updatedAff;
+      addToPointageSyncQueue('affectations', updatedAff, 'upsert');
+      updatedCount++;
+    }
+  });
+
+  if (updatedCount > 0) {
+    safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(all));
+  }
+  notifyListeners();
+  return { success: true, updatedCount };
 }
 
 export function setTaskWorkers(
   companyId: string,
   date: string,
   tacheId: string,
-  selectedOuvrierIds: string[]
+  selectedOuvrierIds: string[],
+  options?: { domaineId?: string; serreIds?: string[]; serreNoms?: string[] }
 ): { success: boolean; error?: string } {
   initStorage();
   const pointages = getPointages(companyId, date);
   const pointageMap = new Map<string, Pointage>(pointages.map((p) => [p.ouvrier_id, p]));
 
   const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
-  let all: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  const all: AffectationTache[] = raw ? JSON.parse(raw) : [];
 
   const taches = getTaches(companyId);
   const ouvriers = getActiveOuvriers(companyId);
   const ouvrierMap = new Map(ouvriers.map((o) => [o.id, o]));
   const tacheMap = new Map(taches.map((t) => [t.id, t]));
 
-  // RÈGLE : UN OUVRIER = UNE SEULE TÂCHE PAR JOUR
+  // RÈGLE : UN OUVRIER = UNE SEULE TÂCHE PAR JOUR (dans la vue Tâches)
   for (const ouvId of selectedOuvrierIds) {
     const existingOther = all.find(
       (a) =>
@@ -1342,28 +1866,97 @@ export function setTaskWorkers(
     }
   }
 
-  // Supprimer toutes les affectations actuelles pour cette tâche et cette date
-  all = all.filter(
+  // Résoudre le domaine et les serres associées à la tâche
+  const existingTaskConfig = getTacheSerresConfigs(companyId, date).find(
+    (c) => c.tache_id === tacheId
+  );
+  const existingTaskAffs = all.filter(
+    (a) => a.company_id === companyId && a.date === date && a.tache_id === tacheId
+  );
+  const resolvedDomaineId =
+    options?.domaineId ||
+    existingTaskConfig?.domaine_id ||
+    existingTaskAffs.find((a) => a.domaine_id)?.domaine_id ||
+    getDefaultDomaineId();
+  const resolvedSerreIds =
+    options?.serreIds !== undefined
+      ? Array.from(new Set(options.serreIds.filter(Boolean)))
+      : existingTaskConfig?.serre_ids || [];
+  const resolvedSerreNoms =
+    options?.serreNoms !== undefined
+      ? Array.from(new Set(options.serreNoms.filter(Boolean)))
+      : existingTaskConfig?.serre_noms || [];
+
+  if (options?.domaineId !== undefined || options?.serreIds !== undefined) {
+    saveTacheSerreConfig(
+      companyId,
+      date,
+      tacheId,
+      resolvedDomaineId,
+      resolvedSerreIds,
+      resolvedSerreNoms
+    );
+  }
+
+  const serreIdStr = resolvedSerreIds.length > 0 ? resolvedSerreIds.join(',') : null;
+  const serreNomStr = resolvedSerreNoms.length > 0 ? resolvedSerreNoms.join(', ') : null;
+
+  const existingByWorkerId = new Map<string, AffectationTache>();
+  existingTaskAffs.forEach((a) => {
+    if (!existingByWorkerId.has(a.ouvrier_id)) {
+      existingByWorkerId.set(a.ouvrier_id, a);
+    }
+  });
+
+  const uniqueWorkerIds = Array.from(new Set(selectedOuvrierIds));
+  const keptAffIds = new Set<string>();
+
+  const remainingOtherTasks = all.filter(
     (a) => !(a.company_id === companyId && a.date === date && a.tache_id === tacheId)
   );
 
-  // Ajouter les ouvriers sélectionnés qui sont bien pointés présents
-  selectedOuvrierIds.forEach((ouvId) => {
+  const nextTaskAffs: AffectationTache[] = [];
+  uniqueWorkerIds.forEach((ouvId) => {
     const ptg = pointageMap.get(ouvId);
     if (ptg && ptg.present !== false) {
-      all.push({
-        id: `aff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      const prev = existingByWorkerId.get(ouvId);
+      const affObj: AffectationTache = {
+        id: prev ? prev.id : `aff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         company_id: companyId,
         ouvrier_id: ouvId,
         numero_ouvrier: ptg.numero_ouvrier,
         tache_id: tacheId,
+        domaine_id: resolvedDomaineId || ptg.domaine_id || getDefaultDomaineId(),
+        serre_id: serreIdStr ?? (prev?.serre_id || null),
+        serre_nom: serreNomStr ?? (prev?.serre_nom || null),
+        serres_ids: resolvedSerreIds.length > 0 ? resolvedSerreIds : prev?.serres_ids,
+        serres_noms: resolvedSerreNoms.length > 0 ? resolvedSerreNoms : prev?.serres_noms,
         date,
         timestamp: Date.now(),
-      });
+      };
+      if (options?.serreIds !== undefined) {
+        affObj.serre_id = serreIdStr;
+        affObj.serre_nom = serreNomStr;
+        affObj.serres_ids = resolvedSerreIds;
+        affObj.serres_noms = resolvedSerreNoms;
+      }
+      keptAffIds.add(affObj.id);
+      nextTaskAffs.push(affObj);
+      addToPointageSyncQueue('affectations', affObj, 'upsert');
     }
   });
 
-  safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(all));
+  // Synchroniser les suppressions vers Supabase si des ouvriers ont été retirés
+  existingTaskAffs.forEach((oldAff) => {
+    if (!keptAffIds.has(oldAff.id)) {
+      addToPointageSyncQueue('affectations', { id: oldAff.id }, 'delete');
+    }
+  });
+
+  safeSetItem(
+    STORAGE_KEYS.AFFECTATIONS,
+    JSON.stringify([...remainingOtherTasks, ...nextTaskAffs])
+  );
   notifyListeners();
   return { success: true };
 }
@@ -2551,7 +3144,9 @@ export function getSerres(companyId: string): Serre[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.SERRES);
     const all: Serre[] = raw ? JSON.parse(raw) : [];
-    const filtered = all.filter((s) => s.company_id === companyId || !s.company_id);
+    const filtered = all.filter(
+      (s) => !isAnomalousDuplicateSerre23(s) && (s.company_id === companyId || !s.company_id)
+    );
     if (filtered.length === 0) {
       return DEFAULT_SERRES;
     }
@@ -2562,9 +3157,114 @@ export function getSerres(companyId: string): Serre[] {
   }
 }
 
+export function reconcileSerresFromRemote(
+  remoteSerres: Serre[],
+  remoteDomaines?: Domaine[]
+): void {
+  initStorage();
+  let changed = false;
+
+  if (Array.isArray(remoteDomaines) && remoteDomaines.length > 0) {
+    try {
+      const localDomsRaw = localStorage.getItem(STORAGE_KEYS.DOMAINES);
+      const localDoms: Domaine[] = localDomsRaw ? JSON.parse(localDomsRaw) : [...DEFAULT_DOMAINES];
+      const domMap = new Map<string, Domaine>(localDoms.map((d) => [d.id, d]));
+      remoteDomaines.forEach((rd) => {
+        if (rd && rd.id) {
+          domMap.set(rd.id, { id: rd.id, nom: rd.nom, ordre: rd.ordre });
+        }
+      });
+      const nextDoms = Array.from(domMap.values()).sort((a, b) => a.ordre - b.ordre);
+      const nextJson = JSON.stringify(nextDoms);
+      if (nextJson !== localDomsRaw) {
+        safeSetItem(STORAGE_KEYS.DOMAINES, nextJson);
+        changed = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (Array.isArray(remoteSerres) && remoteSerres.length > 0) {
+    try {
+      const localRaw = localStorage.getItem(STORAGE_KEYS.SERRES);
+      const localList: Serre[] = localRaw ? JSON.parse(localRaw) : [];
+      const mergedMap = new Map<string, Serre>();
+
+      // Conserver d'abord les serres locales valides (sauf anomalie serre_23)
+      for (const ls of localList) {
+        if (ls && ls.id && !isAnomalousDuplicateSerre23(ls)) {
+          mergedMap.set(ls.id, ls);
+        }
+      }
+
+      // Fusionner les serres officielles distantes (en excluant toute anomalie serre_23)
+      const remoteIds = new Set<string>();
+      for (const rs of remoteSerres) {
+        if (!rs || !rs.id || isAnomalousDuplicateSerre23(rs)) continue;
+        remoteIds.add(rs.id);
+        mergedMap.set(rs.id, {
+          ...mergedMap.get(rs.id),
+          ...rs,
+        });
+      }
+
+      // Retirer les serres canoniques obsolètes (ex: serre_23) si le serveur fait autorité
+      if (remoteIds.size > 0 && mergedMap.has('serre_23') && !remoteIds.has('serre_23')) {
+        mergedMap.delete('serre_23');
+      }
+
+      const mergedList = Array.from(mergedMap.values()).sort((a, b) => a.ordre - b.ordre);
+      const nextJson = JSON.stringify(mergedList);
+      if (nextJson !== localRaw) {
+        safeSetItem(STORAGE_KEYS.SERRES, nextJson);
+        changed = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (changed) {
+    notifyListeners();
+  }
+}
+
+export function getSerresForDomaine(
+  serres: Serre[],
+  domaineId: string,
+  domaines: Domaine[] = []
+): Serre[] {
+  const activeSerres = (serres || []).filter(
+    (s) => s.actif !== false && !isAnomalousDuplicateSerre23(s)
+  );
+  if (!domaineId) return [];
+
+  const domObj = domaines.find((d) => d.id === domaineId);
+  const domNomUpper = (domObj?.nom || '').trim().toUpperCase();
+  const domIdLower = domaineId.trim().toLowerCase();
+  const isD2 = domIdLower === 'dom_d2' || domNomUpper === 'D2';
+
+  return activeSerres
+    .filter((s) => {
+      const sDom = (s.domaine_id || '').trim();
+      if (!sDom) {
+        // Les serres historiques enregistrées sans domaine_id appartiennent uniquement à D2
+        return isD2;
+      }
+      const sDomLower = sDom.toLowerCase();
+      const sDomUpper = sDom.toUpperCase();
+      return (
+        sDomLower === domIdLower ||
+        (domNomUpper !== '' && (sDomUpper === domNomUpper || sDomUpper === `DOM_${domNomUpper}`))
+      );
+    })
+    .sort((a, b) => a.ordre - b.ordre);
+}
+
 export function saveSerre(
   companyId: string,
-  data: { id?: string; code: string; nom: string; actif?: boolean }
+  data: { id?: string; code: string; nom: string; actif?: boolean; domaine_id?: string | null }
 ): { success: boolean; error?: string; serre?: Serre } {
   initStorage();
   const codeClean = data.code.trim().toUpperCase();
@@ -2598,6 +3298,7 @@ export function saveSerre(
       code: codeClean,
       nom: nomClean,
       actif: data.actif ?? all[idx].actif,
+      domaine_id: data.domaine_id !== undefined ? data.domaine_id : all[idx].domaine_id,
     };
     all[idx] = resultSerre;
   } else {
@@ -2608,6 +3309,7 @@ export function saveSerre(
       nom: nomClean,
       actif: data.actif ?? true,
       ordre: all.length + 1,
+      domaine_id: data.domaine_id ?? null,
     };
     all.push(resultSerre);
   }
