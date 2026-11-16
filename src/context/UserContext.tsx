@@ -45,14 +45,16 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
           isTariq;
 
         const assignedModule = isContractuel ? 'contractuelles' : (profile.module_attribue || 'recolte');
-        const assignedRole = isContractuel
+        const assignedRole = isTariq
+          ? 'caporal_contractuelles'
+          : isContractuel
           ? (profile.role === 'admin' ? 'admin' : 'caporal_contractuelles')
           : (profile.role || 'caporal');
 
         const userAcc: UserAccount = {
           id: profile.id,
           username: profile.username || userEmail.split('@')[0] || 'user',
-          nom: profile.nom || (isTariq ? 'Tariq (Caporal Contractuelles)' : 'Utilisateur'),
+          nom: isTariq ? 'Tariq (Caporal Contractuelles)' : (profile.nom || 'Utilisateur'),
           role: assignedRole as any,
           module_attribue: assignedModule as any,
           company_id: userCompId,

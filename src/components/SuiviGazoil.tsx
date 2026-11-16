@@ -10,7 +10,7 @@
  * - 100% Hors-connexion
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Fuel,
   PlusCircle,
@@ -30,9 +30,12 @@ import {
   Settings,
   HelpCircle,
   ExternalLink,
+  FileSpreadsheet,
+  Download,
 } from 'lucide-react';
 import { GazoilMouvement, GazoilMouvementType } from '../types';
 import * as storage from '../services/storage';
+import { buildGazoilExcelRows, exportGazoilMouvementsExcel } from '../utils/excelExporter';
 
 interface SuiviGazoilProps {
   companyName: string;
@@ -118,8 +121,10 @@ export const SuiviGazoil: React.FC<SuiviGazoilProps> = ({
   const [copiedSuccess, setCopiedSuccess] = useState<boolean>(false);
   const [commandeSentPrompt, setCommandeSentPrompt] = useState<boolean>(false);
 
-  // Filtre historique
+  // Filtre historique & vue tableau Excel
   const [historyFilter, setHistoryFilter] = useState<'tous' | 'entree' | 'sortie'>('tous');
+  const [historyViewMode, setHistoryViewMode] = useState<'liste' | 'tableau'>('liste');
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
 
   // Suggestions d'engins / matériels courants
   const suggestionsEngins = [
@@ -243,10 +248,32 @@ export const SuiviGazoil: React.FC<SuiviGazoilProps> = ({
   };
 
   // Filtrage de l'historique
-  const filteredMouvements = mouvements.filter((m) => {
-    if (historyFilter === 'tous') return true;
-    return m.type === historyFilter;
-  });
+  const filteredMouvements = useMemo(() => {
+    return mouvements.filter((m) => {
+      if (historyFilter === 'tous') return true;
+      return m.type === historyFilter;
+    });
+  }, [mouvements, historyFilter]);
+
+  const gazoilTableRows = useMemo(() => {
+    return buildGazoilExcelRows(filteredMouvements);
+  }, [filteredMouvements]);
+
+  const handleExportExcel = () => {
+    if (filteredMouvements.length === 0) {
+      setExportStatus('Aucun mouvement gazoil à exporter.');
+      setTimeout(() => setExportStatus(null), 3000);
+      return;
+    }
+
+    const res = exportGazoilMouvementsExcel(filteredMouvements, getTodayIso());
+    if (res.success) {
+      setExportStatus(`Export Excel réussi : ${res.totalLignes} ligne(s) (${res.filename})`);
+    } else {
+      setExportStatus(res.error || 'Erreur lors de l\'export Excel.');
+    }
+    setTimeout(() => setExportStatus(null), 4000);
+  };
 
   return (
     <div className="space-y-3 pb-24">
@@ -435,43 +462,97 @@ export const SuiviGazoil: React.FC<SuiviGazoilProps> = ({
         </div>
       </button>
 
+      {/* BOUTON EXPORT EXCEL RAPIDE */}
+      <button
+        type="button"
+        onClick={handleExportExcel}
+        disabled={filteredMouvements.length === 0}
+        className="w-full bg-emerald-800 hover:bg-emerald-900 disabled:bg-slate-200 disabled:text-slate-400 active:scale-[0.99] text-white p-3.5 rounded-2xl shadow-md flex items-center justify-between transition cursor-pointer disabled:cursor-not-allowed"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center shrink-0">
+            <FileSpreadsheet className="w-5 h-5 text-emerald-300" />
+          </div>
+          <div className="text-left">
+            <div className="font-black text-sm">Exporter les données Gazoil (Excel)</div>
+            <div className="text-[11px] text-emerald-100/90">
+              Colonnes : DATE • GAZOIL • TYPE MOUVEMENT • QTE • BENEFICIAIRE
+            </div>
+          </div>
+        </div>
+        <div className="bg-white text-emerald-950 font-black text-xs px-3 py-2 rounded-xl shrink-0 shadow-2xs flex items-center gap-1.5">
+          <Download className="w-3.5 h-3.5" />
+          <span>.xlsx ({filteredMouvements.length})</span>
+        </div>
+      </button>
+
+      {exportStatus && (
+        <div className="bg-slate-800 text-white text-xs py-2 px-3 rounded-xl text-center font-bold">
+          {exportStatus}
+        </div>
+      )}
+
       {/* HISTORIQUE DES MOUVEMENTS */}
       <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-3 sm:p-4">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div>
             <h3 className="text-sm font-black text-slate-800">Historique des Mouvements</h3>
             <p className="text-[11px] text-slate-500">Du plus récent au plus ancien</p>
           </div>
 
-          {/* Filtre */}
-          <div className="flex items-center bg-slate-100 p-0.5 rounded-xl text-xs font-bold">
-            <button
-              type="button"
-              onClick={() => setHistoryFilter('tous')}
-              className={`px-2 py-1 rounded-lg transition ${
-                historyFilter === 'tous' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
-              }`}
-            >
-              Tous ({mouvements.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setHistoryFilter('entree')}
-              className={`px-2 py-1 rounded-lg transition ${
-                historyFilter === 'entree' ? 'bg-emerald-600 text-white shadow-2xs' : 'text-slate-500'
-              }`}
-            >
-              Entrées
-            </button>
-            <button
-              type="button"
-              onClick={() => setHistoryFilter('sortie')}
-              className={`px-2 py-1 rounded-lg transition ${
-                historyFilter === 'sortie' ? 'bg-rose-600 text-white shadow-2xs' : 'text-slate-500'
-              }`}
-            >
-              Sorties
-            </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Switch Vue Liste / Tableau Excel */}
+            <div className="flex items-center bg-slate-100 p-0.5 rounded-xl text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={() => setHistoryViewMode('liste')}
+                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                  historyViewMode === 'liste' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                Liste
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryViewMode('tableau')}
+                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                  historyViewMode === 'tableau' ? 'bg-white text-emerald-800 shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                Tableau Excel
+              </button>
+            </div>
+
+            {/* Filtre */}
+            <div className="flex items-center bg-slate-100 p-0.5 rounded-xl text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => setHistoryFilter('tous')}
+                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                  historyFilter === 'tous' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                Tous ({mouvements.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryFilter('entree')}
+                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                  historyFilter === 'entree' ? 'bg-emerald-600 text-white shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                Entrées
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryFilter('sortie')}
+                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                  historyFilter === 'sortie' ? 'bg-rose-600 text-white shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                Sorties
+              </button>
+            </div>
           </div>
         </div>
 
@@ -482,6 +563,41 @@ export const SuiviGazoil: React.FC<SuiviGazoilProps> = ({
             <p className="text-[11px] text-slate-400 mt-1">
               Utilisez les boutons ci-dessus pour ajouter des entrées ou des sorties.
             </p>
+          </div>
+        ) : historyViewMode === 'tableau' ? (
+          <div className="overflow-x-auto max-h-[380px] overflow-y-auto border border-slate-200 rounded-xl">
+            <table className="w-full text-left border-collapse text-[11px]">
+              <thead className="sticky top-0 bg-slate-100 text-slate-700 border-b border-slate-200 font-black uppercase tracking-wider">
+                <tr>
+                  <th className="py-2.5 px-3">DATE</th>
+                  <th className="py-2.5 px-3">GAZOIL</th>
+                  <th className="py-2.5 px-3">TYPE MOUVEMENT</th>
+                  <th className="py-2.5 px-3">QTE</th>
+                  <th className="py-2.5 px-3">BENEFICIAIRE</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {gazoilTableRows.map((row, idx) => (
+                  <tr key={`${row.date}-${row.typeMouvement}-${idx}`} className="hover:bg-emerald-50/40 transition">
+                    <td className="py-2 px-3 font-mono font-bold text-slate-700 whitespace-nowrap">{row.date}</td>
+                    <td className="py-2 px-3 font-bold text-slate-800">{row.gazoil}</td>
+                    <td className="py-2 px-3">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded font-black text-[10px] ${
+                          row.typeMouvement === 'Entrée'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-rose-100 text-rose-800'
+                        }`}
+                      >
+                        {row.typeMouvement}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 font-mono font-black text-slate-900">{row.quantite} L</td>
+                    <td className="py-2 px-3 font-semibold text-slate-700">{row.beneficiaire}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : (
           <div className="divide-y divide-slate-100 max-h-[380px] overflow-y-auto pr-1">

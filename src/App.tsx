@@ -26,6 +26,7 @@ import { HeuresSupplementairesView } from './components/HeuresSupplementairesVie
 import { TachesSupplementairesView } from './components/TachesSupplementairesView';
 import { SupplementairesAdminModule } from './components/Supplementaires/SupplementairesAdminModule';
 import { ContractuellesModule } from './components/Contractuelles/ContractuellesModule';
+import { ExportRemunerationView } from './components/ExportRemunerationView';
 import { useUser } from './context/UserContext';
 import { HelpCircle, AlertTriangle, ShieldAlert } from 'lucide-react';
 
@@ -324,6 +325,7 @@ export default function App() {
             <HeuresSupplementairesView
               currentUser={activeUser}
               allOuvriers={allOuvriers}
+              taches={taches}
               domaines={domaines}
               serres={serres}
               selectedDate={selectedDate}
@@ -458,6 +460,27 @@ export default function App() {
                 serres={serres}
                 selectedDate={selectedDate}
                 onSelectDate={setSelectedDate}
+              />
+            )
+          )}
+
+          {/* ===================== ÉCRAN EXPORT RÉMUNÉRATION (RÉSERVÉ ADMIN) ===================== */}
+          {activeScreen === 'export_remuneration' && (
+            isAnyCaporal ? (
+              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            ) : (
+              <ExportRemunerationView
+                currentUser={activeUser}
+                currentCompany={currentCompany}
+                selectedDate={selectedDate}
+                onSelectDate={setSelectedDate}
+                allOuvriers={allOuvriers}
+                taches={taches}
+                domaines={domaines}
+                serres={serres}
+                defaultDomaineId={defaultDomaineId}
+                allRecoltes={allRecoltes}
+                tacheSerresConfigs={tacheSerresConfigs}
               />
             )
           )}

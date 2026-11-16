@@ -1058,7 +1058,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                 <Briefcase className="w-5 h-5 text-purple-700 mt-0.5 shrink-0" />
                 <div className="text-xs text-purple-950 leading-relaxed">
                   <p className="font-bold text-sm text-purple-900 mb-0.5">Saisie des Tâches Supplémentaires</p>
-                  Enregistrez une tâche supplémentaire avec sa quantité et son unité propre (ex: 30 RUBO BALAYAGE, 5 FORFAIT). Chaque opération est enregistrée séparément sans écraser les autres, et un ouvrier peut cumuler plusieurs tâches légitimes.
+                  1. Entrez l'ouvrier • 2. Choisissez la tâche dans la liste • 3. Saisissez la quantité (chhal zad). Chaque opération est enregistrée séparément.
                 </div>
               </div>
 
@@ -1078,13 +1078,12 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                   />
                 </div>
 
-                {/* 2. Numéro de l'ouvrier */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-xs font-black uppercase text-slate-700 tracking-wider flex items-center gap-1.5">
-                      <Users className="w-3.5 h-3.5 text-slate-500" />
-                      Numéro de l'ouvrier <span className="text-red-500">*</span>
-                    </label>
+                {/* ÉTAPE 1 : Numéro de l'ouvrier */}
+                <div className="bg-slate-50/80 p-4 rounded-2xl border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black uppercase text-purple-900 bg-purple-100 px-2.5 py-0.5 rounded-full">
+                      Étape 1 : Ouvrier
+                    </span>
                     <button
                       type="button"
                       onClick={() => {
@@ -1107,7 +1106,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                         setTWorkerNumInput(e.target.value);
                         verifyWorkerNumber('taches', e.target.value);
                       }}
-                      className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-base font-black text-slate-900 focus:bg-white focus:border-purple-500 focus:outline-hidden"
+                      className="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-3 text-base font-black text-slate-900 focus:border-purple-500 focus:outline-hidden shadow-2xs"
                       autoFocus
                     />
                     <button
@@ -1120,18 +1119,18 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                   </div>
 
                   {tConfirmedWorker && (
-                    <div className="mt-2.5 bg-purple-50 border border-purple-300 rounded-2xl p-3 flex items-center justify-between animate-fadeIn">
+                    <div className="bg-purple-100/80 border border-purple-300 rounded-2xl p-3 flex items-center justify-between animate-fadeIn">
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-purple-600 text-white font-black text-sm flex items-center justify-center shrink-0 shadow-xs">
+                        <div className="w-9 h-9 rounded-xl bg-purple-700 text-white font-black text-sm flex items-center justify-center shrink-0 shadow-xs">
                           #{tConfirmedWorker.numero}
                         </div>
                         <div>
                           <div className="font-black text-sm text-purple-950 flex items-center gap-1.5">
                             <span>{tConfirmedWorker.nom}</span>
-                            <CheckCircle2 className="w-4 h-4 text-purple-600 inline" />
+                            <CheckCircle2 className="w-4 h-4 text-purple-700 inline" />
                           </div>
-                          <div className="text-[11px] text-purple-700 font-medium">
-                            Ouvrier identifié et validé dans la base
+                          <div className="text-[11px] text-purple-800 font-bold">
+                            Ouvrier validé ✓
                           </div>
                         </div>
                       </div>
@@ -1141,7 +1140,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                           setTConfirmedWorker(null);
                           setTWorkerNumInput('');
                         }}
-                        className="text-xs font-bold text-purple-800 hover:text-red-600 px-2 py-1"
+                        className="text-xs font-bold text-purple-900 hover:text-red-600 px-2 py-1 underline"
                       >
                         Changer
                       </button>
@@ -1149,102 +1148,111 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                   )}
 
                   {tWorkerError && (
-                    <div className="mt-2 bg-red-50 border border-red-200 text-red-700 rounded-xl p-2.5 text-xs font-bold flex items-center gap-2 animate-fadeIn">
+                    <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-2.5 text-xs font-bold flex items-center gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
                       <span>{tWorkerError}</span>
                     </div>
                   )}
                 </div>
 
-                {/* 3. Tâche supplémentaire (Sélection dans le catalogue OU Saisie libre) */}
-                <div>
-                  <label className="block text-xs font-black uppercase text-slate-700 tracking-wider mb-1.5 flex items-center gap-1.5">
-                    <Tag className="w-3.5 h-3.5 text-purple-600" />
-                    Tâche supplémentaire <span className="text-red-500">*</span>
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <select
-                      value={tSelectedTacheId}
-                      onChange={(e) => {
-                        setTSelectedTacheId(e.target.value);
-                        if (e.target.value) setTCustomNomTache('');
-                      }}
-                      className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-purple-500 focus:outline-hidden"
-                    >
-                      <option value="">Sélectionner une tâche de l'exploitation...</option>
-                      {taches.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.nom}
-                        </option>
-                      ))}
-                    </select>
-
-                    <input
-                      type="text"
-                      placeholder="Ou saisir un libellé libre (ex: BALAYAGE)"
-                      value={tCustomNomTache}
-                      onChange={(e) => {
-                        setTCustomNomTache(e.target.value);
-                        if (e.target.value) setTSelectedTacheId('');
-                      }}
-                      className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-purple-500 focus:outline-hidden"
-                    />
-                  </div>
-                </div>
-
-                {/* 4. Quantité & Unité */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* ÉTAPE 2 : Choix de la tâche */}
+                <div className="bg-slate-50/80 p-4 rounded-2xl border border-slate-200 space-y-3">
+                  <span className="text-xs font-black uppercase text-purple-900 bg-purple-100 px-2.5 py-0.5 rounded-full inline-block">
+                    Étape 2 : Liste des Tâches
+                  </span>
                   <div>
-                    <label className="block text-xs font-black uppercase text-slate-700 tracking-wider mb-1.5">
-                      Quantité obligatoire <span className="text-red-500">*</span>
+                    <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                      Choisissez la tâche réalisée par l'ouvrier <span className="text-red-500">*</span>
                     </label>
-                    <input
-                      type="number"
-                      step="any"
-                      min="0.1"
-                      placeholder="Ex: 30"
-                      value={tQuantite}
-                      onChange={(e) => setTQuantite(e.target.value)}
-                      required
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-lg font-black text-slate-900 focus:bg-white focus:border-purple-500 focus:outline-hidden"
-                    />
-                  </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <select
+                        value={tSelectedTacheId}
+                        onChange={(e) => {
+                          setTSelectedTacheId(e.target.value);
+                          if (e.target.value) setTCustomNomTache('');
+                        }}
+                        className="bg-white border border-slate-300 rounded-xl px-3 py-3 text-xs font-bold text-slate-900 focus:border-purple-500 focus:outline-hidden shadow-2xs"
+                      >
+                        <option value="">-- Sélectionner dans la liste des tâches --</option>
+                        {taches.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.nom}
+                          </option>
+                        ))}
+                      </select>
 
-                  <div>
-                    <label className="block text-xs font-black uppercase text-slate-700 tracking-wider mb-1.5">
-                      Unité <span className="text-red-500">*</span>
-                    </label>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {['RUBAN', 'RUBO', 'FORFAIT', 'HEURE', 'CAISSE', 'AUTRE'].map((u) => (
-                        <button
-                          key={u}
-                          type="button"
-                          onClick={() => setTUnite(u)}
-                          className={`py-2 px-1 rounded-xl text-[11px] font-black uppercase transition cursor-pointer text-center ${
-                            tUnite === u
-                              ? 'bg-purple-600 text-white shadow-xs'
-                              : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                          }`}
-                        >
-                          {u}
-                        </button>
-                      ))}
-                    </div>
-                    {tUnite === 'AUTRE' && (
                       <input
                         type="text"
-                        placeholder="Préciser l'unité (ex: BOTTE, LIGNE)"
-                        value={tCustomUnite}
-                        onChange={(e) => setTCustomUnite(e.target.value)}
-                        required
-                        className="mt-2 w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 focus:bg-white focus:border-purple-500 focus:outline-hidden"
+                        placeholder="Ou saisir une tâche libre (ex: BALAYAGE)"
+                        value={tCustomNomTache}
+                        onChange={(e) => {
+                          setTCustomNomTache(e.target.value);
+                          if (e.target.value) setTSelectedTacheId('');
+                        }}
+                        className="bg-white border border-slate-300 rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 focus:border-purple-500 focus:outline-hidden shadow-2xs"
                       />
-                    )}
+                    </div>
                   </div>
                 </div>
 
-                {/* 5. Domaine & Serre (Optionnels) */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* ÉTAPE 3 : Quantité & Unité (Chhal zad) */}
+                <div className="bg-slate-50/80 p-4 rounded-2xl border border-slate-200 space-y-3">
+                  <span className="text-xs font-black uppercase text-purple-900 bg-purple-100 px-2.5 py-0.5 rounded-full inline-block">
+                    Étape 3 : Quantité (Chhal zad) & Unité
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        Quantité / Nombre <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0.1"
+                        placeholder="Ex: 30"
+                        value={tQuantite}
+                        onChange={(e) => setTQuantite(e.target.value)}
+                        required
+                        className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 text-lg font-black text-slate-900 focus:border-purple-500 focus:outline-hidden shadow-2xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        Unité <span className="text-red-500">*</span>
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {['RUBAN', 'RUBO', 'FORFAIT', 'HEURE', 'CAISSE', 'AUTRE'].map((u) => (
+                          <button
+                            key={u}
+                            type="button"
+                            onClick={() => setTUnite(u)}
+                            className={`py-2 px-1 rounded-xl text-[11px] font-black uppercase transition cursor-pointer text-center ${
+                              tUnite === u
+                                ? 'bg-purple-600 text-white shadow-xs'
+                                : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                            }`}
+                          >
+                            {u}
+                          </button>
+                        ))}
+                      </div>
+                      {tUnite === 'AUTRE' && (
+                        <input
+                          type="text"
+                          placeholder="Préciser l'unité (ex: BOTTE, LIGNE)"
+                          value={tCustomUnite}
+                          onChange={(e) => setTCustomUnite(e.target.value)}
+                          required
+                          className="mt-2 w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 focus:border-purple-500 focus:outline-hidden"
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Domaine & Serre (Optionnels) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                   <div>
                     <label className="block text-xs font-bold text-slate-600 mb-1 flex items-center gap-1">
                       <MapPin className="w-3.5 h-3.5 text-slate-400" />
@@ -1290,7 +1298,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                   </div>
                 </div>
 
-                {/* 6. Observation */}
+                {/* Observation */}
                 <div>
                   <label className="block text-xs font-bold text-slate-600 mb-1 flex items-center gap-1">
                     <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
@@ -1298,7 +1306,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                   </label>
                   <input
                     type="text"
-                    placeholder="Ex: Travail soigné, Fin de chantier..."
+                    placeholder="Ex: Fin de ligne, Urgence..."
                     value={tObservation}
                     onChange={(e) => setTObservation(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-medium text-slate-800 focus:bg-white focus:border-purple-500 focus:outline-hidden"
@@ -1308,7 +1316,7 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
                 {/* Bouton de validation */}
                 <button
                   type="submit"
-                  disabled={isSubmitting || !tConfirmedWorker || !tQuantite || parseFloat(tQuantite) <= 0 || (!tSelectedTacheId && !tCustomNomTache.trim())}
+                  disabled={isSubmitting || !tConfirmedWorker || (!tSelectedTacheId && !tCustomNomTache.trim()) || !tQuantite || parseFloat(tQuantite) <= 0}
                   className="w-full py-3.5 px-4 bg-linear-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400 text-white font-black text-sm rounded-2xl shadow-sm transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <Save className="w-4 h-4" />
@@ -1317,6 +1325,8 @@ export const HeuresSupplementairesModal: React.FC<HeuresSupplementairesModalProp
               </form>
             </div>
           )}
+
+
 
           {/* ------------------------------------------------------- */}
           {/* SECTION C : RÉCAPITULATIF (1 LIGNE PAR OUVRIER)         */}
