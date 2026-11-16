@@ -23,10 +23,13 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   id UUID REFERENCES auth.users ON DELETE CASCADE PRIMARY KEY,
   username TEXT NOT NULL,
   nom TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'caporal')),
+  role TEXT NOT NULL CHECK (role IN ('admin', 'caporal', 'caporal_contractuelles', 'lecteur')),
   company_id TEXT REFERENCES public.companies(id),
   actif BOOLEAN DEFAULT TRUE,
   telephone TEXT,
+  module_attribue TEXT DEFAULT 'recolte',
+  domaines_autorises JSONB DEFAULT '[]'::jsonb,
+  serres_autorisees JSONB DEFAULT '[]'::jsonb,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -49,12 +52,30 @@ RETURNS BOOLEAN STABLE LANGUAGE sql SECURITY DEFINER SET search_path = public AS
   );
 $$;
 
--- Fonction Helper : Vérifier si l'utilisateur est un compte actif (Admin ou Caporal)
+-- Fonction Helper : Vérifier si l'utilisateur est en mode Lecture Seule (lecteur)
+CREATE OR REPLACE FUNCTION public.is_lecteur()
+RETURNS BOOLEAN STABLE LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid() AND role = 'lecteur' AND actif = true
+  );
+$$;
+
+-- Fonction Helper : Vérifier si l'utilisateur est un compte actif (lecture autorisée)
 CREATE OR REPLACE FUNCTION public.is_active_user()
 RETURNS BOOLEAN STABLE LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS (
     SELECT 1 FROM public.profiles 
     WHERE id = auth.uid() AND actif = true
+  );
+$$;
+
+-- Fonction Helper : Vérifier si l'utilisateur peut écrire (exclut strictement lecteur)
+CREATE OR REPLACE FUNCTION public.is_active_writer()
+RETURNS BOOLEAN STABLE LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid() AND actif = true AND role IN ('admin', 'caporal', 'caporal_contractuelles')
   );
 $$;
 
@@ -390,19 +411,19 @@ CREATE POLICY "profiles_select" ON public.profiles
 
 CREATE POLICY "profiles_insert" ON public.profiles
   FOR INSERT TO authenticated
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin() AND role = 'caporal');
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin() AND role IN ('caporal', 'caporal_contractuelles', 'lecteur'));
 
 CREATE POLICY "profiles_update" ON public.profiles
   FOR UPDATE TO authenticated
-  USING ((company_id = public.get_my_company_id() AND public.is_admin()) OR id = auth.uid())
-  WITH CHECK ((company_id = public.get_my_company_id() AND public.is_admin()) OR id = auth.uid());
+  USING (company_id = public.get_my_company_id() AND public.is_admin())
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
 
 CREATE POLICY "profiles_delete" ON public.profiles
   FOR DELETE TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin() AND role = 'caporal');
+  USING (company_id = public.get_my_company_id() AND public.is_admin() AND role IN ('caporal', 'caporal_contractuelles', 'lecteur'));
 
 -- C. Tables REFERENTIELS (ouvriers, taches, serres, domaines)
--- Lecture : Admin & Caporal | Écriture : Admin uniquement
+-- Lecture : Utilisateurs actifs (incl. lecteur) | Écriture : Admin uniquement
 
 -- Ouvriers
 CREATE POLICY "ouvriers_select" ON public.ouvriers
@@ -461,23 +482,23 @@ CREATE POLICY "serres_delete" ON public.serres
 -- Domaines
 CREATE POLICY "domaines_select" ON public.domaines
   FOR SELECT TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_active_user());
+  USING ((company_id IS NULL OR company_id = public.get_my_company_id()) AND public.is_active_user());
 
 CREATE POLICY "domaines_insert" ON public.domaines
   FOR INSERT TO authenticated
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
+  WITH CHECK ((company_id IS NULL OR company_id = public.get_my_company_id()) AND public.is_admin());
 
 CREATE POLICY "domaines_update" ON public.domaines
   FOR UPDATE TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin())
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
+  USING ((company_id IS NULL OR company_id = public.get_my_company_id()) AND public.is_admin())
+  WITH CHECK ((company_id IS NULL OR company_id = public.get_my_company_id()) AND public.is_admin());
 
 CREATE POLICY "domaines_delete" ON public.domaines
   FOR DELETE TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin());
+  USING ((company_id IS NULL OR company_id = public.get_my_company_id()) AND public.is_admin());
 
 -- D. Tables SAISIES TERRAIN (pointages, affectations, recolte_entries)
--- Lecture, Insert, Update : Admin & Caporal | Delete : Admin uniquement (interdiction pour Caporal d'effacer les historiques)
+-- Lecture : Utilisateurs actifs (incl. lecteur) | Écriture : Admin / Caporals (strictement bloqué pour lecteur)
 
 -- Pointages
 CREATE POLICY "pointages_select" ON public.pointages
@@ -486,12 +507,12 @@ CREATE POLICY "pointages_select" ON public.pointages
 
 CREATE POLICY "pointages_insert" ON public.pointages
   FOR INSERT TO authenticated
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_user());
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
 
 CREATE POLICY "pointages_update" ON public.pointages
   FOR UPDATE TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_active_user())
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_user());
+  USING (company_id = public.get_my_company_id() AND public.is_admin())
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
 
 CREATE POLICY "pointages_delete" ON public.pointages
   FOR DELETE TO authenticated
@@ -504,12 +525,12 @@ CREATE POLICY "affectations_select" ON public.affectations
 
 CREATE POLICY "affectations_insert" ON public.affectations
   FOR INSERT TO authenticated
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_user());
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
 
 CREATE POLICY "affectations_update" ON public.affectations
   FOR UPDATE TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_active_user())
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_user());
+  USING (company_id = public.get_my_company_id() AND public.is_admin())
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_admin());
 
 CREATE POLICY "affectations_delete" ON public.affectations
   FOR DELETE TO authenticated
@@ -522,24 +543,24 @@ CREATE POLICY "recolte_select" ON public.recolte_entries
 
 CREATE POLICY "recolte_insert" ON public.recolte_entries
   FOR INSERT TO authenticated
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_user());
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_writer());
 
 CREATE POLICY "recolte_update" ON public.recolte_entries
   FOR UPDATE TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_active_user())
-  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_user());
+  USING (company_id = public.get_my_company_id() AND public.is_active_writer())
+  WITH CHECK (company_id = public.get_my_company_id() AND public.is_active_writer());
 
 CREATE POLICY "recolte_delete" ON public.recolte_entries
   FOR DELETE TO authenticated
   USING (company_id = public.get_my_company_id() AND public.is_admin());
 
 -- E. Tables GESTION CONFIDENTIELLE (heures_supplementaires, gazoil_mouvements, stock_produits, stock_mouvements)
--- Réservé strictement à l'Admin
+-- Lecture : Admin & Lecteur | Écriture : Admin uniquement
 
 -- Heures Supplémentaires
 CREATE POLICY "heures_supp_select" ON public.heures_supplementaires
   FOR SELECT TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin());
+  USING (company_id = public.get_my_company_id() AND (public.is_admin() OR public.is_lecteur()));
 
 CREATE POLICY "heures_supp_insert" ON public.heures_supplementaires
   FOR INSERT TO authenticated
@@ -557,7 +578,7 @@ CREATE POLICY "heures_supp_delete" ON public.heures_supplementaires
 -- Gazoil Mouvements
 CREATE POLICY "gazoil_select" ON public.gazoil_mouvements
   FOR SELECT TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin());
+  USING (company_id = public.get_my_company_id() AND (public.is_admin() OR public.is_lecteur()));
 
 CREATE POLICY "gazoil_insert" ON public.gazoil_mouvements
   FOR INSERT TO authenticated
@@ -575,7 +596,7 @@ CREATE POLICY "gazoil_delete" ON public.gazoil_mouvements
 -- Stock Produits
 CREATE POLICY "stock_prod_select" ON public.stock_produits
   FOR SELECT TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin());
+  USING (company_id = public.get_my_company_id() AND (public.is_admin() OR public.is_lecteur()));
 
 CREATE POLICY "stock_prod_insert" ON public.stock_produits
   FOR INSERT TO authenticated
@@ -593,7 +614,7 @@ CREATE POLICY "stock_prod_delete" ON public.stock_produits
 -- Stock Mouvements
 CREATE POLICY "stock_mvt_select" ON public.stock_mouvements
   FOR SELECT TO authenticated
-  USING (company_id = public.get_my_company_id() AND public.is_admin());
+  USING (company_id = public.get_my_company_id() AND (public.is_admin() OR public.is_lecteur()));
 
 CREATE POLICY "stock_mvt_insert" ON public.stock_mouvements
   FOR INSERT TO authenticated

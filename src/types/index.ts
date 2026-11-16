@@ -196,7 +196,7 @@ export interface GazoilConfig {
 
 // ------------------------- MULTI-COMPTES & RÔLES -------------------------
 
-export type UserRole = 'admin' | 'caporal' | 'caporal_contractuelles';
+export type UserRole = 'admin' | 'caporal' | 'caporal_contractuelles' | 'lecteur';
 
 export interface UserAccount {
   id: string;
@@ -373,6 +373,40 @@ export interface ContractuelOuvrier {
   updated_at?: string;
 }
 
+export type StatutValidationContractuel = 'BROUILLON' | 'SOUMIS' | 'VALIDE' | 'REFUSE';
+
+export type ContractuelHistoriqueAction =
+  | 'CREATION'
+  | 'MODIFICATION'
+  | 'SOUMISSION'
+  | 'VALIDATION'
+  | 'REFUS';
+
+export interface ContractuelHistoriqueEntry {
+  id: string;
+  timestamp: string;
+  action: ContractuelHistoriqueAction;
+  auteur_id: string;
+  auteur_nom: string;
+  auteur_role: string;
+  statut_avant?: StatutValidationContractuel | null;
+  statut_apres: StatutValidationContractuel;
+  present: boolean;
+  domaine_id?: string;
+  taches_ids?: string[];
+  taches_noms?: string[];
+  serres_ids?: string[];
+  serres_noms?: string[];
+  heure_debut?: string | null;
+  heure_fin?: string | null;
+  duree_heures?: number | null;
+  tarif_initial?: number;
+  montant_propose?: number;
+  montant_valide?: number | null;
+  tarif_modifie?: boolean;
+  motif?: string | null;
+}
+
 export interface ContractuelActivite {
   id: string;
   pointage_id?: string;
@@ -384,18 +418,25 @@ export interface ContractuelActivite {
   contrat_id?: string | null;
   contrat_nom?: string | null;
   tache_id: string;
-  tache_nom?: string; // Saisie libre par le Caporal (ex: 'Nettoyage des serres', 'Effeuillage')
+  tache_nom?: string; // Nom de tâche réelle ou saisie
   domaine_id: string;
   serre_id?: string | null; // Première serre ou serre principale (compatibilité rétroactive)
   serre_nom?: string; // Nom ou texte descriptif des serres
   serres_ids?: string[]; // Choix multiple des serres (ex: ['serre_1', 'serre_2', 'serre_5'])
   serres_noms?: string[]; // Noms des serres sélectionnées
   serres_texte?: string | null; // Texte lisible (ex: 'Serre 1, Serre 2, Serre 5')
+  heure_debut?: string | null; // Format HH:MM
+  heure_fin?: string | null; // Format HH:MM
+  duree_heures?: number | null; // Durée calculée en heures
   mode_remuneration: ModeRemuneration;
   quantite: number;
   unite: string;
-  prix_unitaire: number; // Prix historique figé au pointage
-  montant_total: number; // quantite * prix_unitaire (la multi-sélection ne multiplie pas le prix)
+  prix_unitaire: number; // Prix unitaire ou tarif initial de référence
+  tarif_initial?: number;
+  montant_propose?: number;
+  montant_valide?: number | null;
+  montant_total: number; // Montant officiel validé (ou proposé si workflow en cours sur vue caporal)
+  statut_validation?: StatutValidationContractuel;
   observation?: string | null;
   created_by_id?: string;
   created_by_nom?: string;
@@ -416,8 +457,28 @@ export interface ContractuelPointage {
   serres_ids?: string[];
   serres_noms?: string[];
   serres_texte?: string | null;
+  taches_ids?: string[];
+  taches_noms?: string[];
+  taches_texte?: string | null;
+  heure_debut?: string | null;
+  heure_fin?: string | null;
+  duree_heures?: number | null;
+  tarif_initial?: number; // Tarif de base catalogue (ne jamais écraser le catalogue)
+  montant_propose?: number; // Montant proposé par le caporal
+  montant_valide?: number | null; // Montant définitif validé par l'administrateur
+  tarif_modifie?: boolean; // true si montant_propose != tarif_initial
+  motif_modification?: string | null;
+  statut_validation?: StatutValidationContractuel;
+  submitted_by_id?: string | null;
+  submitted_by_nom?: string | null;
+  submitted_at?: string | null;
+  validated_by_id?: string | null;
+  validated_by_nom?: string | null;
+  validated_at?: string | null;
+  motif_refus?: string | null;
+  historique_validations?: ContractuelHistoriqueEntry[];
   activites?: ContractuelActivite[];
-  montant_total_jour: number; // Somme des montants des activités
+  montant_total_jour: number; // Montant officiel validé (0 si non validé ou absent)
   created_by_id?: string;
   created_by_nom?: string;
   created_at: string;
@@ -432,6 +493,7 @@ export interface ContractuelFilter {
   serre_id?: string;
   ouvrier_id?: string;
   present?: boolean;
+  statut_validation?: StatutValidationContractuel | 'ALL';
 }
 
 export interface ContractuelStats {
@@ -442,4 +504,5 @@ export interface ContractuelStats {
   totalTachesRealisees: number;
   montantTotalJourDH: number;
 }
+
 

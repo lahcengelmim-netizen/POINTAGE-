@@ -5,7 +5,7 @@
  */
 
 import React, { useState } from 'react';
-import { Calendar, Download, WifiOff, Clock } from 'lucide-react';
+import { Calendar, Download, WifiOff, Clock, RefreshCw, Eye } from 'lucide-react';
 import { Company, UserAccount } from '../types';
 import { usePWAInstall, useOnlineStatus } from '../hooks/usePWAInstall';
 import { formatDateJJMM } from '../utils/whatsappFormatter';
@@ -20,6 +20,10 @@ interface HeaderProps {
   heuresSuppCount?: number;
   currentUser?: UserAccount;
   onOpenLoginModal?: () => void;
+  pendingSyncCount?: number;
+  lastSyncAt?: string | null;
+  isSyncing?: boolean;
+  onForceSync?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -29,6 +33,10 @@ export const Header: React.FC<HeaderProps> = ({
   heuresSuppCount = 0,
   currentUser,
   onOpenLoginModal,
+  pendingSyncCount = 0,
+  lastSyncAt = null,
+  isSyncing = false,
+  onForceSync,
 }) => {
   const { isInstallable, install } = usePWAInstall();
   const isOnline = useOnlineStatus();
@@ -37,6 +45,11 @@ export const Header: React.FC<HeaderProps> = ({
   // Vérifier si la date sélectionnée est aujourd'hui
   const today = new Date().toISOString().split('T')[0];
   const isToday = selectedDate === today;
+  const isReadOnly = currentUser?.role === 'lecteur';
+
+  const lastSyncLabel = lastSyncAt
+    ? new Date(lastSyncAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+    : null;
 
   return (
     <header className="sticky top-0 z-40 bg-emerald-800 text-white shadow-md">
@@ -56,26 +69,46 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <h1 className="text-lg font-black tracking-tight leading-none text-white truncate">
                 Lahcen Pointeur
               </h1>
               {isOnline ? (
-                <span className="inline-flex items-center gap-1 text-[9px] font-semibold bg-emerald-900/80 text-emerald-300 px-1.5 py-0.5 rounded-full border border-emerald-700/60 shrink-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                  <span>En ligne</span>
-                </span>
+                <button
+                  type="button"
+                  onClick={() => onForceSync && onForceSync()}
+                  disabled={isSyncing}
+                  className="inline-flex items-center gap-1 text-[9px] font-semibold bg-emerald-900/80 hover:bg-emerald-950 text-emerald-300 px-1.5 py-0.5 rounded-full border border-emerald-700/60 shrink-0 cursor-pointer disabled:opacity-70"
+                  title={lastSyncLabel ? `Dernière synchro : ${lastSyncLabel} — Cliquer pour synchroniser` : 'Synchroniser maintenant'}
+                >
+                  {isSyncing ? (
+                    <RefreshCw className="w-2.5 h-2.5 animate-spin text-emerald-300" />
+                  ) : (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                  )}
+                  <span>{isSyncing ? 'Synchro...' : 'En ligne'}</span>
+                </button>
               ) : (
                 <span className="inline-flex items-center gap-1 text-[9px] font-black bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-full shrink-0 shadow-2xs">
                   <WifiOff className="w-2.5 h-2.5" />
                   <span>Hors connexion</span>
                 </span>
               )}
+              {pendingSyncCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => isOnline && onForceSync && onForceSync()}
+                  className="inline-flex items-center gap-1 text-[9px] font-black bg-amber-300 text-slate-950 px-1.5 py-0.5 rounded-full shrink-0 cursor-pointer"
+                  title={`${pendingSyncCount} modification(s) en attente de synchronisation Supabase`}
+                >
+                  <span>⏳ {pendingSyncCount} en attente</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Boutons d'action à droite (PWA Install + Heures Sup) */}
+        {/* Boutons d'action à droite (PWA Install + Heures Sup + Compte) */}
         <div className="flex items-center gap-1.5 shrink-0">
           {/* Bouton Installation PWA (si disponible) */}
           {isInstallable && (
@@ -90,8 +123,8 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* Bouton Heures supplémentaires (réservé admin ou si connecté) */}
-          {onOpenHeuresSupp && currentUser?.role === 'admin' && (
+          {/* Bouton Heures supplémentaires (réservé admin, jamais lecteur) */}
+          {onOpenHeuresSupp && currentUser?.role === 'admin' && !isReadOnly && (
             <button
               type="button"
               onClick={onOpenHeuresSupp}
@@ -114,13 +147,17 @@ export const Header: React.FC<HeaderProps> = ({
               type="button"
               onClick={onOpenLoginModal}
               className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl text-xs font-black shadow-xs transition active:scale-95 border ${
-                currentUser?.role === 'caporal'
+                isReadOnly
+                  ? 'bg-sky-600/90 hover:bg-sky-600 text-white border-sky-300'
+                  : currentUser?.role === 'caporal'
                   ? 'bg-emerald-700/80 hover:bg-emerald-700 text-emerald-100 border-emerald-500'
                   : 'bg-white/10 hover:bg-white/20 text-white border-white/20'
               }`}
               title="Changer de compte ou se déconnecter"
             >
-              <span>{currentUser?.role === 'admin' ? '👑' : '🌾'}</span>
+              <span>
+                {currentUser?.role === 'admin' ? '👑' : isReadOnly ? <Eye className="w-3.5 h-3.5" /> : '🌾'}
+              </span>
               <span className="max-w-[70px] truncate text-[11px]">
                 {currentUser ? currentUser.nom.split(' ')[0] : 'Compte'}
               </span>

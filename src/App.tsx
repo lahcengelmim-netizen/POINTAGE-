@@ -26,8 +26,9 @@ import { HeuresSupplementairesView } from './components/HeuresSupplementairesVie
 import { TachesSupplementairesView } from './components/TachesSupplementairesView';
 import { SupplementairesAdminModule } from './components/Supplementaires/SupplementairesAdminModule';
 import { ContractuellesModule } from './components/Contractuelles/ContractuellesModule';
+import { ExportRemunerationView } from './components/ExportRemunerationView';
 import { useUser } from './context/UserContext';
-import { HelpCircle, AlertTriangle, ShieldAlert } from 'lucide-react';
+import { HelpCircle, AlertTriangle, ShieldAlert, Eye } from 'lucide-react';
 
 export default function App() {
   const {
@@ -93,6 +94,12 @@ export default function App() {
     saveSerre,
     deleteSerre,
     toggleSerreActif,
+    // Synchronisation multi-appareils
+    isOnline,
+    isSyncing,
+    lastSyncAt,
+    pendingSyncCount,
+    forceSyncNow,
     // Récolte
     allRecoltes,
     addRecolte,
@@ -101,9 +108,10 @@ export default function App() {
     syncRecolte,
   } = useAgriPointage();
 
-  const { user, loading } = useUser();
+  const { user, loading, isReadOnly: contextReadOnly } = useUser();
 
   const activeUser = user || currentUser;
+  const isReadOnly = contextReadOnly || activeUser.role === 'lecteur';
 
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>(() => {
     if (
@@ -123,7 +131,7 @@ export default function App() {
   // RÈGLE D'AUTORISATION STRICTE :
   // - Le caporal Contractuelles a accès UNIQUEMENT à 'contractuelles'.
   // - Le caporal Récolte a accès aux modules 'recolte', 'heures_supp', et 'taches_supp'.
-  // - S'ils tentent d'accéder à un écran non autorisé, les rediriger vers leur écran respectif.
+  // - Le lecteur a accès en consultation uniquement (pas de saisie terrain).
   useEffect(() => {
     if (
       activeUser.role === 'caporal_contractuelles' ||
@@ -135,23 +143,10 @@ export default function App() {
       }
     } else if (activeUser.role === 'caporal' && !['recolte', 'heures_supp', 'taches_supp'].includes(activeScreen)) {
       setActiveScreen('recolte');
+    } else if (isReadOnly && adminRecolteSubMode === 'saisie') {
+      setAdminRecolteSubMode('dashboard');
     }
-  }, [activeUser.role, activeUser.module_attribue, activeUser.username, activeScreen]);
-
-  // Synchronisation en arrière-plan à la reconnexion internet
-  useEffect(() => {
-    const handleOnline = () => {
-      syncRecolte().catch(() => {});
-    };
-    window.addEventListener('online', handleOnline);
-    // Première synchronisation au chargement
-    if (navigator.onLine) {
-      syncRecolte().catch(() => {});
-    }
-    return () => {
-      window.removeEventListener('online', handleOnline);
-    };
-  }, [syncRecolte]);
+  }, [activeUser.role, activeUser.module_attribue, activeUser.username, activeScreen, isReadOnly, adminRecolteSubMode]);
 
   // Protection d'écran d'accès obligatoire avant ouverture de l'application
   if (loading) {
@@ -205,14 +200,28 @@ export default function App() {
           onSwitchCompany={switchCompany}
           selectedDate={selectedDate}
           onSelectDate={setSelectedDate}
-          onOpenHeuresSupp={() => setShowHeuresSuppModal(true)}
+          onOpenHeuresSupp={!isReadOnly ? () => setShowHeuresSuppModal(true) : undefined}
           heuresSuppCount={heuresSupplementaires.length}
           currentUser={activeUser}
           onOpenLoginModal={() => setShowLoginModal(true)}
+          pendingSyncCount={pendingSyncCount}
+          lastSyncAt={lastSyncAt}
+          isSyncing={isSyncing}
+          onForceSync={() => forceSyncNow()}
         />
 
-        {/* Barre de statistiques : visible uniquement pour l'administrateur */}
+        {/* Barre de statistiques : visible uniquement pour l'administrateur et le lecteur */}
         {!isAnyCaporal && <StatsBar stats={stats} />}
+
+        {/* Bannière Lecture Seule stricte */}
+        {isReadOnly && (
+          <div className="mx-3 mt-2 px-3 py-2 bg-sky-900 text-white rounded-2xl shadow-xs flex items-center gap-2 text-[11px] font-bold border border-sky-700">
+            <Eye className="w-4 h-4 text-sky-300 shrink-0" />
+            <span>
+              Mode Lecture Seule ({activeUser.nom}) — Consultation uniquement, aucune modification autorisée.
+            </span>
+          </div>
+        )}
 
         {/* Alerte Quota Stockage si la mémoire locale du navigateur est saturée */}
         {storageQuotaError && (
@@ -258,34 +267,36 @@ export default function App() {
                   onSync={syncRecolte}
                 />
               ) : (
-                // Vue Administrateur : Choix entre Supervision / Dashboard et Saisie de terrain
+                // Vue Administrateur / Lecteur : Supervision / Dashboard (saisie terrain masquée pour Lecteur)
                 <div className="space-y-3">
-                  <div className="bg-white p-1 rounded-2xl border border-slate-200 flex text-xs font-bold shadow-2xs">
-                    <button
-                      type="button"
-                      onClick={() => setAdminRecolteSubMode('dashboard')}
-                      className={`flex-1 py-1.5 rounded-xl transition ${
-                        adminRecolteSubMode === 'dashboard'
-                          ? 'bg-purple-700 text-white shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      📊 Tableau de Bord Récolte
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAdminRecolteSubMode('saisie')}
-                      className={`flex-1 py-1.5 rounded-xl transition ${
-                        adminRecolteSubMode === 'saisie'
-                          ? 'bg-emerald-600 text-white shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      ✍️ Saisie directe (Terrain)
-                    </button>
-                  </div>
+                  {!isReadOnly && (
+                    <div className="bg-white p-1 rounded-2xl border border-slate-200 flex text-xs font-bold shadow-2xs">
+                      <button
+                        type="button"
+                        onClick={() => setAdminRecolteSubMode('dashboard')}
+                        className={`flex-1 py-1.5 rounded-xl transition ${
+                          adminRecolteSubMode === 'dashboard'
+                            ? 'bg-purple-700 text-white shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        📊 Tableau de Bord Récolte
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAdminRecolteSubMode('saisie')}
+                        className={`flex-1 py-1.5 rounded-xl transition ${
+                          adminRecolteSubMode === 'saisie'
+                            ? 'bg-emerald-600 text-white shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        ✍️ Saisie directe (Terrain)
+                      </button>
+                    </div>
+                  )}
 
-                  {adminRecolteSubMode === 'dashboard' ? (
+                  {isReadOnly || adminRecolteSubMode === 'dashboard' ? (
                     <RecolteAdminDashboard
                       recoltes={allRecoltes}
                       serres={serres}
@@ -298,6 +309,7 @@ export default function App() {
                       onDeleteSerre={deleteSerre}
                       onToggleSerreActif={toggleSerreActif}
                       onDeleteRecolte={deleteRecolte}
+                      isReadOnly={isReadOnly}
                     />
                   ) : (
                     <RecolteCaporal
@@ -366,7 +378,7 @@ export default function App() {
                 onUpdateTask={updateTask}
                 onRemovePointage={removePointage}
                 selectedDate={selectedDate}
-                onOpenHeuresSupp={!isCaporal ? () => setShowHeuresSuppModal(true) : undefined}
+                onOpenHeuresSupp={!isCaporal && !isReadOnly ? () => setShowHeuresSuppModal(true) : undefined}
                 heuresSuppCount={!isCaporal ? heuresSupplementaires.length : 0}
                 gazoilStatus={gazoilStatus}
                 onNavigateGazoil={() => setActiveScreen('gazoil')}
@@ -462,6 +474,27 @@ export default function App() {
             )
           )}
 
+          {/* ===================== ÉCRAN TABLEAU DE RÉMUNÉRATION (RÉSERVÉ ADMIN) ===================== */}
+          {activeScreen === 'remuneration' && (
+            isAnyCaporal ? (
+              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            ) : (
+              <ExportRemunerationView
+                currentUser={activeUser}
+                currentCompany={currentCompany}
+                selectedDate={selectedDate}
+                onSelectDate={setSelectedDate}
+                allOuvriers={allOuvriers}
+                taches={taches}
+                domaines={domaines}
+                serres={serres}
+                defaultDomaineId={defaultDomaineId}
+                allRecoltes={allRecoltes}
+                tacheSerresConfigs={tacheSerresConfigs}
+              />
+            )
+          )}
+
           {activeScreen === 'gazoil' && (
             isCaporal ? (
               <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
@@ -531,8 +564,8 @@ export default function App() {
           </button>
         )}
 
-        {/* Modale Pointage des Heures Supplémentaires */}
-        {!isAnyCaporal && (
+        {/* Modale Pointage des Heures Supplémentaires (jamais en lecture seule) */}
+        {!isAnyCaporal && !isReadOnly && (
           <HeuresSupplementairesModal
             isOpen={showHeuresSuppModal}
             onClose={() => setShowHeuresSuppModal(false)}
@@ -569,6 +602,8 @@ export default function App() {
               setActiveScreen('contractuelles');
             } else if (user.role === 'caporal') {
               setActiveScreen('recolte');
+            } else {
+              setActiveScreen('pointage');
             }
           }}
           onLogout={logout}

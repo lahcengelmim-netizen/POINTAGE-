@@ -42,12 +42,14 @@ import {
   deleteContractuelOuvrier,
   importContractuelOuvriers,
 } from '../../services/contractuelService';
+import { subscribeContractuelsRealtime } from '../../services/supabaseSync';
 import { getSerresForDomaine } from '../../services/storage';
 
 interface ContractuelOuvrierManagementProps {
   domaines: Domaine[];
   serres: Serre[];
   currentUser: UserAccount;
+  isReadOnly?: boolean;
 }
 
 interface ParsedWorkerRow {
@@ -68,7 +70,9 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
   domaines,
   serres,
   currentUser,
+  isReadOnly = false,
 }) => {
+  const effectiveReadOnly = isReadOnly || currentUser.role === 'lecteur';
   const [ouvriers, setOuvriers] = useState<ContractuelOuvrier[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -104,11 +108,48 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    let mounted = true;
+    const companyId = currentUser.company_id || 'cie_lahcen_pointeur';
     loadOuvriers();
-  }, []);
 
-  async function loadOuvriers() {
-    setLoading(true);
+    const handleRefresh = () => {
+      if (mounted) loadOuvriers(true);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && mounted) loadOuvriers(true);
+    };
+
+    window.addEventListener('online', handleRefresh);
+    window.addEventListener('focus', handleRefresh);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribeRealtime = subscribeContractuelsRealtime(companyId, () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (mounted) loadOuvriers(true);
+      }, 600);
+    });
+
+    const intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine && mounted) {
+        loadOuvriers(true);
+      }
+    }, 20000);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener('online', handleRefresh);
+      window.removeEventListener('focus', handleRefresh);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      unsubscribeRealtime();
+      clearInterval(intervalId);
+    };
+  }, [currentUser.company_id]);
+
+  async function loadOuvriers(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const res = await getContractuelOuvriers();
       if (res.success) {
@@ -117,7 +158,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
     } catch (err) {
       console.error('Erreur chargement ouvriers contractuels:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -149,6 +190,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
   // Ouverture création manuelle
   const handleOpenCreate = () => {
+    if (effectiveReadOnly) return;
     setEditingOuvrier({
       nom: '',
       prenom: '',
@@ -168,6 +210,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
   // Ouverture modification manuelle
   const handleOpenEdit = (o: ContractuelOuvrier) => {
+    if (effectiveReadOnly) return;
     setEditingOuvrier({ ...o });
     setIsModalOpen(true);
   };
@@ -175,6 +218,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
   // Sauvegarde manuelle
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (effectiveReadOnly) return;
     if (!editingOuvrier || !editingOuvrier.nom?.trim()) {
       alert('Le nom est obligatoire.');
       return;
@@ -227,6 +271,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
   // Toggle Actif / Inactif
   const handleToggleActif = async (o: ContractuelOuvrier) => {
+    if (effectiveReadOnly) return;
     const updated = { ...o, actif: !o.actif };
     try {
       const res = await saveContractuelOuvrier(updated);
@@ -240,6 +285,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
   // Suppression
   const handleDelete = async (o: ContractuelOuvrier) => {
+    if (effectiveReadOnly) return;
     if (!confirm(`Supprimer définitivement l'ouvrier contractuel "${o.nom_complet}" ?`)) {
       return;
     }
@@ -508,28 +554,30 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setIsImportModalOpen(true);
-                setImportStep('upload');
-              }}
-              className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Importer Excel / CSV</span>
-            </button>
+          {!effectiveReadOnly && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsImportModalOpen(true);
+                  setImportStep('upload');
+                }}
+                className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Importer Excel / CSV</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={handleOpenCreate}
-              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Créer manuellement</span>
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={handleOpenCreate}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Créer manuellement</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Filtres de recherche : Texte, Domaine & Serre */}
@@ -605,7 +653,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
           <button
             type="button"
-            onClick={loadOuvriers}
+            onClick={() => loadOuvriers()}
             className="flex items-center gap-1 text-[11px] font-bold text-slate-500 hover:text-slate-800"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -656,28 +704,30 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                         </div>
 
                         {/* Boutons d'action prioritaires */}
-                        <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsImportModalOpen(true);
-                              setImportStep('upload');
-                            }}
-                            className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
-                          >
-                            <Upload className="w-4 h-4" />
-                            <span>IMPORTER MON FICHIER EXCEL</span>
-                          </button>
+                        {!effectiveReadOnly && (
+                          <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsImportModalOpen(true);
+                                setImportStep('upload');
+                              }}
+                              className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
+                            >
+                              <Upload className="w-4 h-4" />
+                              <span>IMPORTER MON FICHIER EXCEL</span>
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={handleOpenCreate}
-                            className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-3.5 py-2.5 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
-                          >
-                            <Plus className="w-4 h-4" />
-                            <span>Ajouter manuellement</span>
-                          </button>
-                        </div>
+                            <button
+                              type="button"
+                              onClick={handleOpenCreate}
+                              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-3.5 py-2.5 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
+                            >
+                              <Plus className="w-4 h-4" />
+                              <span>Ajouter manuellement</span>
+                            </button>
+                          </div>
+                        )}
 
                         <div className="pt-1">
                           <button
@@ -750,13 +800,16 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                       <td className="py-2.5 px-3.5 text-center">
                         <button
                           type="button"
+                          disabled={effectiveReadOnly}
                           onClick={() => handleToggleActif(ouvrier)}
-                          className={`inline-flex items-center gap-1 text-[11px] font-black px-2.5 py-0.5 rounded-full transition cursor-pointer ${
+                          className={`inline-flex items-center gap-1 text-[11px] font-black px-2.5 py-0.5 rounded-full transition ${
+                            effectiveReadOnly ? 'cursor-default opacity-85' : 'cursor-pointer'
+                          } ${
                             ouvrier.actif
                               ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
                               : 'bg-rose-100 text-rose-800 hover:bg-rose-200'
                           }`}
-                          title={ouvrier.actif ? 'Cliquer pour désactiver' : 'Cliquer pour activer'}
+                          title={effectiveReadOnly ? 'Lecture seule' : ouvrier.actif ? 'Cliquer pour désactiver' : 'Cliquer pour activer'}
                         >
                           {ouvrier.actif ? (
                             <>
@@ -774,43 +827,47 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
                       {/* ACTIONS */}
                       <td className="py-2.5 px-3.5 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenEdit(ouvrier)}
-                            className="flex items-center gap-1 bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-900 font-black text-[11px] px-2.5 py-1 rounded-lg transition cursor-pointer"
-                            title="Modifier les informations ou le montant initial"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                            <span>Modifier</span>
-                          </button>
+                        {effectiveReadOnly ? (
+                          <span className="text-[10px] font-bold text-slate-400">Lecture seule</span>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEdit(ouvrier)}
+                              className="flex items-center gap-1 bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-900 font-black text-[11px] px-2.5 py-1 rounded-lg transition cursor-pointer"
+                              title="Modifier les informations ou le montant initial"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                              <span>Modifier</span>
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleToggleActif(ouvrier)}
-                            className={`p-1.5 rounded-lg transition cursor-pointer ${
-                              ouvrier.actif
-                                ? 'text-amber-600 hover:bg-amber-50'
-                                : 'text-emerald-600 hover:bg-emerald-50'
-                            }`}
-                            title={ouvrier.actif ? 'Désactiver' : 'Activer'}
-                          >
-                            {ouvrier.actif ? (
-                              <XCircle className="w-4 h-4" />
-                            ) : (
-                              <CheckCircle className="w-4 h-4" />
-                            )}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleActif(ouvrier)}
+                              className={`p-1.5 rounded-lg transition cursor-pointer ${
+                                ouvrier.actif
+                                  ? 'text-amber-600 hover:bg-amber-50'
+                                  : 'text-emerald-600 hover:bg-emerald-50'
+                              }`}
+                              title={ouvrier.actif ? 'Désactiver' : 'Activer'}
+                            >
+                              {ouvrier.actif ? (
+                                <XCircle className="w-4 h-4" />
+                              ) : (
+                                <CheckCircle className="w-4 h-4" />
+                              )}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(ouvrier)}
-                            className="p-1.5 text-rose-400 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                            title="Supprimer définitivement"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(ouvrier)}
+                              className="p-1.5 text-rose-400 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                              title="Supprimer définitivement"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );

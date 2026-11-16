@@ -9,24 +9,98 @@
 
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
+import { getCurrentUser, getTaches } from './storage';
 import {
   ContractuelContrat,
   ContractuelOuvrier,
   ContractuelPointage,
   ContractuelActivite,
   ContractuelFilter,
-  ContractuelStats,
   ModeRemuneration,
+  StatutValidationContractuel,
+  Tache,
 } from '../types';
+import {
+  buildContractuellesWorkbook,
+  normalizeStatutValidation,
+} from '../utils/contractuelWorkflow';
+export { buildContractuellesWorkbook };
 
 const STORAGE_KEYS_CONTRACTUELS = {
   CONTRATS: 'agripointage_contractuels_contrats_v1',
   OUVRIERS: 'agripointage_contractuels_ouvriers_v1',
   POINTAGES: 'agripointage_contractuels_pointages_v1',
   ACTIVITES: 'agripointage_contractuels_activites_v1',
+  PENDING_POINTAGES: 'agripointage_contractuels_pending_sync_v1',
+  LAST_SYNC_AT: 'agripointage_contractuels_last_sync_v1',
 };
 
-// Récupération des en-têtes d'autorisation avec Bearer Token
+function isNetworkUnavailable(err?: any): boolean {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
+  if (!err) return false;
+  if (err instanceof TypeError) return true;
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('networkerror') ||
+    msg.includes('load failed') ||
+    msg.includes('network request failed') ||
+    msg.includes('err_internet_disconnected')
+  );
+}
+
+function readPendingPointagesQueue(): any[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.PENDING_POINTAGES);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingPointagesQueue(queue: any[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.PENDING_POINTAGES, JSON.stringify(queue));
+  } catch {
+    // ignore
+  }
+}
+
+function enqueuePendingPointage(payload: any): void {
+  const queue = readPendingPointagesQueue();
+  const keyOuv = payload.ouvrier_id;
+  const keyDate = payload.date;
+  const filtered = queue.filter((q) => !(q.ouvrier_id === keyOuv && q.date === keyDate));
+  filtered.push({
+    ...payload,
+    queued_at: new Date().toISOString(),
+    updated_at: payload.updated_at || new Date().toISOString(),
+  });
+  writePendingPointagesQueue(filtered);
+}
+
+export function getPendingContractuelPointagesCount(): number {
+  return readPendingPointagesQueue().length;
+}
+
+export function getContractuelsLastSyncAt(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.LAST_SYNC_AT);
+  } catch {
+    return null;
+  }
+}
+
+function markContractuelsSynced(): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.LAST_SYNC_AT, new Date().toISOString());
+  } catch {
+    // ignore
+  }
+}
+
+// Récupération des en-têtes d'autorisation avec Bearer Token (respect strict du rôle)
 async function getAuthHeaders(): Promise<HeadersInit> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -42,8 +116,59 @@ async function getAuthHeaders(): Promise<HeadersInit> {
     // ignore
   }
 
-  headers['Authorization'] = 'Bearer dev_admin_token';
+  // Fallback dev local UNIQUEMENT quand Supabase n'est pas configuré
+  if (!import.meta.env.VITE_SUPABASE_URL) {
+    try {
+      const user = getCurrentUser();
+      if (user?.role === 'lecteur') {
+        headers['Authorization'] = 'Bearer dev_lecteur_token';
+        return headers;
+      }
+      if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') {
+        headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
+        return headers;
+      }
+      if (user?.role === 'caporal') {
+        headers['Authorization'] = 'Bearer dev_caporal_token';
+        return headers;
+      }
+    } catch {
+      // ignore
+    }
+    headers['Authorization'] = 'Bearer dev_admin_token';
+  }
+
   return headers;
+}
+
+// 0a. RÉCUPÉRATION DES TÂCHES RÉELLES DE L'APPLICATION (Supabase prioritaire, sans doublons)
+export async function getContractuelTaches(
+  companyId: string = 'cie_lahcen_pointeur'
+): Promise<{ success: boolean; taches: Tache[]; fromCache?: boolean; error?: string }> {
+  const localTaches = getTaches(companyId);
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch('/api/contractuels/taches', { headers });
+    const data = await res.json();
+    if (res.ok && data.success && Array.isArray(data.taches)) {
+      const map = new Map<string, Tache>();
+      data.taches.forEach((t: Tache) => {
+        if (t && t.id && !map.has(t.id)) {
+          map.set(t.id, t);
+        }
+      });
+      return { success: true, taches: Array.from(map.values()), fromCache: false };
+    }
+    if (res.status >= 400 && res.status < 500) {
+      return { success: false, taches: [], error: data.error || 'Accès refusé aux tâches.' };
+    }
+    throw new Error(data.error || 'Erreur lors de la récupération des tâches.');
+  } catch (err: any) {
+    if (isNetworkUnavailable(err)) {
+      return { success: true, taches: localTaches, fromCache: true };
+    }
+    return { success: false, taches: localTaches, fromCache: true, error: err?.message };
+  }
 }
 
 // 0. CATALOGUE DES CONTRATS & TARIFS DE RÉFÉRENCE
@@ -51,7 +176,7 @@ async function getAuthHeaders(): Promise<HeadersInit> {
 export async function getContractuelContrats(filter?: {
   actif?: boolean;
   searchQuery?: string;
-}): Promise<{ success: boolean; contrats: ContractuelContrat[]; error?: string }> {
+}): Promise<{ success: boolean; contrats: ContractuelContrat[]; fromCache?: boolean; error?: string }> {
   try {
     const headers = await getAuthHeaders();
     const params = new URLSearchParams();
@@ -62,13 +187,22 @@ export async function getContractuelContrats(filter?: {
     const data = await res.json();
 
     if (res.ok && data.success && Array.isArray(data.contrats)) {
-      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS, JSON.stringify(data.contrats));
-      return { success: true, contrats: data.contrats };
+      if (!filter?.searchQuery && !filter?.actif) {
+        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS, JSON.stringify(data.contrats));
+      }
+      return { success: true, contrats: data.contrats, fromCache: false };
+    }
+
+    if (res.status >= 400 && res.status < 500) {
+      return { success: false, contrats: [], error: data.error || 'Accès refusé aux contrats.' };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des contrats.');
   } catch (err: any) {
-    console.warn('Fallback stockage local getContractuelContrats:', err.message);
+    if (!isNetworkUnavailable(err)) {
+      return { success: false, contrats: [], error: err.message || 'Erreur serveur contrats.' };
+    }
+    console.warn('Mode hors ligne - cache local getContractuelContrats:', err.message);
     const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
     let list: ContractuelContrat[] = raw ? JSON.parse(raw) : [];
     if (filter?.actif) list = list.filter((c) => c.actif);
@@ -76,7 +210,7 @@ export async function getContractuelContrats(filter?: {
       const q = filter.searchQuery.toLowerCase();
       list = list.filter((c) => c.designation.toLowerCase().includes(q) || c.code?.toLowerCase().includes(q));
     }
-    return { success: true, contrats: list };
+    return { success: true, contrats: list, fromCache: true };
   }
 }
 
@@ -198,7 +332,7 @@ export async function deleteContractuelContrat(
 export async function getContractuelOuvriers(filter?: {
   actif?: boolean;
   domaineId?: string;
-}): Promise<{ success: boolean; ouvriers: ContractuelOuvrier[]; error?: string }> {
+}): Promise<{ success: boolean; ouvriers: ContractuelOuvrier[]; fromCache?: boolean; error?: string }> {
   try {
     const headers = await getAuthHeaders();
     const params = new URLSearchParams();
@@ -209,19 +343,35 @@ export async function getContractuelOuvriers(filter?: {
     const data = await res.json();
 
     if (res.ok && data.success && Array.isArray(data.ouvriers)) {
-      // Sauvegarde miroir local
-      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, JSON.stringify(data.ouvriers));
-      return { success: true, ouvriers: data.ouvriers };
+      if (!filter?.actif && (!filter?.domaineId || filter.domaineId === 'ALL')) {
+        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, JSON.stringify(data.ouvriers));
+      } else {
+        // Fusionner dans le cache sans supprimer les autres domaines
+        const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
+        const existing: ContractuelOuvrier[] = raw ? JSON.parse(raw) : [];
+        const map = new Map<string, ContractuelOuvrier>(existing.map((o) => [o.id, o]));
+        data.ouvriers.forEach((o: ContractuelOuvrier) => map.set(o.id, o));
+        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, JSON.stringify(Array.from(map.values())));
+      }
+      markContractuelsSynced();
+      return { success: true, ouvriers: data.ouvriers, fromCache: false };
+    }
+
+    if (res.status >= 400 && res.status < 500) {
+      return { success: false, ouvriers: [], error: data.error || 'Accès refusé aux ouvriers contractuels.' };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des ouvriers contractuels.');
   } catch (err: any) {
-    console.warn('Fallback stockage local getContractuelOuvriers:', err.message);
+    if (!isNetworkUnavailable(err)) {
+      return { success: false, ouvriers: [], error: err.message || 'Erreur serveur ouvriers contractuels.' };
+    }
+    console.warn('Mode hors ligne - cache local getContractuelOuvriers:', err.message);
     const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
     let list: ContractuelOuvrier[] = raw ? JSON.parse(raw) : [];
     if (filter?.actif) list = list.filter((o) => o.actif);
     if (filter?.domaineId && filter.domaineId !== 'ALL') list = list.filter((o) => o.domaine_id === filter.domaineId);
-    return { success: true, ouvriers: list };
+    return { success: true, ouvriers: list, fromCache: true };
   }
 }
 
@@ -351,12 +501,41 @@ export async function importContractuelOuvriers(
 
 // 2. POINTAGES ET ACTIVITÉS JOURNALIÈRES
 
+function reconcilePointagesCache(fetched: ContractuelPointage[], filter?: ContractuelFilter): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+    const existing: ContractuelPointage[] = raw ? JSON.parse(raw) : [];
+    const fetchedIds = new Set(fetched.map((p) => p.id));
+
+    // Retirer les anciennes copies de la même fenêtre filtrée pour refléter les suppressions distantes
+    const keptOtherDates = existing.filter((p) => {
+      if (fetchedIds.has(p.id)) return false;
+      if (filter?.date && p.date !== filter.date) return true;
+      if (filter?.startDate && filter?.endDate && (p.date < filter.startDate || p.date > filter.endDate)) return true;
+      if (!filter?.date && !filter?.startDate && !filter?.domaine_id && !filter?.ouvrier_id && !filter?.statut_validation && !filter?.serre_id) {
+        return false;
+      }
+      if (filter?.domaine_id && filter.domaine_id !== 'ALL' && p.domaine_id !== filter.domaine_id) return true;
+      if (filter?.ouvrier_id && p.ouvrier_id !== filter.ouvrier_id) return true;
+      return false;
+    });
+
+    const merged = [...keptOtherDates, ...fetched];
+    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(merged));
+  } catch {
+    // ignore
+  }
+}
+
 export async function getContractuelPointages(filter?: ContractuelFilter): Promise<{
   success: boolean;
   pointages: ContractuelPointage[];
   activites?: ContractuelActivite[];
+  fromCache?: boolean;
+  pendingCount?: number;
   error?: string;
 }> {
+  const pendingQueue = readPendingPointagesQueue();
   try {
     const headers = await getAuthHeaders();
     const params = new URLSearchParams();
@@ -366,23 +545,69 @@ export async function getContractuelPointages(filter?: ContractuelFilter): Promi
     if (filter?.domaine_id && filter.domaine_id !== 'ALL') params.set('domaineId', filter.domaine_id);
     if (filter?.serre_id && filter.serre_id !== 'ALL') params.set('serreId', filter.serre_id);
     if (filter?.ouvrier_id) params.set('ouvrierId', filter.ouvrier_id);
+    if (filter?.statut_validation && filter.statut_validation !== 'ALL') {
+      params.set('statutValidation', filter.statut_validation);
+    }
 
     const res = await fetch(`/api/contractuels/pointages?${params.toString()}`, { headers });
     const data = await res.json();
 
     if (res.ok && data.success && Array.isArray(data.pointages)) {
-      // Miroir local pour la date concernée
-      return { success: true, pointages: data.pointages, activites: data.activites || [] };
+      reconcilePointagesCache(data.pointages, filter);
+      markContractuelsSynced();
+      return {
+        success: true,
+        pointages: data.pointages,
+        activites: data.activites || [],
+        fromCache: false,
+        pendingCount: pendingQueue.length,
+      };
+    }
+
+    if (res.status >= 400 && res.status < 500) {
+      return {
+        success: false,
+        pointages: [],
+        error: data.error || 'Accès refusé aux pointages contractuels.',
+      };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des pointages contractuels.');
   } catch (err: any) {
-    console.warn('Fallback stockage local getContractuelPointages:', err.message);
+    if (!isNetworkUnavailable(err)) {
+      return {
+        success: false,
+        pointages: [],
+        error: err.message || 'Erreur serveur lors de la lecture des pointages contractuels.',
+      };
+    }
+    console.warn('Mode hors ligne - cache local getContractuelPointages:', err.message);
     const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
     let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
     if (filter?.date) listP = listP.filter((p) => p.date === filter.date);
+    if (filter?.startDate && filter?.endDate) {
+      listP = listP.filter((p) => p.date >= filter.startDate! && p.date <= filter.endDate!);
+    }
     if (filter?.domaine_id && filter.domaine_id !== 'ALL') listP = listP.filter((p) => p.domaine_id === filter.domaine_id);
-    return { success: true, pointages: listP };
+    if (filter?.ouvrier_id) listP = listP.filter((p) => p.ouvrier_id === filter.ouvrier_id);
+    if (filter?.serre_id && filter.serre_id !== 'ALL') {
+      listP = listP.filter(
+        (p) =>
+          p.serre_id === filter.serre_id ||
+          (Array.isArray(p.serres_ids) && p.serres_ids.includes(filter.serre_id!))
+      );
+    }
+    if (filter?.statut_validation && filter.statut_validation !== 'ALL') {
+      listP = listP.filter(
+        (p) => normalizeStatutValidation(p.statut_validation) === normalizeStatutValidation(filter.statut_validation)
+      );
+    }
+    return {
+      success: true,
+      pointages: listP,
+      fromCache: true,
+      pendingCount: pendingQueue.length,
+    };
   }
 }
 
@@ -394,12 +619,86 @@ export async function saveContractuelPointage(payload: {
   present: boolean;
   domaine_id?: string;
   montant_total_jour?: number;
+  tarif_initial?: number;
+  montant_propose?: number;
+  motif_modification?: string | null;
+  statut_validation?: StatutValidationContractuel;
   serre_id?: string | null;
   serres_ids?: string[];
   serres_noms?: string[];
   serres_texte?: string | null;
+  taches_ids?: string[];
+  taches_noms?: string[];
+  taches_texte?: string | null;
+  heure_debut?: string | null;
+  heure_fin?: string | null;
+  duree_heures?: number | null;
   activites?: Partial<ContractuelActivite>[];
-}): Promise<{ success: boolean; pointage?: ContractuelPointage; message?: string; error?: string }> {
+}): Promise<{
+  success: boolean;
+  pointage?: ContractuelPointage;
+  message?: string;
+  queuedOffline?: boolean;
+  error?: string;
+}> {
+  const queueOfflineDraft = () => {
+    const nowIso = new Date().toISOString();
+    const draftPayload = { ...payload, updated_at: nowIso };
+    enqueuePendingPointage(draftPayload);
+    try {
+      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+      let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
+      const existing = listP.find(
+        (p) => p.date === payload.date && p.ouvrier_id === payload.ouvrier_id
+      );
+      const draftPointage: ContractuelPointage = {
+        ...(existing || {}),
+        id: existing?.id || `cp_${payload.date}_${payload.ouvrier_id}`,
+        company_id: existing?.company_id || 'cie_lahcen_pointeur',
+        ouvrier_id: payload.ouvrier_id,
+        matricule: payload.matricule || existing?.matricule || '',
+        nom_complet: payload.nom_complet || existing?.nom_complet || '',
+        date: payload.date,
+        present: payload.present,
+        domaine_id: payload.domaine_id || existing?.domaine_id || 'dom_d2',
+        serre_id: payload.serre_id ?? existing?.serre_id ?? null,
+        serres_ids: payload.serres_ids || existing?.serres_ids || [],
+        serres_noms: payload.serres_noms || existing?.serres_noms || [],
+        serres_texte: payload.serres_texte ?? existing?.serres_texte ?? null,
+        taches_ids: payload.taches_ids || existing?.taches_ids || [],
+        taches_noms: payload.taches_noms || existing?.taches_noms || [],
+        taches_texte: payload.taches_texte ?? existing?.taches_texte ?? null,
+        heure_debut: payload.heure_debut ?? existing?.heure_debut ?? null,
+        heure_fin: payload.heure_fin ?? existing?.heure_fin ?? null,
+        duree_heures: payload.duree_heures ?? existing?.duree_heures ?? null,
+        tarif_initial: payload.tarif_initial ?? existing?.tarif_initial ?? 0,
+        montant_propose: payload.present ? (payload.montant_propose ?? payload.tarif_initial ?? 0) : 0,
+        statut_validation: payload.statut_validation || existing?.statut_validation || 'BROUILLON',
+        montant_total_jour: existing?.statut_validation === 'VALIDE' ? existing.montant_total_jour : 0,
+        created_at: existing?.created_at || nowIso,
+        updated_at: nowIso,
+      };
+      listP = listP.filter(
+        (p) => !(p.date === payload.date && p.ouvrier_id === payload.ouvrier_id)
+      );
+      listP.push(draftPointage);
+      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(listP));
+      return draftPointage;
+    } catch {
+      return undefined;
+    }
+  };
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    const draft = queueOfflineDraft();
+    return {
+      success: false,
+      queuedOffline: true,
+      pointage: draft,
+      error: 'Mode hors ligne : pointage mis en file d\'attente locale et sera synchronisé automatiquement dès le retour du réseau.',
+    };
+  }
+
   try {
     const headers = await getAuthHeaders();
     const res = await fetch('/api/contractuels/pointages', {
@@ -410,7 +709,20 @@ export async function saveContractuelPointage(payload: {
 
     const data = await res.json();
     if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Erreur enregistrement pointage contractuel.');
+      // NE JAMAIS masquer une erreur HTTP serveur (400/401/403/409/500) en file offline !
+      return {
+        success: false,
+        error: data.error || `Erreur serveur HTTP ${res.status} lors de l'enregistrement.`,
+      };
+    }
+
+    // Retirer de la file d'attente si précédemment en attente
+    const pending = readPendingPointagesQueue();
+    const cleanedPending = pending.filter(
+      (q) => !(q.ouvrier_id === payload.ouvrier_id && q.date === payload.date)
+    );
+    if (cleanedPending.length !== pending.length) {
+      writePendingPointagesQueue(cleanedPending);
     }
 
     // Miroir local
@@ -424,8 +736,191 @@ export async function saveContractuelPointage(payload: {
         listP.push(data.pointage);
       }
       localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(listP));
+      markContractuelsSynced();
     } catch {
       // ignore
+    }
+
+    return data;
+  } catch (err: any) {
+    if (isNetworkUnavailable(err)) {
+      const draft = queueOfflineDraft();
+      return {
+        success: false,
+        queuedOffline: true,
+        pointage: draft,
+        error: 'Connexion interrompue : pointage enregistré en file locale en attente de synchronisation.',
+      };
+    }
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
+export async function syncPendingContractuelPointages(): Promise<{
+  success: boolean;
+  syncedCount: number;
+  conflictCount: number;
+  remainingCount: number;
+  error?: string;
+}> {
+  const queue = readPendingPointagesQueue();
+  if (queue.length === 0) {
+    return { success: true, syncedCount: 0, conflictCount: 0, remainingCount: 0 };
+  }
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return {
+      success: false,
+      syncedCount: 0,
+      conflictCount: 0,
+      remainingCount: queue.length,
+      error: 'Hors connexion',
+    };
+  }
+
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch('/api/contractuels/sync', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pointages: queue }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return {
+        success: false,
+        syncedCount: 0,
+        conflictCount: 0,
+        remainingCount: queue.length,
+        error: data.error || `Erreur synchronisation (${res.status})`,
+      };
+    }
+
+    const results: any[] = Array.isArray(data.results) ? data.results : [];
+    const remaining: any[] = [];
+    let conflictCount = 0;
+
+    for (const qItem of queue) {
+      const r = results.find(
+        (resItem) =>
+          resItem.ouvrier_id === qItem.ouvrier_id &&
+          resItem.date === qItem.date
+      );
+      if (!r) {
+        remaining.push(qItem);
+      } else if (r.status === 'conflict_valide' || r.status === 'conflict_stale') {
+        conflictCount++;
+        // Ne pas renvoyer en boucle une donnée locale obsolète qui perd contre le serveur VALIDE/plus récent
+      } else if (r.status === 'error') {
+        remaining.push(qItem);
+      }
+    }
+
+    writePendingPointagesQueue(remaining);
+
+    if (Array.isArray(data.pointages) && data.pointages.length > 0) {
+      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+      const listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
+      const map = new Map<string, ContractuelPointage>(listP.map((p) => [p.id, p]));
+      data.pointages.forEach((p: ContractuelPointage) => map.set(p.id, p));
+      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(Array.from(map.values())));
+    }
+    markContractuelsSynced();
+
+    return {
+      success: true,
+      syncedCount: Number(data.syncedCount || 0),
+      conflictCount,
+      remainingCount: remaining.length,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      syncedCount: 0,
+      conflictCount: 0,
+      remainingCount: queue.length,
+      error: err.message || 'Erreur réseau lors de la synchronisation.',
+    };
+  }
+}
+
+export async function validateContractuelPointage(
+  id: string,
+  params: {
+    decision: 'VALIDE' | 'REFUSE';
+    montant_valide?: number;
+    motif?: string;
+  }
+): Promise<{ success: boolean; pointage?: ContractuelPointage; message?: string; error?: string }> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`/api/contractuels/pointages/${encodeURIComponent(id)}/validate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(params),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Erreur lors de la validation administrateur.');
+    }
+
+    try {
+      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+      let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
+      if (data.pointage) {
+        listP = listP.map((p) => (p.id === id ? data.pointage : p));
+        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(listP));
+      }
+      markContractuelsSynced();
+    } catch {
+      // ignore
+    }
+
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Erreur réseau.' };
+  }
+}
+
+export async function validateContractuelPointagesBatch(
+  items: Array<{
+    id: string;
+    decision: 'VALIDE' | 'REFUSE';
+    montant_valide?: number;
+    motif?: string;
+  }>
+): Promise<{
+  success: boolean;
+  count?: number;
+  pointages?: ContractuelPointage[];
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch('/api/contractuels/pointages/validate-batch', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ items }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Erreur validation en lot.');
+    }
+
+    if (Array.isArray(data.pointages)) {
+      try {
+        const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+        const listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
+        const map = new Map<string, ContractuelPointage>(listP.map((p) => [p.id, p]));
+        data.pointages.forEach((p: ContractuelPointage) => map.set(p.id, p));
+        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(Array.from(map.values())));
+        markContractuelsSynced();
+      } catch {
+        // ignore
+      }
     }
 
     return data;
@@ -482,176 +977,13 @@ export async function deleteContractuelActivite(
   }
 }
 
-// 3. EXPORT EXCEL DÉDIÉ (5 FEUILLES SHEETJS)
+// 3. EXPORT EXCEL DÉDIÉ (5 FEUILLES SHEETJS — MONTANTS OFFICIELS VALIDÉS UNIQUEMENT)
 export function exportContractuellesExcel(params: {
   pointages: ContractuelPointage[];
   allOuvriers: ContractuelOuvrier[];
   date?: string;
   filterDesc?: string;
 }) {
-  const { pointages, allOuvriers, date, filterDesc } = params;
-  const dateFormatted = date || new Date().toISOString().slice(0, 10);
-
-  // Tous les ouvriers actifs pour cette sélection
-  const totalOuvriers = allOuvriers.length;
-  const presentsCount = pointages.filter((p) => p.present).length;
-  const absentsCount = totalOuvriers - presentsCount;
-
-  // Extraire toutes les activités à plat
-  const allActivites: ContractuelActivite[] = [];
-  pointages.forEach((p) => {
-    if (p.present && p.activites && p.activites.length > 0) {
-      p.activites.forEach((a) => allActivites.push(a));
-    }
-  });
-
-  const montantTotalJourDH = pointages.reduce(
-    (sum, p) => sum + (Number(p.montant_total_jour) || 0),
-    0
-  );
-
-  const wb = XLSX.utils.book_new();
-
-  // -------------------------------------------------------------
-  // FEUILLE 1 : RÉCAPITULATIF
-  // -------------------------------------------------------------
-  const recapData = [
-    { 'Indicateur': 'Exploitation Agricole', 'Valeur': 'Lahcen Pointeur' },
-    { 'Indicateur': 'Module', 'Valeur': 'Gestion des Contractuelles' },
-    { 'Indicateur': 'Date d\'analyse', 'Valeur': dateFormatted },
-    { 'Indicateur': 'Période / Filtre', 'Valeur': filterDesc || 'Tous les domaines' },
-    { 'Indicateur': 'Total Ouvriers Contractuels', 'Valeur': totalOuvriers },
-    { 'Indicateur': 'Nombre de Présents', 'Valeur': presentsCount },
-    { 'Indicateur': 'Nombre d\'Absents', 'Valeur': absentsCount > 0 ? absentsCount : 0 },
-    { 'Indicateur': 'Nombre de Tâches Réalisées', 'Valeur': allActivites.length },
-    { 'Indicateur': 'Montant Total Journalier (DH)', 'Valeur': Math.round(montantTotalJourDH * 100) / 100 },
-  ];
-  const wsRecap = XLSX.utils.json_to_sheet(recapData);
-  XLSX.utils.book_append_sheet(wb, wsRecap, '1. Récapitulatif');
-
-  // -------------------------------------------------------------
-  // FEUILLE 2 : POINTAGE DÉTAILLÉ
-  // -------------------------------------------------------------
-  const detailPointageData = allOuvriers.map((ouvrier) => {
-    const ptg = pointages.find((p) => p.ouvrier_id === ouvrier.id);
-    const isPresent = ptg ? ptg.present : false;
-    const domNom = ptg?.domaine_id ? ptg.domaine_id.replace('dom_', '').toUpperCase() : ouvrier.domaine_id.replace('dom_', '').toUpperCase();
-    const serre = ptg?.serres_texte || ptg?.serre_id || ouvrier.serre_id || '—';
-    const nbTaches = ptg?.activites?.length || 0;
-    const montant = ptg?.montant_total_jour || 0;
-
-    return {
-      'Date': dateFormatted,
-      'Matricule': ouvrier.matricule,
-      'Nom de l\'Ouvrier': ouvrier.nom,
-      'Prénom': ouvrier.prenom,
-      'Nom Complet': ouvrier.nom_complet,
-      'Domaine': domNom,
-      'Serres': serre,
-      'Présence': isPresent ? 'Présent' : 'Absent',
-      'Nb Tâches': nbTaches,
-      'Mode Rémunération': ouvrier.mode_remuneration,
-      'Tarif Convenu (DH)': ouvrier.prix_convenu,
-      'Total Jour (DH)': montant,
-    };
-  });
-  const wsPointage = XLSX.utils.json_to_sheet(detailPointageData);
-  XLSX.utils.book_append_sheet(wb, wsPointage, '2. Pointage Détaillé');
-
-  // -------------------------------------------------------------
-  // FEUILLE 3 : DÉTAIL DES RÉMUNÉRATIONS
-  // -------------------------------------------------------------
-  const detailRemunerationsData = allActivites.map((act) => ({
-    'Date': act.date,
-    'Matricule': act.matricule,
-    'Ouvrier': act.nom_complet,
-    'Contrat': act.contrat_nom || '—',
-    'Domaine': act.domaine_id.replace('dom_', '').toUpperCase(),
-    'Serres Affectées': act.serres_texte || act.serre_nom || act.serre_id,
-    'Tâche Réalisée': act.tache_nom,
-    'Mode': act.mode_remuneration,
-    'Quantité / Durée': act.quantite,
-    'Unité': act.unite,
-    'Prix Unitaire (DH)': act.prix_unitaire,
-    'Montant Total (DH)': act.montant_total,
-    'Observation': act.observation || '',
-    'Saisi par': act.created_by_nom || 'Caporal',
-  }));
-
-  const wsRemun = XLSX.utils.json_to_sheet(
-    detailRemunerationsData.length > 0
-      ? detailRemunerationsData
-      : [{ 'Information': 'Aucune activité enregistrée pour cette sélection.' }]
-  );
-  XLSX.utils.book_append_sheet(wb, wsRemun, '3. Rémunérations');
-
-  // -------------------------------------------------------------
-  // FEUILLE 4 : RÉCAPITULATIF PAR SERRE
-  // -------------------------------------------------------------
-  const serreMap = new Map<string, { ouvriers: Set<string>; tachesCount: number; totalDH: number; domaine: string }>();
-  allActivites.forEach((act) => {
-    // Si l'activité a plusieurs serres, l'attribuer à chaque serre sélectionnée
-    const serreNames = (Array.isArray(act.serres_noms) && act.serres_noms.length > 0)
-      ? act.serres_noms
-      : [act.serre_nom || act.serre_id || 'Serre Non Définie'];
-
-    serreNames.forEach((sName) => {
-      if (!serreMap.has(sName)) {
-        serreMap.set(sName, {
-          ouvriers: new Set<string>(),
-          tachesCount: 0,
-          totalDH: 0,
-          domaine: act.domaine_id.replace('dom_', '').toUpperCase(),
-        });
-      }
-      const entry = serreMap.get(sName)!;
-      entry.ouvriers.add(act.ouvrier_id);
-      entry.tachesCount += 1;
-      // Note : répartition comptable par serre
-      entry.totalDH = Math.round((entry.totalDH + act.montant_total / serreNames.length) * 100) / 100;
-    });
-  });
-
-  const recapSerreData: any[] = [];
-  serreMap.forEach((val, serreName) => {
-    recapSerreData.push({
-      'Serre': serreName,
-      'Domaine': val.domaine,
-      'Nombre d\'Ouvriers Distincts': val.ouvriers.size,
-      'Nombre de Tâches': val.tachesCount,
-      'Total Rémunération Estimé (DH)': val.totalDH,
-    });
-  });
-
-  const wsSerre = XLSX.utils.json_to_sheet(
-    recapSerreData.length > 0 ? recapSerreData : [{ 'Information': 'Aucune serre affectée.' }]
-  );
-  XLSX.utils.book_append_sheet(wb, wsSerre, '4. Récapitulatif Serres');
-
-  // -------------------------------------------------------------
-  // FEUILLE 5 : HISTORIQUE PAR OUVRIER
-  // -------------------------------------------------------------
-  const histoWorkerData = allOuvriers.map((ouvrier) => {
-    const workerActs = allActivites.filter((a) => a.ouvrier_id === ouvrier.id);
-    const workerTotalDH = workerActs.reduce((sum, a) => sum + (Number(a.montant_total) || 0), 0);
-    const ptg = pointages.find((p) => p.ouvrier_id === ouvrier.id);
-    const isPresent = ptg ? ptg.present : false;
-
-    return {
-      'Matricule': ouvrier.matricule,
-      'Nom Complet': ouvrier.nom_complet,
-      'Téléphone': ouvrier.telephone || '—',
-      'Statut Jour': isPresent ? 'Présent' : 'Absent',
-      'Nombre Tâches Aujourd\'hui': workerActs.length,
-      'Mode Habituel': ouvrier.mode_remuneration,
-      'Tarif Convenu (DH)': ouvrier.prix_convenu,
-      'Total Rémunération Jour (DH)': Math.round(workerTotalDH * 100) / 100,
-    };
-  });
-  const wsWorker = XLSX.utils.json_to_sheet(histoWorkerData);
-  XLSX.utils.book_append_sheet(wb, wsWorker, '5. Historique Ouvrier');
-
-  // Téléchargement du fichier
-  const fileName = `contractuelles-lahcen-${dateFormatted}.xlsx`;
+  const { wb, fileName } = buildContractuellesWorkbook(params);
   XLSX.writeFile(wb, fileName);
 }

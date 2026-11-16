@@ -56,6 +56,7 @@ interface RecolteAdminDashboardProps {
   onDeleteSerre: (id: string) => { success: boolean; error?: string };
   onToggleSerreActif: (id: string) => void;
   onDeleteRecolte: (id: string) => { success: boolean; error?: string };
+  isReadOnly?: boolean;
 }
 
 export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
@@ -70,6 +71,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
   onDeleteSerre,
   onToggleSerreActif,
   onDeleteRecolte,
+  isReadOnly = false,
 }) => {
   // Mode de date : 'unique' (jour précis) ou 'periode' (du ... au ...)
   const [dateMode, setDateMode] = useState<'unique' | 'periode'>('unique');
@@ -467,6 +469,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
   // ------------------------- GESTION DES SERRES -------------------------
 
   const handleOpenAddSerre = () => {
+    if (isReadOnly) return;
     setEditingSerre(null);
     setSerreCodeInput(`S0${serres.length + 1}`);
     setSerreNomInput(`Serre ${serres.length + 1}`);
@@ -478,6 +481,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
   };
 
   const handleOpenEditSerre = (serre: Serre) => {
+    if (isReadOnly) return;
     setEditingSerre(serre);
     setSerreCodeInput(serre.code);
     setSerreNomInput(serre.nom);
@@ -488,6 +492,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
 
   const handleSaveSerreSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     setSerreError(null);
 
     const res = onSaveSerre({
@@ -508,6 +513,7 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
   };
 
   const handleDeleteSerreClick = (serre: Serre) => {
+    if (isReadOnly) return;
     if (window.confirm(`Supprimer la serre "${serre.nom}" (${serre.code}) ?`)) {
       onDeleteSerre(serre.id);
       setSerreSuccess(`Serre ${serre.nom} supprimée.`);
@@ -1012,22 +1018,24 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
                   <span className="font-mono font-black text-emerald-800 text-xs bg-emerald-50 px-2 py-0.5 rounded-lg border border-emerald-200">
                     {r.caisses} c.
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Supprimer la saisie de ${r.caisses} caisse(s) pour #${r.numero_ouvrier} ${r.nom_ouvrier} (${r.serre_nom}) ?`
-                        )
-                      ) {
-                        onDeleteRecolte(r.id);
-                      }
-                    }}
-                    className="p-1 text-slate-300 hover:text-red-600 rounded-md transition"
-                    title="Supprimer cette saisie"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Supprimer la saisie de ${r.caisses} caisse(s) pour #${r.numero_ouvrier} ${r.nom_ouvrier} (${r.serre_nom}) ?`
+                          )
+                        ) {
+                          onDeleteRecolte(r.id);
+                        }
+                      }}
+                      className="p-1 text-slate-300 hover:text-red-600 rounded-md transition"
+                      title="Supprimer cette saisie"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             ))
@@ -1046,14 +1054,16 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
                   : serres.filter((s) => (s.domaine_id || 'dom_d2') === configDomaineFilter).length
               }) :
             </h3>
-            <button
-              type="button"
-              onClick={handleOpenAddSerre}
-              className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-1.5 px-3 rounded-xl shadow-xs transition"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Ajouter une Serre</span>
-            </button>
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={handleOpenAddSerre}
+                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-1.5 px-3 rounded-xl shadow-xs transition"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Ajouter une Serre</span>
+              </button>
+            )}
           </div>
 
           <div className="flex flex-wrap gap-1.5">
@@ -1118,35 +1128,37 @@ export const RecolteAdminDashboard: React.FC<RecolteAdminDashboardProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onToggleSerreActif(s.id)}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-bold transition ${
-                      s.actif
-                        ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                        : 'bg-emerald-100 text-emerald-800'
-                    }`}
-                  >
-                    {s.actif ? 'Désactiver' : 'Activer'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEditSerre(s)}
-                    className="p-1.5 text-slate-400 hover:text-emerald-700 rounded-lg transition"
-                    title="Modifier"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteSerreClick(s)}
-                    className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition"
-                    title="Supprimer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                {!isReadOnly && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onToggleSerreActif(s.id)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold transition ${
+                        s.actif
+                          ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          : 'bg-emerald-100 text-emerald-800'
+                      }`}
+                    >
+                      {s.actif ? 'Désactiver' : 'Activer'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditSerre(s)}
+                      className="p-1.5 text-slate-400 hover:text-emerald-700 rounded-lg transition"
+                      title="Modifier"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSerreClick(s)}
+                      className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
               </div>
               );
             })}

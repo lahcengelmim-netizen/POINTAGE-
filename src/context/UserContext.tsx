@@ -5,6 +5,7 @@ import * as storage from '../services/storage';
 
 interface UserContextType {
   user: UserAccount | null;
+  isReadOnly: boolean;
   loading: boolean;
   login: (usernameOrEmail: string, code: string) => Promise<UserAccount>;
   loginWithBiometrics: (userId?: string) => Promise<UserAccount>;
@@ -12,6 +13,17 @@ interface UserContextType {
 }
 
 const UserContext = createContext<UserContextType | undefined>(undefined);
+
+function isLecteurIdentity(email: string, username?: string, role?: string): boolean {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanUser = (username || '').trim().toLowerCase();
+  return (
+    role === 'lecteur' ||
+    cleanEmail === 'mahdi@lecture.com' ||
+    cleanEmail.endsWith('@lecture.com') ||
+    cleanUser === 'mahdi'
+  );
+}
 
 export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<UserAccount | null>(null);
@@ -38,23 +50,33 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         const userEmail = (authUser?.email || '').toLowerCase();
-        const isTariq = userEmail === 'tariq@caporal.com' || profile.username === 'tariq';
+        const isLecteur = isLecteurIdentity(userEmail, profile.username, profile.role);
+        const isTariq = !isLecteur && (userEmail === 'tariq@caporal.com' || profile.username === 'tariq');
         const isContractuel =
-          profile.role === 'caporal_contractuelles' ||
-          profile.module_attribue === 'contractuelles' ||
-          isTariq;
+          !isLecteur &&
+          (profile.role === 'caporal_contractuelles' ||
+            profile.module_attribue === 'contractuelles' ||
+            isTariq);
 
-        const assignedModule = isContractuel ? 'contractuelles' : (profile.module_attribue || 'recolte');
-        const assignedRole = isContractuel
-          ? (profile.role === 'admin' ? 'admin' : 'caporal_contractuelles')
-          : (profile.role || 'caporal');
+        const assignedRole = isLecteur
+          ? 'lecteur'
+          : isContractuel
+            ? (profile.role === 'admin' ? 'admin' : 'caporal_contractuelles')
+            : (profile.role || 'caporal');
+        const assignedModule = isLecteur
+          ? 'all'
+          : isContractuel
+            ? 'contractuelles'
+            : (profile.module_attribue || (assignedRole === 'admin' ? 'all' : 'recolte'));
 
         const userAcc: UserAccount = {
           id: profile.id,
           username: profile.username || userEmail.split('@')[0] || 'user',
-          nom: profile.nom || (isTariq ? 'Tariq (Caporal Contractuelles)' : 'Utilisateur'),
+          nom: profile.nom || (isLecteur ? 'Mahdi (Lecture Seule)' : isTariq ? 'Tariq (Caporal Contractuelles)' : 'Utilisateur'),
           role: assignedRole as any,
           module_attribue: assignedModule as any,
+          domaines_autorises: Array.isArray(profile.domaines_autorises) ? profile.domaines_autorises : undefined,
+          serres_autorisees: Array.isArray(profile.serres_autorisees) ? profile.serres_autorisees : undefined,
           company_id: userCompId,
           actif: profile.actif !== false,
           createdAt: profile.created_at || new Date().toISOString(),
@@ -76,17 +98,34 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Si le profil n'existe pas encore dans public.profiles (premier login), le créer avec son UUID Supabase Auth
       if (authUser) {
         const userEmail = (authUser.email || '').toLowerCase();
-        const isTariq = userEmail === 'tariq@caporal.com';
-        const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
-        const role = isTariq
-          ? 'caporal_contractuelles'
-          : (authUser.user_metadata?.role || (isAdminEmail ? 'admin' : 'caporal'));
+        const isLecteur = isLecteurIdentity(
+          userEmail,
+          authUser.user_metadata?.username,
+          authUser.user_metadata?.role
+        );
+        const isTariq = !isLecteur && userEmail === 'tariq@caporal.com';
+        const isAdminEmail = !isLecteur && (userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin'));
+        const role = isLecteur
+          ? 'lecteur'
+          : isTariq
+            ? 'caporal_contractuelles'
+            : (authUser.user_metadata?.role || (isAdminEmail ? 'admin' : 'caporal'));
         const nom =
           authUser.user_metadata?.nom ||
-          (role === 'admin' ? 'Lahcen (Administrateur)' : isTariq ? 'Tariq (Caporal Contractuelles)' : 'Caporal (Récolte)');
+          (role === 'lecteur'
+            ? 'Mahdi (Lecture Seule)'
+            : role === 'admin'
+              ? 'Lahcen (Administrateur)'
+              : isTariq
+                ? 'Tariq (Caporal Contractuelles)'
+                : 'Caporal (Récolte)');
         const username =
           authUser.user_metadata?.username || userEmail.split('@')[0] || 'user';
-        const module_attribue = isTariq ? 'contractuelles' : (authUser.user_metadata?.module_attribue || 'recolte');
+        const module_attribue = isLecteur
+          ? 'all'
+          : isTariq
+            ? 'contractuelles'
+            : (authUser.user_metadata?.module_attribue || (role === 'admin' ? 'all' : 'recolte'));
 
         const newProfile = {
           id: userId,
@@ -109,8 +148,8 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
           id: finalProfile.id,
           username: finalProfile.username,
           nom: finalProfile.nom,
-          role: finalProfile.role as any,
-          module_attribue: (finalProfile as any).module_attribue || 'contractuelles',
+          role: (isLecteur ? 'lecteur' : finalProfile.role) as any,
+          module_attribue: (isLecteur ? 'all' : (finalProfile as any).module_attribue || 'contractuelles') as any,
           company_id: finalProfile.company_id || 'cie_lahcen_pointeur',
           actif: finalProfile.actif !== false,
           createdAt: new Date().toISOString(),
@@ -215,7 +254,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <UserContext.Provider value={{ user, loading, login, loginWithBiometrics, logout }}>
+    <UserContext.Provider value={{ user, isReadOnly: user?.role === 'lecteur', loading, login, loginWithBiometrics, logout }}>
       {children}
     </UserContext.Provider>
   );

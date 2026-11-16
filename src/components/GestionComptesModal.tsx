@@ -3,9 +3,12 @@
  * Accessible UNIQUEMENT par l'administrateur dans l'écran Gestion
  */
 
-import React, { useState } from 'react';
-import { X, Users, UserPlus, Trash2, Key, CheckCircle2, AlertCircle, ShieldAlert, Phone } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Users, UserPlus, Trash2, Key, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 import { UserAccount, UserRole } from '../types';
+import { supabase } from '../services/supabaseClient';
+import { getCurrentUser } from '../services/storage';
+import { useUser } from '../context/UserContext';
 
 interface GestionComptesModalProps {
   isOpen: boolean;
@@ -24,14 +27,38 @@ interface GestionComptesModalProps {
   onDeleteUser: (id: string) => { success: boolean; error?: string };
 }
 
+async function getModalAuthHeaders(): Promise<HeadersInit> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`;
+      return headers;
+    }
+  } catch {
+    // ignore
+  }
+  if (!import.meta.env.VITE_SUPABASE_URL) {
+    const u = getCurrentUser();
+    if (u?.role === 'lecteur') headers['Authorization'] = 'Bearer dev_lecteur_token';
+    else if (u?.role === 'caporal_contractuelles') headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
+    else if (u?.role === 'caporal') headers['Authorization'] = 'Bearer dev_caporal_token';
+    else headers['Authorization'] = 'Bearer dev_admin_token';
+  }
+  return headers;
+}
+
 export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
   isOpen,
   onClose,
-  users,
+  users: localUsers,
   onSaveUser,
   onToggleUserActif,
   onDeleteUser,
 }) => {
+  const { isReadOnly } = useUser();
+  const [remoteUsers, setRemoteUsers] = useState<UserAccount[] | null>(null);
+  const [loadingUsers, setLoadingUsers] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [username, setUsername] = useState('');
@@ -46,9 +73,34 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
   const [resetModalUser, setResetModalUser] = useState<UserAccount | null>(null);
   const [newPassword, setNewPassword] = useState('');
 
+  const loadRemoteUsers = async () => {
+    setLoadingUsers(true);
+    try {
+      const headers = await getModalAuthHeaders();
+      const res = await fetch('/api/users', { headers });
+      const data = await res.json();
+      if (res.ok && data.success && Array.isArray(data.users)) {
+        setRemoteUsers(data.users);
+      }
+    } catch {
+      // Fallback localUsers si hors ligne
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      loadRemoteUsers();
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
+  const users = remoteUsers && remoteUsers.length > 0 ? remoteUsers : localUsers;
+
   const handleOpenAddForm = () => {
+    if (isReadOnly) return;
     setEditingUserId(null);
     setUsername('');
     setNom('');
@@ -59,20 +111,46 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
     setShowForm(true);
   };
 
-  const handleOpenEdit = (user: UserAccount) => {
-    setEditingUserId(user.id);
-    setUsername(user.username);
-    setNom(user.nom);
-    setPassword('');
-    setTelephone(user.telephone || '');
-    setRole(user.role);
-    setError(null);
-    setShowForm(true);
-  };
-
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     setError(null);
+
+    if (!editingUserId) {
+      // Création serveur via /api/create-caporal (Auth + profiles)
+      try {
+        const headers = await getModalAuthHeaders();
+        const res = await fetch('/api/create-caporal', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            username: username.trim().toLowerCase(),
+            nom: nom.trim(),
+            password,
+            role,
+            telephone: telephone.trim() || undefined,
+            module_attribue:
+              role === 'caporal_contractuelles'
+                ? 'contractuelles'
+                : role === 'caporal'
+                ? 'recolte'
+                : 'all',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          setError(data.error || `Erreur serveur HTTP ${res.status}.`);
+          return;
+        }
+        await loadRemoteUsers();
+      } catch (err: any) {
+        // Fallback local uniquement si vraiment hors ligne
+        if (navigator.onLine) {
+          setError(err?.message || "Erreur réseau lors de la création.");
+          return;
+        }
+      }
+    }
 
     const res = await onSaveUser({
       id: editingUserId || undefined,
@@ -83,7 +161,7 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
       telephone,
     });
 
-    if (!res.success) {
+    if (!res.success && !remoteUsers) {
       setError(res.error || "Erreur lors de l'enregistrement.");
       return;
     }
@@ -95,24 +173,34 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
 
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!resetModalUser || !newPassword.trim()) return;
+    if (isReadOnly || !resetModalUser || !newPassword.trim()) return;
 
     if (newPassword.trim().length < 4) {
       setError('Le mot de passe doit comporter au moins 4 caractères.');
       return;
     }
 
-    const res = await onSaveUser({
-      id: resetModalUser.id,
-      username: resetModalUser.username,
-      nom: resetModalUser.nom,
-      role: resetModalUser.role,
-      password: newPassword.trim(),
-    });
-
-    if (!res.success) {
-      setError(res.error || 'Erreur lors de la réinitialisation.');
-      return;
+    try {
+      const headers = await getModalAuthHeaders();
+      const apiRes = await fetch(`/api/users/${encodeURIComponent(resetModalUser.id)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ password: newPassword.trim() }),
+      });
+      const apiData = await apiRes.json();
+      if (!apiRes.ok || !apiData.success) {
+        setError(apiData.error || 'Erreur serveur lors de la mise à jour.');
+        return;
+      }
+      await loadRemoteUsers();
+    } catch {
+      await onSaveUser({
+        id: resetModalUser.id,
+        username: resetModalUser.username,
+        nom: resetModalUser.nom,
+        role: resetModalUser.role,
+        password: newPassword.trim(),
+      });
     }
 
     setSuccess(`Mot de passe réinitialisé pour ${resetModalUser.nom} !`);
@@ -121,12 +209,33 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
     setTimeout(() => setSuccess(null), 3500);
   };
 
+  const handleToggle = async (user: UserAccount) => {
+    if (isReadOnly) return;
+    try {
+      const headers = await getModalAuthHeaders();
+      const apiRes = await fetch(`/api/users/${encodeURIComponent(user.id)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ actif: !user.actif }),
+      });
+      const apiData = await apiRes.json();
+      if (apiRes.ok && apiData.success) {
+        await loadRemoteUsers();
+        return;
+      }
+      setError(apiData.error || 'Erreur lors de la mise à jour du statut.');
+    } catch {
+      onToggleUserActif(user.id);
+    }
+  };
+
   const handleDelete = (user: UserAccount) => {
+    if (isReadOnly) return;
     if (user.id === 'usr_admin') {
       alert('Impossible de supprimer le compte administrateur principal.');
       return;
     }
-    if (window.confirm(`Supprimer définitivement le compte de ${user.nom} (${user.username}) ?`)) {
+    if (window.confirm(`Supprimer définitivement le compte local de ${user.nom} (${user.username}) ?`)) {
       const res = onDeleteUser(user.id);
       if (!res.success) {
         alert(res.error || 'Erreur lors de la suppression.');
@@ -135,6 +244,13 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
         setTimeout(() => setSuccess(null), 3000);
       }
     }
+  };
+
+  const getRoleBadge = (r: UserRole) => {
+    if (r === 'admin') return { label: 'Admin', icon: '👑', bg: 'bg-amber-100 text-amber-900', iconBg: 'bg-amber-100 text-amber-800' };
+    if (r === 'lecteur') return { label: 'Lecteur', icon: '👁️', bg: 'bg-sky-100 text-sky-900', iconBg: 'bg-sky-100 text-sky-800' };
+    if (r === 'caporal_contractuelles') return { label: 'Cap. Contract.', icon: '📋', bg: 'bg-indigo-100 text-indigo-900', iconBg: 'bg-indigo-100 text-indigo-800' };
+    return { label: 'Caporal', icon: '🌾', bg: 'bg-emerald-100 text-emerald-900', iconBg: 'bg-emerald-100 text-emerald-800' };
   };
 
   return (
@@ -151,12 +267,22 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
               <p className="text-[11px] text-slate-400">Rôles, identifiants et permissions</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white p-1 rounded-full transition"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={loadRemoteUsers}
+              className="text-slate-400 hover:text-white p-1.5 rounded-full transition"
+              title="Actualiser depuis Supabase"
+            >
+              <RefreshCw className={`w-4 h-4 ${loadingUsers ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={onClose}
+              className="text-slate-400 hover:text-white p-1 rounded-full transition"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Corps défilable */}
@@ -178,28 +304,25 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
           {/* Règle de sécurité & permissions */}
           <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-[11px] text-emerald-900 space-y-1">
             <span className="font-black text-emerald-950 block">Règles d'accès :</span>
-            <p>
-              • <strong>Administrateur :</strong> Accès total (Pointage, Tâches, Absences, Récolte, Gazoil, WhatsApp, Gestion).
-            </p>
-            <p>
-              • <strong>Caporal :</strong> Accès <em>strictement limité</em> au module de Récolte et à la synthèse de ses caisses. Aucun accès aux paramètres, aux ouvriers, au pointage du matin ni aux données sensibles.
-            </p>
+            <p>• <strong>Administrateur :</strong> Accès total.</p>
+            <p>• <strong>Caporal Récolte / Contractuelles :</strong> Accès terrain limité à son module.</p>
+            <p>• <strong>Lecteur :</strong> Consultation complète en lecture seule (aucune écriture).</p>
           </div>
 
           {/* Bouton Ajouter */}
-          {!showForm && (
+          {!showForm && !isReadOnly && (
             <button
               type="button"
               onClick={handleOpenAddForm}
               className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-2.5 rounded-xl transition shadow-xs active:scale-98"
             >
               <UserPlus className="w-4 h-4" />
-              <span>Créer un nouveau compte Caporal</span>
+              <span>Créer un nouveau compte</span>
             </button>
           )}
 
           {/* Formulaire de création / édition */}
-          {showForm && (
+          {showForm && !isReadOnly && (
             <form onSubmit={handleSave} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
               <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                 <h4 className="font-black text-slate-900 text-xs">
@@ -217,13 +340,13 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                    Identifiant de connexion :
+                    Identifiant / Email :
                   </label>
                   <input
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder="ex: caporal_brahim"
+                    placeholder="ex: mahdi@lecture.com"
                     required
                     autoCapitalize="none"
                     className="w-full bg-white border border-slate-300 rounded-xl p-2 font-bold text-slate-800 outline-none focus:border-emerald-600 text-xs"
@@ -238,7 +361,7 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
                     type="text"
                     value={nom}
                     onChange={(e) => setNom(e.target.value)}
-                    placeholder="ex: Brahim"
+                    placeholder="ex: Mahdi"
                     required
                     className="w-full bg-white border border-slate-300 rounded-xl p-2 font-bold text-slate-800 outline-none focus:border-emerald-600 text-xs"
                   />
@@ -248,7 +371,7 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                    {editingUserId ? "Nouveau mot de passe (laisser vide si inchangé) :" : "Mot de passe :"}
+                    {editingUserId ? "Nouveau mot de passe (optionnel) :" : "Mot de passe :"}
                   </label>
                   <input
                     type="password"
@@ -271,6 +394,8 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
                     className="w-full bg-white border border-slate-300 rounded-xl p-2 font-bold text-slate-800 outline-none focus:border-emerald-600 text-xs"
                   >
                     <option value="caporal">🌾 Caporal (Module Récolte seul)</option>
+                    <option value="caporal_contractuelles">📋 Caporal Contractuelles</option>
+                    <option value="lecteur">👁️ Lecteur (Lecture seule)</option>
                     <option value="admin">👑 Administrateur (Accès complet)</option>
                   </select>
                 </div>
@@ -314,36 +439,26 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
             </h4>
 
             {users.map((u) => {
-              const isAdmin = u.role === 'admin';
+              const badge = getRoleBadge(u.role);
               return (
                 <div
                   key={u.id}
                   className={`p-3 rounded-2xl border transition ${
-                    u.actif ? 'bg-white border-slate-200' : 'bg-slate-50 border-slate-200 opacity-60'
+                    u.actif !== false ? 'bg-white border-slate-200' : 'bg-slate-50 border-slate-200 opacity-60'
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2.5">
-                      <div
-                        className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm ${
-                          isAdmin ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
-                        }`}
-                      >
-                        {isAdmin ? '👑' : '🌾'}
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm ${badge.iconBg}`}>
+                        {badge.icon}
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="font-black text-slate-900 text-xs">{u.nom}</span>
-                          <span
-                            className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${
-                              isAdmin
-                                ? 'bg-amber-100 text-amber-900'
-                                : 'bg-emerald-100 text-emerald-900'
-                            }`}
-                          >
-                            {isAdmin ? 'Admin' : 'Caporal'}
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${badge.bg}`}>
+                            {badge.label}
                           </span>
-                          {!u.actif && (
+                          {u.actif === false && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-red-100 text-red-700">
                               Désactivé
                             </span>
@@ -356,49 +471,48 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1">
-                      {/* Bouton Réinitialiser mot de passe */}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResetModalUser(u);
-                          setNewPassword('');
-                          setError(null);
-                        }}
-                        title="Changer le mot de passe"
-                        className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-slate-100 rounded-lg transition"
-                      >
-                        <Key className="w-4 h-4" />
-                      </button>
-
-                      {/* Bouton Activer / Désactiver */}
-                      {u.id !== 'usr_admin' && (
+                    {!isReadOnly && (
+                      <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => onToggleUserActif(u.id)}
-                          title={u.actif ? 'Désactiver le compte' : 'Activer le compte'}
-                          className={`px-2 py-1 rounded-lg text-[10px] font-bold transition ${
-                            u.actif
-                              ? 'bg-slate-100 text-slate-600 hover:bg-amber-100 hover:text-amber-800'
-                              : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                          }`}
+                          onClick={() => {
+                            setResetModalUser(u);
+                            setNewPassword('');
+                            setError(null);
+                          }}
+                          title="Changer le mot de passe"
+                          className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-slate-100 rounded-lg transition"
                         >
-                          {u.actif ? 'Désactiver' : 'Activer'}
+                          <Key className="w-4 h-4" />
                         </button>
-                      )}
 
-                      {/* Bouton Supprimer */}
-                      {u.id !== 'usr_admin' && (
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(u)}
-                          title="Supprimer définitivement"
-                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
+                        {u.id !== 'usr_admin' && u.role !== 'admin' && (
+                          <button
+                            type="button"
+                            onClick={() => handleToggle(u)}
+                            title={u.actif !== false ? 'Désactiver le compte' : 'Activer le compte'}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition ${
+                              u.actif !== false
+                                ? 'bg-slate-100 text-slate-600 hover:bg-amber-100 hover:text-amber-800'
+                                : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                            }`}
+                          >
+                            {u.actif !== false ? 'Désactiver' : 'Activer'}
+                          </button>
+                        )}
+
+                        {u.id !== 'usr_admin' && u.role !== 'admin' && (
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(u)}
+                            title="Supprimer localement"
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -407,7 +521,7 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
         </div>
 
         {/* Modale de réinitialisation de mot de passe */}
-        {resetModalUser && (
+        {resetModalUser && !isReadOnly && (
           <div className="fixed inset-0 z-60 bg-black/70 flex items-center justify-center p-4">
             <div className="bg-white rounded-3xl max-w-xs w-full p-4 shadow-2xl space-y-3 border border-slate-200 animate-in fade-in">
               <div className="flex items-center gap-2 text-slate-900 font-black text-xs">
@@ -449,3 +563,4 @@ export const GestionComptesModal: React.FC<GestionComptesModalProps> = ({
     </div>
   );
 };
+

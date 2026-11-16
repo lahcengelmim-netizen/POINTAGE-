@@ -36,10 +36,12 @@ import {
   importContractuelContrats,
   deleteContractuelContrat,
 } from '../../services/contractuelService';
+import { subscribeContractuelsRealtime } from '../../services/supabaseSync';
 
 interface ContractuelContratManagementProps {
   domaines: Domaine[];
   currentUser: UserAccount;
+  isReadOnly?: boolean;
 }
 
 interface ParsedRow {
@@ -58,7 +60,9 @@ interface ParsedRow {
 export const ContractuelContratManagement: React.FC<ContractuelContratManagementProps> = ({
   domaines,
   currentUser,
+  isReadOnly = false,
 }) => {
+  const effectiveReadOnly = isReadOnly || currentUser.role === 'lecteur';
   const [contrats, setContrats] = useState<ContractuelContrat[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -93,11 +97,48 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    let mounted = true;
+    const companyId = currentUser.company_id || 'cie_lahcen_pointeur';
     loadContrats();
-  }, []);
 
-  async function loadContrats() {
-    setLoading(true);
+    const handleRefresh = () => {
+      if (mounted) loadContrats(true);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && mounted) loadContrats(true);
+    };
+
+    window.addEventListener('online', handleRefresh);
+    window.addEventListener('focus', handleRefresh);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribeRealtime = subscribeContractuelsRealtime(companyId, () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (mounted) loadContrats(true);
+      }, 600);
+    });
+
+    const intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine && mounted) {
+        loadContrats(true);
+      }
+    }, 20000);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener('online', handleRefresh);
+      window.removeEventListener('focus', handleRefresh);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      unsubscribeRealtime();
+      clearInterval(intervalId);
+    };
+  }, [currentUser.company_id]);
+
+  async function loadContrats(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const res = await getContractuelContrats();
       if (res.success) {
@@ -106,7 +147,7 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
     } catch (err) {
       console.error('Erreur chargement contrats:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -139,6 +180,7 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
 
   // ACTION : Ouvrir création manuelle
   const handleOpenCreate = () => {
+    if (effectiveReadOnly) return;
     setEditingContrat({
       designation: '',
       prix_unitaire: 120,
@@ -153,6 +195,7 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
 
   // ACTION : Ouvrir modification manuelle
   const handleOpenEdit = (c: ContractuelContrat) => {
+    if (effectiveReadOnly) return;
     setEditingContrat({ ...c });
     setIsModalOpen(true);
   };
@@ -160,6 +203,7 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
   // ACTION : Sauvegarde manuelle
   const handleSaveManual = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (effectiveReadOnly) return;
     if (!editingContrat || !editingContrat.designation?.trim()) {
       alert('La désignation du contrat est obligatoire.');
       return;
@@ -198,6 +242,7 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
 
   // ACTION : Toggle Actif/Inactif
   const handleToggleActif = async (c: ContractuelContrat) => {
+    if (effectiveReadOnly) return;
     const updated = { ...c, actif: !c.actif };
     try {
       const res = await saveContractuelContrat(updated);
@@ -211,6 +256,7 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
 
   // ACTION : Supprimer un contrat
   const handleDeleteContrat = async (c: ContractuelContrat) => {
+    if (effectiveReadOnly) return;
     if (!confirm(`Supprimer définitivement le contrat "${c.designation}" (${c.prix_unitaire} DH) ?`)) {
       return;
     }
@@ -481,28 +527,30 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
           </div>
 
           {/* Boutons d'action : Importer Excel & Nouveau contrat */}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setIsImportModalOpen(true);
-                setImportStep('upload');
-              }}
-              className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Importer Excel / CSV</span>
-            </button>
+          {!effectiveReadOnly && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsImportModalOpen(true);
+                  setImportStep('upload');
+                }}
+                className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Importer Excel / CSV</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={handleOpenCreate}
-              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Nouveau contrat</span>
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={handleOpenCreate}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-xs transition active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Nouveau contrat</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* 2. STATS RAPIDES DU CATALOGUE */}
@@ -563,27 +611,29 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
           <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
             Importez votre fichier Excel (.xlsx ou CSV) avec vos prix convenus, ou créez un premier contrat manuellement.
           </p>
-          <div className="flex items-center justify-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={() => {
-                setIsImportModalOpen(true);
-                setImportStep('upload');
-              }}
-              className="inline-flex items-center gap-1 bg-emerald-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-xs"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              <span>Importer Excel</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleOpenCreate}
-              className="inline-flex items-center gap-1 bg-slate-100 text-slate-700 hover:bg-slate-200 font-bold text-xs px-3.5 py-2 rounded-xl"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Créer manuellement</span>
-            </button>
-          </div>
+          {!effectiveReadOnly && (
+            <div className="flex items-center justify-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsImportModalOpen(true);
+                  setImportStep('upload');
+                }}
+                className="inline-flex items-center gap-1 bg-emerald-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-xs"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Importer Excel</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenCreate}
+                className="inline-flex items-center gap-1 bg-slate-100 text-slate-700 hover:bg-slate-200 font-bold text-xs px-3.5 py-2 rounded-xl"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Créer manuellement</span>
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -615,36 +665,38 @@ export const ContractuelContratManagement: React.FC<ContractuelContratManagement
                   )}
                 </div>
 
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEdit(contrat)}
-                    className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-slate-100 rounded-lg transition"
-                    title="Modifier"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleToggleActif(contrat)}
-                    className="p-1.5 text-slate-500 hover:text-amber-700 hover:bg-slate-100 rounded-lg transition"
-                    title={contrat.actif ? 'Désactiver' : 'Activer'}
-                  >
-                    {contrat.actif ? (
-                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
-                    ) : (
-                      <XCircle className="w-3.5 h-3.5 text-rose-500" />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteContrat(contrat)}
-                    className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-                    title="Supprimer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                {!effectiveReadOnly && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEdit(contrat)}
+                      className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-slate-100 rounded-lg transition"
+                      title="Modifier"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleActif(contrat)}
+                      className="p-1.5 text-slate-500 hover:text-amber-700 hover:bg-slate-100 rounded-lg transition"
+                      title={contrat.actif ? 'Désactiver' : 'Activer'}
+                    >
+                      {contrat.actif ? (
+                        <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5 text-rose-500" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteContrat(contrat)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Prix de référence & Unité */}

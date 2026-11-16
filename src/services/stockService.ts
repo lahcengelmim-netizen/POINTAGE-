@@ -8,6 +8,7 @@
 
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
+import { getCurrentUser } from './storage';
 import {
   StockProduitSynthese,
   StockKPIs,
@@ -40,8 +41,19 @@ async function getAuthHeaders(): Promise<HeadersInit> {
     // ignore
   }
 
-  // Fallback dev local
-  headers['Authorization'] = 'Bearer dev_admin_token';
+  // Fallback dev local uniquement si Supabase n'est pas configuré
+  if (!import.meta.env.VITE_SUPABASE_URL) {
+    const user = getCurrentUser();
+    if (user?.role === 'lecteur') {
+      headers['Authorization'] = 'Bearer dev_lecteur_token';
+    } else if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') {
+      headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
+    } else if (user?.role === 'caporal') {
+      headers['Authorization'] = 'Bearer dev_caporal_token';
+    } else {
+      headers['Authorization'] = 'Bearer dev_admin_token';
+    }
+  }
   return headers;
 }
 

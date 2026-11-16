@@ -18,9 +18,23 @@ async function getAuthHeaders(): Promise<HeadersInit> {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       headers['Authorization'] = `Bearer ${session.access_token}`;
+      return headers;
     }
   } catch {
-    // Aucune session active : le serveur rejettera avec HTTP 401
+    // ignore
+  }
+
+  if (!import.meta.env.VITE_SUPABASE_URL) {
+    const user = storage.getCurrentUser();
+    if (user?.role === 'lecteur') {
+      headers['Authorization'] = 'Bearer dev_lecteur_token';
+    } else if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') {
+      headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
+    } else if (user?.role === 'caporal') {
+      headers['Authorization'] = 'Bearer dev_caporal_token';
+    } else {
+      headers['Authorization'] = 'Bearer dev_admin_token';
+    }
   }
 
   return headers;

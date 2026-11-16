@@ -12,6 +12,15 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
+import {
+  appendHistorique,
+  buildHistoriqueEntry,
+  computeWorkDurationHours,
+  getOfficialPointageMontant,
+  isTarifModifie,
+  normalizeStatutValidation,
+  roundAmount,
+} from './src/utils/contractuelWorkflow';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +28,55 @@ const __dirname = path.dirname(__filename);
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Strict : ne jamais utiliser la clé anon comme service role
+const isSupabaseConfigured = Boolean(supabaseUrl && (supabaseAnonKey || serviceRoleKey));
+
+function isDevTokenBypassAllowed(): boolean {
+  return !isSupabaseConfigured && process.env.NODE_ENV !== 'production';
+}
+
+type AppUserRole = 'admin' | 'caporal' | 'caporal_contractuelles' | 'lecteur';
+
+function resolveAuthRole(
+  profileRole?: string | null,
+  email?: string | null,
+  username?: string | null,
+  userMetadata?: any
+): AppUserRole {
+  const emailLower = (email || '').toLowerCase();
+  const usernameLower = (username || '').toLowerCase();
+  if (
+    profileRole === 'lecteur' ||
+    userMetadata?.role === 'lecteur' ||
+    emailLower === 'mahdi@lecture.com' ||
+    emailLower.endsWith('@lecture.com') ||
+    usernameLower === 'mahdi'
+  ) {
+    return 'lecteur';
+  }
+  if (profileRole === 'admin' || emailLower === 'lahcengelmim@gmail.com' || emailLower.startsWith('admin')) {
+    return 'admin';
+  }
+  if (
+    profileRole === 'caporal_contractuelles' ||
+    userMetadata?.module_attribue === 'contractuelles' ||
+    emailLower === 'tariq@caporal.com' ||
+    usernameLower === 'tariq'
+  ) {
+    return 'caporal_contractuelles';
+  }
+  return 'caporal';
+}
+
+function requireWritePermission(role: string | undefined, res: Response): boolean {
+  if (role === 'lecteur') {
+    res.status(403).json({
+      success: false,
+      error: 'Action interdite : compte en lecture seule (lecteur).',
+    });
+    return false;
+  }
+  return true;
+}
 
 // Instance admin réservée aux opérations serveur privilégiées (si la clé secrète est configurée dans Cloud Run)
 const supabaseAdmin = supabaseUrl && serviceRoleKey ? createClient(supabaseUrl, serviceRoleKey) : null;
@@ -64,7 +122,7 @@ interface ServerDB {
     id: string;
     username: string;
     nom: string;
-    role: 'admin' | 'caporal' | 'caporal_contractuelles';
+    role: AppUserRole;
     module_attribue?: 'recolte' | 'contractuelles' | 'all';
     domaines_autorises?: string[];
     serres_autorisees?: string[];
@@ -236,6 +294,26 @@ interface ServerDB {
     serres_ids?: string[];
     serres_noms?: string[];
     serres_texte?: string | null;
+    taches_ids?: string[];
+    taches_noms?: string[];
+    taches_texte?: string | null;
+    heure_debut?: string | null;
+    heure_fin?: string | null;
+    duree_heures?: number | null;
+    tarif_initial?: number;
+    montant_propose?: number;
+    montant_valide?: number | null;
+    tarif_modifie?: boolean;
+    motif_modification?: string | null;
+    statut_validation?: 'BROUILLON' | 'SOUMIS' | 'VALIDE' | 'REFUSE';
+    submitted_by_id?: string | null;
+    submitted_by_nom?: string | null;
+    submitted_at?: string | null;
+    validated_by_id?: string | null;
+    validated_by_nom?: string | null;
+    validated_at?: string | null;
+    motif_refus?: string | null;
+    historique_validations?: any[];
     montant_total_jour: number;
     created_by_id: string;
     created_by_nom: string;
@@ -260,6 +338,13 @@ interface ServerDB {
     serres_ids?: string[];
     serres_noms?: string[];
     serres_texte?: string | null;
+    heure_debut?: string | null;
+    heure_fin?: string | null;
+    duree_heures?: number | null;
+    tarif_initial?: number;
+    montant_propose?: number;
+    montant_valide?: number | null;
+    statut_validation?: 'BROUILLON' | 'SOUMIS' | 'VALIDE' | 'REFUSE';
     mode_remuneration: 'JOUR' | 'TACHE' | 'UNITE' | 'HEURE';
     quantite: number;
     unite: string;
@@ -271,6 +356,8 @@ interface ServerDB {
     created_at: string;
     updated_at?: string;
   }>;
+  contractuels_validation_logs?: Array<any>;
+  taches?: Array<any>;
 }
 
 const DEFAULT_DB: ServerDB = {
@@ -350,6 +437,8 @@ const DEFAULT_DB: ServerDB = {
   contractuels_ouvriers: [],
   contractuels_pointages: [],
   contractuels_activites: [],
+  contractuels_validation_logs: [],
+  taches: [],
   companies: [
     {
       id: 'cie_lahcen_pointeur',
@@ -462,24 +551,32 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, error: 'Action interdite : Admin requis.' });
     }
 
-    const { username, nom, password, module_attribue, domaines_autorises, serres_autorisees } = req.body;
+    const { username, nom, password, module_attribue, domaines_autorises, serres_autorisees, role } = req.body;
 
     // Validation simple
     if (!username || !nom || !password) {
       return res.status(400).json({ success: false, error: 'Données incomplètes.' });
     }
 
-    const assignedModule = module_attribue === 'contractuelles' ? 'contractuelles' : 'recolte';
-    const assignedRole = assignedModule === 'contractuelles' ? 'caporal_contractuelles' : 'caporal';
+    const isLecteurRequest = role === 'lecteur';
+    const assignedModule: 'recolte' | 'contractuelles' | 'all' = isLecteurRequest
+      ? 'all'
+      : (module_attribue === 'contractuelles' ? 'contractuelles' : 'recolte');
+    const assignedRole: AppUserRole = isLecteurRequest
+      ? 'lecteur'
+      : (assignedModule === 'contractuelles' ? 'caporal_contractuelles' : 'caporal');
 
     // 3. Création utilisateur Auth (société de l'admin)
-    const email = `${username.toLowerCase()}@agripointage.local`;
+    const rawUser = String(username).trim().toLowerCase();
+    const email = rawUser.includes('@')
+      ? rawUser
+      : `${rawUser}@${isLecteurRequest ? 'lecture.com' : 'agripointage.local'}`;
     const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
       user_metadata: {
-        username,
+        username: rawUser.split('@')[0] || rawUser,
         nom,
         role: assignedRole,
         module_attribue: assignedModule,
@@ -498,7 +595,7 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
     // 4. Création profile dans public
     const profilePayload: any = {
       id: authData.user.id,
-      username,
+      username: rawUser.split('@')[0] || rawUser,
       nom,
       role: assignedRole,
       company_id: adminProfile.company_id,
@@ -519,7 +616,7 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
         .from('profiles')
         .insert({
           id: authData.user.id,
-          username,
+          username: rawUser.split('@')[0] || rawUser,
           nom,
           role: assignedRole,
           company_id: adminProfile.company_id,
@@ -533,25 +630,7 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
       }
     }
 
-    // Persistance locale
-    const db = readDB();
-    if (!db.users) db.users = [];
-    db.users.push({
-      id: authData.user.id,
-      username,
-      nom,
-      role: assignedRole,
-      module_attribue: assignedModule,
-      domaines_autorises: domaines_autorises || [],
-      serres_autorisees: serres_autorisees || [],
-      passwordHash: '',
-      salt: '',
-      actif: true,
-      createdAt: new Date().toISOString(),
-    });
-    writeDB(db);
-
-    res.json({ success: true, user: authData.user });
+    res.json({ success: true, user: authData.user, profile: profilePayload });
   } catch (err: any) {
     console.error('API Error /api/create-caporal (Unexpected):', err);
     res.status(500).json({ success: false, error: 'Erreur interne: ' + err.message });
@@ -594,12 +673,112 @@ app.get('/api/debug-config', async (req: Request, res: Response) => {
 });
 
 
-// Synchronisation multi-appareils (Caporal <-> Admin)
-app.post('/api/recolte/sync', (req: Request, res: Response) => {
-  try {
-    const { companyId, pendingEntries } = req.body;
-    const db = readDB();
+// Synchronisation multi-appareils Récolte (Caporal <-> Admin <-> Supabase)
+app.post('/api/recolte/sync', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
 
+  try {
+    const { pendingEntries, deletedIds } = req.body;
+    const companyId = auth.user.company_id;
+    const hasWritePayload =
+      (Array.isArray(pendingEntries) && pendingEntries.length > 0) ||
+      (Array.isArray(deletedIds) && deletedIds.length > 0);
+
+    if (hasWritePayload && !requireWritePermission(auth.user.role, res)) {
+      return;
+    }
+
+    if (isSupabaseConfigured) {
+      const actionClient = supabaseAdmin || auth.supabaseClient;
+      let syncedCount = 0;
+
+      if (Array.isArray(pendingEntries) && pendingEntries.length > 0) {
+        const upserts: any[] = [];
+        for (const clientItem of pendingEntries) {
+          if (!clientItem?.id) continue;
+          // Ne jamais écraser un enregistrement serveur plus récent par un cache client ancien
+          const { data: existingRow, error: lookupErr } = await actionClient
+            .from('recolte_entries')
+            .select('id, updated_at, created_at')
+            .eq('id', String(clientItem.id))
+            .eq('company_id', companyId)
+            .maybeSingle();
+
+          if (lookupErr) {
+            throw new Error('Erreur lecture récolte Supabase: ' + lookupErr.message);
+          }
+
+          if (existingRow) {
+            const serverTs = existingRow.updated_at || existingRow.created_at || '';
+            const clientTs = clientItem.updated_at || clientItem.created_at || '';
+            if (serverTs && (!clientTs || serverTs > clientTs)) {
+              continue;
+            }
+          }
+
+          upserts.push({
+            id: String(clientItem.id),
+            company_id: companyId,
+            date: String(clientItem.date).slice(0, 10),
+            serre_id: String(clientItem.serre_id),
+            serre_nom: String(clientItem.serre_nom || ''),
+            ouvrier_id: clientItem.ouvrier_id ? String(clientItem.ouvrier_id) : null,
+            numero_ouvrier: Number(clientItem.numero_ouvrier),
+            nom_ouvrier: String(clientItem.nom_ouvrier || ''),
+            caisses: Number(clientItem.caisses),
+            notes: clientItem.notes ? String(clientItem.notes).trim() : null,
+            type_operation: clientItem.type_operation || 'RECOLTE',
+            domaine_id: clientItem.domaine_id ? String(clientItem.domaine_id) : 'dom_d2',
+            created_by_id: resolveValidProfileUuid(clientItem.created_by_id) || resolveValidProfileUuid(auth.user.id),
+            created_by_nom: String(clientItem.created_by_nom || auth.user.nom || 'Utilisateur'),
+            created_at: clientItem.created_at || new Date().toISOString(),
+            updated_at: clientItem.updated_at || new Date().toISOString(),
+            updated_by_id: resolveValidProfileUuid(clientItem.updated_by_id) || resolveValidProfileUuid(auth.user.id),
+          });
+        }
+
+        if (upserts.length > 0) {
+          const { error: upsertErr } = await actionClient
+            .from('recolte_entries')
+            .upsert(upserts, { onConflict: 'id' });
+          if (upsertErr) {
+            throw new Error('Erreur synchronisation récoltes Supabase: ' + upsertErr.message);
+          }
+          syncedCount = upserts.length;
+        }
+      }
+
+      if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+        const cleanIds = deletedIds.map(String).filter(Boolean);
+        if (cleanIds.length > 0) {
+          const { error: delErr } = await actionClient
+            .from('recolte_entries')
+            .delete()
+            .eq('company_id', companyId)
+            .in('id', cleanIds);
+          if (delErr) {
+            throw new Error('Erreur suppression récoltes Supabase: ' + delErr.message);
+          }
+        }
+      }
+
+      const allEntries = await fetchAllPaginated(actionClient, 'recolte_entries', companyId, (q) =>
+        q.order('created_at', { ascending: false })
+      );
+
+      return res.json({
+        success: true,
+        allEntries,
+        syncedCount,
+        timestamp: Date.now(),
+      });
+    }
+
+    // Mode développement local sans Supabase
+    const db = readDB();
     if (Array.isArray(pendingEntries) && pendingEntries.length > 0) {
       const map = new Map<string, typeof db.recoltes[0]>();
       for (const item of db.recoltes) {
@@ -609,19 +788,21 @@ app.post('/api/recolte/sync', (req: Request, res: Response) => {
       for (const clientItem of pendingEntries) {
         const existing = map.get(clientItem.id);
         if (!existing) {
-          map.set(clientItem.id, clientItem);
+          map.set(clientItem.id, { ...clientItem, company_id: companyId });
         } else if (clientItem.updated_at && (!existing.updated_at || clientItem.updated_at > existing.updated_at)) {
-          map.set(clientItem.id, clientItem);
+          map.set(clientItem.id, { ...clientItem, company_id: companyId });
         }
       }
 
       db.recoltes = Array.from(map.values());
-      writeDB(db);
     }
+    if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+      const delSet = new Set(deletedIds.map(String));
+      db.recoltes = db.recoltes.filter((r) => !(delSet.has(r.id) && (r.company_id === companyId || !r.company_id)));
+    }
+    writeDB(db);
 
-    const filtered = companyId
-      ? db.recoltes.filter((r) => r.company_id === companyId || !r.company_id)
-      : db.recoltes;
+    const filtered = db.recoltes.filter((r) => r.company_id === companyId || !r.company_id);
 
     res.json({
       success: true,
@@ -636,13 +817,39 @@ app.post('/api/recolte/sync', (req: Request, res: Response) => {
 });
 
 // Récupérer les récoltes
-app.get('/api/recolte', (req: Request, res: Response) => {
-  try {
-    const { companyId, date, startDate, endDate, serre_id, ouvrier_id, caporal_id } = req.query;
-    const db = readDB();
-    let list = db.recoltes;
+app.get('/api/recolte', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
 
-    if (companyId) list = list.filter((r) => r.company_id === companyId || !r.company_id);
+  try {
+    const { date, startDate, endDate, serre_id, ouvrier_id, caporal_id } = req.query;
+    const companyId = auth.user.company_id;
+
+    if (isSupabaseConfigured) {
+      const actionClient = supabaseAdmin || auth.supabaseClient;
+      let query = actionClient
+        .from('recolte_entries')
+        .select('*')
+        .eq('company_id', companyId);
+
+      if (date) query = query.eq('date', String(date));
+      if (startDate && endDate) query = query.gte('date', String(startDate)).lte('date', String(endDate));
+      if (serre_id) query = query.eq('serre_id', String(serre_id));
+      if (ouvrier_id) query = query.eq('ouvrier_id', String(ouvrier_id));
+      if (caporal_id) query = query.eq('created_by_id', String(caporal_id));
+
+      const { data, error } = await query.order('created_at', { ascending: false });
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Erreur lecture récoltes Supabase: ' + error.message });
+      }
+      return res.json({ success: true, recoltes: data || [] });
+    }
+
+    const db = readDB();
+    let list = db.recoltes.filter((r) => r.company_id === companyId || !r.company_id);
+
     if (date) list = list.filter((r) => r.date === date);
     if (startDate && endDate) list = list.filter((r) => r.date >= String(startDate) && r.date <= String(endDate));
     if (serre_id) list = list.filter((r) => r.serre_id === serre_id);
@@ -658,16 +865,22 @@ app.get('/api/recolte', (req: Request, res: Response) => {
 });
 
 // Enregistrer de nouvelles récoltes
-app.post('/api/recolte', (req: Request, res: Response) => {
+app.post('/api/recolte', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+  if (!requireWritePermission(auth.user.role, res)) return;
+
   try {
-    const { companyId, entries, author } = req.body;
+    const { entries, author } = req.body;
     if (!Array.isArray(entries) || entries.length === 0) {
       return res.status(400).json({ success: false, error: 'Aucune donnée de récolte fournie.' });
     }
 
-    const db = readDB();
+    const companyId = auth.user.company_id;
     const now = new Date().toISOString();
-    const addedList = [];
+    const addedList: any[] = [];
 
     for (const e of entries) {
       const qty = Number(e.caisses);
@@ -678,26 +891,46 @@ app.post('/api/recolte', (req: Request, res: Response) => {
         });
       }
 
-      const newEntry = {
-        id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        company_id: companyId || 'cie_lahcen_pointeur',
-        date: e.date,
-        serre_id: e.serre_id,
-        serre_nom: e.serre_nom,
-        ouvrier_id: e.ouvrier_id,
+      addedList.push({
+        id: e.id || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        company_id: companyId,
+        date: String(e.date).slice(0, 10),
+        serre_id: String(e.serre_id),
+        serre_nom: String(e.serre_nom || ''),
+        ouvrier_id: e.ouvrier_id ? String(e.ouvrier_id) : null,
         numero_ouvrier: Number(e.numero_ouvrier),
-        nom_ouvrier: e.nom_ouvrier,
+        nom_ouvrier: String(e.nom_ouvrier || ''),
         caisses: Math.round(qty * 10) / 10,
-        notes: e.notes ? String(e.notes).trim() : undefined,
-        created_by_id: author?.id || 'usr_anonymous',
-        created_by_nom: author?.nom || 'Inconnu',
-        created_at: now,
-      };
-
-      db.recoltes.push(newEntry);
-      addedList.push(newEntry);
+        notes: e.notes ? String(e.notes).trim() : null,
+        type_operation: e.type_operation || 'RECOLTE',
+        domaine_id: e.domaine_id ? String(e.domaine_id) : 'dom_d2',
+        created_by_id: isSupabaseConfigured
+          ? (resolveValidProfileUuid(author?.id) || resolveValidProfileUuid(auth.user.id))
+          : (author?.id || auth.user.id),
+        created_by_nom: author?.nom || auth.user.nom || 'Inconnu',
+        created_at: e.created_at || now,
+        updated_at: now,
+      });
     }
 
+    if (isSupabaseConfigured) {
+      const actionClient = supabaseAdmin || auth.supabaseClient;
+      const { data, error } = await actionClient
+        .from('recolte_entries')
+        .upsert(addedList, { onConflict: 'id' })
+        .select();
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Erreur enregistrement récolte Supabase: ' + error.message });
+      }
+      return res.json({ success: true, count: (data || addedList).length, added: data || addedList });
+    }
+
+    const db = readDB();
+    for (const item of addedList) {
+      const idx = db.recoltes.findIndex((r) => r.id === item.id);
+      if (idx >= 0) db.recoltes[idx] = item;
+      else db.recoltes.push(item);
+    }
     writeDB(db);
     res.json({ success: true, count: addedList.length, added: addedList });
   } catch (err: unknown) {
@@ -706,7 +939,42 @@ app.post('/api/recolte', (req: Request, res: Response) => {
   }
 });
 
-// Récupérer les serres configurées (depuis Supabase en priorité, avec fallback local complété)
+// Supprimer une entrée de récolte
+app.delete('/api/recolte/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+  if (!requireWritePermission(auth.user.role, res)) return;
+
+  try {
+    const { id } = req.params;
+    const companyId = auth.user.company_id;
+
+    if (isSupabaseConfigured) {
+      const actionClient = supabaseAdmin || auth.supabaseClient;
+      const { error } = await actionClient
+        .from('recolte_entries')
+        .delete()
+        .eq('id', id)
+        .eq('company_id', companyId);
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Erreur suppression récolte Supabase: ' + error.message });
+      }
+      return res.json({ success: true });
+    }
+
+    const db = readDB();
+    db.recoltes = db.recoltes.filter((r) => !(r.id === id && (r.company_id === companyId || !r.company_id)));
+    writeDB(db);
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Erreur suppression';
+    res.status(500).json({ success: false, error: msg });
+  }
+});
+
+// Récupérer les serres configurées (depuis Supabase en priorité, avec fallback local uniquement hors Supabase)
 app.get('/api/serres', async (req: Request, res: Response) => {
   try {
     const { companyId, domaineId } = req.query;
@@ -716,18 +984,22 @@ app.get('/api/serres', async (req: Request, res: Response) => {
       s?.id === 'serre_23' &&
       (!s.domaine_id || s.domaine_id === 'dom_d3' || String(s.code || '').toUpperCase() === 'S23');
 
-    if (supabaseAdmin) {
-      let query = supabaseAdmin.from('serres').select('*').order('ordre', { ascending: true });
+    if (isSupabaseConfigured) {
+      const client = supabaseAdmin || createClient(supabaseUrl, supabaseAnonKey);
+      let query = client.from('serres').select('*').order('ordre', { ascending: true });
       if (companyId) {
         query = query.eq('company_id', String(companyId));
       }
       const { data, error } = await query;
-      if (!error && Array.isArray(data) && data.length > 0) {
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Erreur lecture serres Supabase: ' + error.message });
+      }
+      if (Array.isArray(data) && data.length > 0) {
         list = data.filter((s) => !isAnomalousSerre23(s));
       }
     }
 
-    if (list.length === 0) {
+    if (list.length === 0 && !isSupabaseConfigured) {
       const db = readDB();
       const canonicalById = new Map(DEFAULT_DB.serres.map((s) => [s.id, s]));
       const mergedMap = new Map<string, any>();
@@ -770,14 +1042,89 @@ app.get('/api/serres', async (req: Request, res: Response) => {
   }
 });
 
-// Récupérer les utilisateurs (sans les sels et hashs pour la sécurité)
-app.get('/api/users', (_req: Request, res: Response) => {
+// Récupérer les utilisateurs de la société authentifiée (depuis Supabase profiles en prod)
+app.get('/api/users', async (req: Request, res: Response) => {
+  const auth = await authenticateCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
   try {
+    const companyId = auth.user.company_id;
+    if (isSupabaseConfigured) {
+      const actionClient = supabaseAdmin || auth.supabaseClient;
+      const { data, error } = await actionClient
+        .from('profiles')
+        .select('id, username, nom, role, company_id, actif, module_attribue, domaines_autorises, serres_autorisees, telephone, created_at')
+        .eq('company_id', companyId)
+        .order('nom', { ascending: true });
+
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Erreur lecture profils Supabase: ' + error.message });
+      }
+      return res.json({ success: true, users: data || [] });
+    }
+
     const db = readDB();
-    const safeUsers = db.users.map(({ passwordHash, salt, ...safe }) => safe);
+    const safeUsers = (db.users || []).map(({ passwordHash, salt, ...safe }) => safe);
     res.json({ success: true, users: safeUsers });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: 'Erreur users' });
+  }
+});
+
+// Mise à jour sécurisée d'un compte utilisateur (Admin uniquement, interdit aux lecteurs)
+app.patch('/api/users/:id', async (req: Request, res: Response) => {
+  const auth = await authenticateAdmin(req);
+  if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const { id } = req.params;
+    const companyId = auth.admin.company_id;
+    const { actif, module_attribue, domaines_autorises, serres_autorisees, role, nom } = req.body;
+    const updates: Record<string, any> = {};
+
+    if (actif !== undefined) updates.actif = Boolean(actif);
+    if (module_attribue !== undefined) updates.module_attribue = module_attribue;
+    if (domaines_autorises !== undefined) updates.domaines_autorises = domaines_autorises;
+    if (serres_autorisees !== undefined) updates.serres_autorisees = serres_autorisees;
+    if (role !== undefined && ['admin', 'caporal', 'caporal_contractuelles', 'lecteur'].includes(role)) {
+      updates.role = role;
+    }
+    if (nom !== undefined) updates.nom = String(nom).trim();
+
+    if (isSupabaseConfigured) {
+      const actionClient = supabaseAdmin || auth.supabaseClient;
+      const { data, error } = await actionClient
+        .from('profiles')
+        .update(updates)
+        .eq('id', id)
+        .eq('company_id', companyId)
+        .select('id, username, nom, role, company_id, actif, module_attribue, domaines_autorises, serres_autorisees, telephone, created_at')
+        .maybeSingle();
+
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Erreur mise à jour profil Supabase: ' + error.message });
+      }
+      if (!data) {
+        return res.status(404).json({ success: false, error: 'Profil introuvable dans cette entreprise.' });
+      }
+      return res.json({ success: true, user: data });
+    }
+
+    const db = readDB();
+    const idx = (db.users || []).findIndex((u) => u.id === id);
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: 'Utilisateur introuvable.' });
+    }
+    db.users[idx] = { ...db.users[idx], ...updates };
+    writeDB(db);
+    const { passwordHash, salt, ...safe } = db.users[idx];
+    res.json({ success: true, user: safe });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -862,6 +1209,7 @@ function createLocalDbClient() {
     const q: any = {
       eq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] === val2),
       neq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] !== val2),
+      in: (col2: string, vals2: any[]) => createQueryBuilder(table, (x: any) => filterFn(x) && Array.isArray(vals2) && vals2.includes(x[col2])),
       gte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] >= val2),
       lte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] <= val2),
       order: (_col2: string, _opts?: any) => q,
@@ -961,6 +1309,11 @@ function createLocalDbClient() {
             filter = (x: any) => prev(x) && x[col] !== val;
             return builder;
           },
+          in: (col: string, vals: any[]) => {
+            const prev = filter;
+            filter = (x: any) => prev(x) && Array.isArray(vals) && vals.includes(x[col]);
+            return builder;
+          },
           then: (cb: any, rej?: any) => {
             const db = readDB();
             const items = (db[table as keyof ServerDB] as any[]) || [];
@@ -1037,12 +1390,15 @@ function createLocalDbClient() {
   };
 }
 
-// Vérification stricte du rôle ADMIN (Réservé aux modules critiques, ex: Stock Pro)
-async function authenticateAdmin(req: Request): Promise<{
+// Vérification stricte du rôle ADMIN (ou lecteur en GET seul si allowLecteur = true)
+async function authenticateAdmin(
+  req: Request,
+  options?: { allowLecteur?: boolean }
+): Promise<{
   authenticated: boolean;
   error?: string;
   statusCode?: number;
-  admin?: { id: string; nom: string; company_id: string };
+  admin?: { id: string; nom: string; company_id: string; role?: AppUserRole };
   supabaseClient?: any;
 }> {
   const authHeader = req.headers.authorization;
@@ -1055,7 +1411,38 @@ async function authenticateAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  if (!supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
+  // Bypass uniquement autorisé en développement local sans Supabase ET hors production
+  if (isDevTokenBypassAllowed() && (token === 'dev_admin_token' || token === 'dev_lecteur_token')) {
+    const isLecteur = token === 'dev_lecteur_token';
+    if (isLecteur && (!options?.allowLecteur || req.method !== 'GET')) {
+      return {
+        authenticated: false,
+        error: 'Action interdite : compte en lecture seule (lecteur).',
+        statusCode: 403,
+      };
+    }
+    const profileCompanyId = 'cie_lahcen_pointeur';
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+    return {
+      authenticated: true,
+      admin: {
+        id: isLecteur ? 'usr_lecteur' : 'usr_admin',
+        nom: isLecteur ? 'Mahdi (Lecteur)' : 'Lahcen (Administrateur)',
+        company_id: profileCompanyId,
+        role: isLecteur ? 'lecteur' : 'admin',
+      },
+      supabaseClient: createLocalDbClient(),
+    };
+  }
+
+  if (!isSupabaseConfigured) {
     return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
   }
 
@@ -1069,7 +1456,7 @@ async function authenticateAdmin(req: Request): Promise<{
     const dbQueryClient = supabaseAdmin || client;
     const { data: profile, error: profileError } = await dbQueryClient
       .from('profiles')
-      .select('id, company_id, role, actif, nom')
+      .select('id, company_id, role, actif, nom, username')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -1081,8 +1468,16 @@ async function authenticateAdmin(req: Request): Promise<{
       return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
     }
 
-    // Vérification stricte du rôle admin et du statut actif
-    if (profile.role !== 'admin' || !profile.actif) {
+    if (!profile.actif) {
+      return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
+    }
+
+    const resolvedRole = resolveAuthRole(profile.role, user.email, profile.username, user.user_metadata);
+    if (resolvedRole === 'lecteur') {
+      if (!options?.allowLecteur || req.method !== 'GET') {
+        return { authenticated: false, error: 'Action interdite : compte en lecture seule (lecteur).', statusCode: 403 };
+      }
+    } else if (resolvedRole !== 'admin') {
       return { authenticated: false, error: 'Action interdite : rôle Administrateur actif requis.', statusCode: 403 };
     }
 
@@ -1110,8 +1505,9 @@ async function authenticateAdmin(req: Request): Promise<{
       authenticated: true,
       admin: {
         id: profile.id,
-        nom: profile.nom || 'Administrateur',
+        nom: profile.nom || (resolvedRole === 'lecteur' ? 'Lecteur' : 'Administrateur'),
         company_id: profileCompanyId,
+        role: resolvedRole,
       },
       supabaseClient: client,
     };
@@ -1120,12 +1516,12 @@ async function authenticateAdmin(req: Request): Promise<{
   }
 }
 
-// Vérification ciblée des rôles CAPORAL ou ADMIN pour les modules autorisés (Heures Sup, Tâches Sup, Récolte)
+// Vérification ciblée des rôles CAPORAL, ADMIN ou LECTEUR pour les modules autorisés (Heures Sup, Tâches Sup, Récolte)
 async function authenticateCaporalOrAdmin(req: Request): Promise<{
   authenticated: boolean;
   error?: string;
   statusCode?: number;
-  user?: { id: string; nom: string; role: 'admin' | 'caporal'; company_id: string };
+  user?: { id: string; nom: string; role: AppUserRole; company_id: string };
   supabaseClient?: any;
 }> {
   const authHeader = req.headers.authorization;
@@ -1138,12 +1534,31 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Mode développement local ou suite de tests automatisés (ou absence de configuration Supabase)
-  if (token === 'dev_admin_token' || token === 'dev_caporal_token' || token.includes('caporal') || token === 'usr_caporal_brahim' || !supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
-    const isCaporal = token === 'dev_caporal_token' || token.includes('caporal') || token === 'usr_caporal_brahim';
-    const role: 'admin' | 'caporal' = isCaporal ? 'caporal' : 'admin';
-    const nom = isCaporal ? 'Brahim (Caporal)' : 'Lahcen (Administrateur)';
-    const userId = isCaporal ? 'usr_caporal_1' : 'usr_admin';
+  // Bypass STRICTEMENT interdit en production et lorsque Supabase est configuré
+  if (
+    isDevTokenBypassAllowed() &&
+    (token === 'dev_admin_token' ||
+      token === 'dev_caporal_token' ||
+      token === 'dev_caporal_contractuel_token' ||
+      token === 'dev_lecteur_token' ||
+      token === 'usr_caporal_brahim')
+  ) {
+    const isLecteur = token === 'dev_lecteur_token';
+    const isContractuelCaporal = token === 'dev_caporal_contractuel_token';
+    const isCaporal = token === 'dev_caporal_token' || token === 'usr_caporal_brahim';
+    const role: AppUserRole = isLecteur
+      ? 'lecteur'
+      : isContractuelCaporal
+      ? 'caporal_contractuelles'
+      : isCaporal
+      ? 'caporal'
+      : 'admin';
+    const nom = isLecteur
+      ? 'Mahdi (Lecteur)'
+      : isCaporal || isContractuelCaporal
+      ? 'Brahim (Caporal)'
+      : 'Lahcen (Administrateur)';
+    const userId = isLecteur ? 'usr_lecteur' : isCaporal ? 'usr_caporal_1' : 'usr_admin';
 
     const db = readDB();
     const companies = db.companies || [];
@@ -1179,6 +1594,10 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
     };
   }
 
+  if (!isSupabaseConfigured) {
+    return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
+  }
+
   try {
     const client = getSupabaseClientForRequest(token);
     const { data: { user }, error: authError } = await client.auth.getUser(token);
@@ -1186,34 +1605,35 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
       return { authenticated: false, error: 'Session invalide ou expirée: ' + (authError?.message || 'Utilisateur non trouvé'), statusCode: 401 };
     }
 
-    let { data: profile, error: profileError } = await client
+    const dbQueryClient = supabaseAdmin || client;
+    let { data: profile, error: profileError } = await dbQueryClient
       .from('profiles')
-      .select('id, company_id, role, actif, nom')
+      .select('id, company_id, role, actif, nom, username')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
 
     const userEmail = (user.email || '').toLowerCase();
     const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
 
     if (profileError || !profile) {
       if (isAdminEmail || supabaseAdmin) {
+        const inferredRole = resolveAuthRole(user.user_metadata?.role, userEmail, user.user_metadata?.username, user.user_metadata);
         const newProfile = {
           id: user.id,
-          username: userEmail.split('@')[0] || 'admin',
-          nom: 'Lahcen (Administrateur)',
-          role: 'admin',
-          company_id: 'cie_lahcen_pointeur',
+          username: userEmail.split('@')[0] || 'user',
+          nom: inferredRole === 'admin' ? 'Lahcen (Administrateur)' : (user.user_metadata?.nom || userEmail.split('@')[0] || 'Utilisateur'),
+          role: inferredRole,
+          company_id: user.user_metadata?.company_id || 'cie_lahcen_pointeur',
           actif: true,
         };
-        const adminClient = supabaseAdmin || client;
-        await adminClient.from('profiles').upsert(newProfile, { onConflict: 'id' });
+        await dbQueryClient.from('profiles').upsert(newProfile, { onConflict: 'id' });
         profile = newProfile;
       } else {
         return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
       }
     }
 
-    const actualRole: 'admin' | 'caporal' = (profile.role === 'admin' || isAdminEmail) ? 'admin' : (profile.role === 'caporal' ? 'caporal' : 'caporal');
+    const actualRole = resolveAuthRole(profile.role, userEmail, profile.username, user.user_metadata);
     if (!profile.actif) {
       return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
     }
@@ -1255,7 +1675,7 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
       authenticated: true,
       user: {
         id: profile.id,
-        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : 'Caporal'),
+        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : actualRole === 'lecteur' ? 'Lecteur' : 'Caporal'),
         role: actualRole,
         company_id: compCheck.id,
       },
@@ -1268,7 +1688,7 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
 
 // 1. GET /api/stock : Récupérer le catalogue et le stock actuel consolidé depuis PostgreSQL
 app.get('/api/stock', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
+  const auth = await authenticateAdmin(req, { allowLecteur: true });
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -2495,7 +2915,7 @@ app.post('/api/stock/correction', async (req: Request, res: Response) => {
 
 // 7. GET /api/stock/mouvements : Récupérer l'historique des mouvements avec filtres (PostgreSQL Only)
 app.get('/api/stock/mouvements', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
+  const auth = await authenticateAdmin(req, { allowLecteur: true });
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -3183,12 +3603,19 @@ app.get('/api/ouvriers', async (req: Request, res: Response) => {
       return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
     }
     const companyId = auth.user.company_id;
-    const { data } = await auth.supabaseClient
+    const actionClient = supabaseAdmin || auth.supabaseClient;
+    const { data, error } = await actionClient
       .from('ouvriers')
       .select('*')
       .eq('company_id', companyId)
       .order('numero', { ascending: true });
 
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture ouvriers Supabase: ' + error.message });
+    }
+    if (isSupabaseConfigured) {
+      return res.json({ success: true, ouvriers: data || [] });
+    }
     if (data && data.length > 0) {
       return res.json({ success: true, ouvriers: data });
     }
@@ -3200,12 +3627,12 @@ app.get('/api/ouvriers', async (req: Request, res: Response) => {
 });
 
 // =========================================================================
-// SECTION 1 : HEURES SUPPLÉMENTAIRES (RÉSERVÉ EXCLUSIVEMENT À ADMIN)
+// SECTION 1 : HEURES SUPPLÉMENTAIRES (ADMIN + LECTEUR EN LECTURE SEULE)
 // =========================================================================
 
-// 1. GET /api/heures-supplementaires : Consultation filtrée des heures sup (ADMIN ONLY)
+// 1. GET /api/heures-supplementaires : Consultation filtrée des heures sup
 app.get('/api/heures-supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
+  const auth = await authenticateAdmin(req, { allowLecteur: true });
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -3653,9 +4080,9 @@ app.delete('/api/heures-supplementaires/:id', async (req: Request, res: Response
 
 const tachesIdempotencyCache = new Map<string, { createdAt: number; payload: any }>();
 
-// 1. GET /api/taches-supplementaires : Consultation filtrée des tâches sup (ADMIN ONLY)
+// 1. GET /api/taches-supplementaires : Consultation filtrée des tâches sup
 app.get('/api/taches-supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
+  const auth = await authenticateAdmin(req, { allowLecteur: true });
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -4110,7 +4537,7 @@ app.delete('/api/taches-supplementaires/:id', async (req: Request, res: Response
 // =========================================================================
 
 app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
+  const auth = await authenticateAdmin(req, { allowLecteur: true });
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -4334,7 +4761,7 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
 // =========================================================================
 
 app.get('/api/supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req);
+  const auth = await authenticateAdmin(req, { allowLecteur: true });
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -4433,7 +4860,7 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
   user?: {
     id: string;
     nom: string;
-    role: 'admin' | 'caporal' | 'caporal_contractuelles';
+    role: AppUserRole;
     company_id: string;
     module_attribue?: 'recolte' | 'contractuelles' | 'all';
     domaines_autorises?: string[];
@@ -4451,13 +4878,23 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Support dev local ou tests
-  if (token === 'dev_admin_token' || token.includes('contractuel') || token === 'dev_caporal_token' || !supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
-    const isContractuelCaporal = token.includes('contractuel');
-    const isAdmin = token === 'dev_admin_token' || (!isContractuelCaporal && !token.includes('caporal'));
-    const role = isAdmin ? 'admin' : 'caporal_contractuelles';
-    const nom = isAdmin ? 'Lahcen (Administrateur)' : 'Caporal (Contractuelles)';
-    const userId = isAdmin ? 'usr_admin' : 'usr_caporal_contractuel_1';
+  // Bypass uniquement autorisé en développement local sans Supabase ET hors production
+  if (
+    isDevTokenBypassAllowed() &&
+    (token === 'dev_admin_token' ||
+      token === 'dev_caporal_contractuel_token' ||
+      token === 'dev_caporal_token' ||
+      token === 'dev_lecteur_token')
+  ) {
+    const isLecteur = token === 'dev_lecteur_token';
+    const isContractuelCaporal = token === 'dev_caporal_contractuel_token' || token === 'dev_caporal_token';
+    const role: AppUserRole = isLecteur ? 'lecteur' : isContractuelCaporal ? 'caporal_contractuelles' : 'admin';
+    const nom = isLecteur
+      ? 'Mahdi (Lecteur)'
+      : isContractuelCaporal
+      ? 'Caporal (Contractuelles)'
+      : 'Lahcen (Administrateur)';
+    const userId = isLecteur ? 'usr_lecteur' : isContractuelCaporal ? 'usr_caporal_contractuel_1' : 'usr_admin';
     const profileCompanyId = 'cie_lahcen_pointeur';
 
     return {
@@ -4465,15 +4902,17 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
       user: {
         id: userId,
         nom,
-        role: role as any,
+        role,
         company_id: profileCompanyId,
-        module_attribue: isAdmin ? 'all' : 'contractuelles',
+        module_attribue: role === 'caporal_contractuelles' ? 'contractuelles' : 'all',
         domaines_autorises: [],
       },
-      supabaseClient: (supabaseUrl && (supabaseAnonKey || serviceRoleKey))
-        ? (supabaseAdmin || createClient(supabaseUrl, supabaseAnonKey))
-        : createLocalDbClient(),
+      supabaseClient: createLocalDbClient(),
     };
+  }
+
+  if (!isSupabaseConfigured) {
+    return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
   }
 
   try {
@@ -4484,23 +4923,28 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
     }
 
     const adminDb = supabaseAdmin || client;
-    let { data: profile } = await adminDb
+    let { data: profile, error: profileError } = await adminDb
       .from('profiles')
       .select('*')
       .eq('id', authUser.id)
       .maybeSingle();
+
+    if (profileError) {
+      return { authenticated: false, error: 'Erreur lecture profil Supabase: ' + profileError.message, statusCode: 500 };
+    }
 
     const userEmail = (authUser.email || '').toLowerCase();
     const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
 
     if (!profile) {
       if (isAdminEmail || supabaseAdmin) {
+        const inferredRole = resolveAuthRole(authUser.user_metadata?.role, userEmail, authUser.user_metadata?.username, authUser.user_metadata);
         const newProfile = {
           id: authUser.id,
           username: userEmail.split('@')[0] || 'admin',
-          nom: 'Lahcen (Administrateur)',
-          role: 'admin',
-          company_id: 'cie_lahcen_pointeur',
+          nom: inferredRole === 'admin' ? 'Lahcen (Administrateur)' : (authUser.user_metadata?.nom || userEmail.split('@')[0] || 'Utilisateur'),
+          role: inferredRole,
+          company_id: authUser.user_metadata?.company_id || 'cie_lahcen_pointeur',
           actif: true,
         };
         await adminDb.from('profiles').upsert(newProfile, { onConflict: 'id' });
@@ -4514,15 +4958,16 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
       return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
     }
 
-    const isAdmin = profile.role === 'admin' || isAdminEmail;
+    const actualRole = resolveAuthRole(profile.role, userEmail, profile.username, authUser.user_metadata);
     const isTariq = userEmail === 'tariq@caporal.com' || profile.username === 'tariq';
-    const isContractuelCaporal =
-      profile.role === 'caporal_contractuelles' ||
+    const isAuthorizedRole =
+      actualRole === 'admin' ||
+      actualRole === 'caporal_contractuelles' ||
+      actualRole === 'lecteur' ||
       profile.module_attribue === 'contractuelles' ||
-      authUser.user_metadata?.module_attribue === 'contractuelles' ||
       isTariq;
 
-    if (!isAdmin && !isContractuelCaporal) {
+    if (!isAuthorizedRole) {
       return {
         authenticated: false,
         error: 'Action interdite : votre compte Caporal est affecté au module Récolte et ne possède pas d\'autorisation sur les Contractuelles.',
@@ -4539,16 +4984,32 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
         .then(() => {}, () => {});
     }
 
-    const profileCompanyId = (profile.company_id || 'cie_lahcen_pointeur').trim();
+    const profileCompanyId = (profile.company_id || '').trim();
+    if (!profileCompanyId) {
+      return {
+        authenticated: false,
+        error: 'Profil utilisateur non rattaché à une entreprise (company_id manquant). Accès bloqué.',
+        statusCode: 400,
+      };
+    }
+
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
 
     return {
       authenticated: true,
       user: {
         id: profile.id,
-        nom: profile.nom || (isAdmin ? 'Administrateur' : 'Caporal Contractuelles'),
-        role: isAdmin ? 'admin' : 'caporal_contractuelles',
+        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : actualRole === 'lecteur' ? 'Lecteur' : 'Caporal Contractuelles'),
+        role: actualRole,
         company_id: profileCompanyId,
-        module_attribue: isAdmin ? 'all' : 'contractuelles',
+        module_attribue: actualRole === 'caporal_contractuelles' ? 'contractuelles' : 'all',
         domaines_autorises: profile.domaines_autorises || authUser.user_metadata?.domaines_autorises || [],
         serres_autorisees: profile.serres_autorisees || authUser.user_metadata?.serres_autorisees || [],
       },
@@ -4586,8 +5047,12 @@ app.get('/api/contractuels/contrats', async (req: Request, res: Response) => {
 
     const { data, error } = await query.order('designation', { ascending: true });
 
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture contrats Supabase: ' + error.message });
+    }
+
     let contrats = data || [];
-    if (error || !data) {
+    if (!isSupabaseConfigured && (error || !data)) {
       const db = readDB();
       let list = (db.contractuels_contrats || []).filter((c: any) => c.company_id === companyId);
       if (actif === 'true') list = list.filter((c: any) => c.actif !== false);
@@ -4664,17 +5129,19 @@ app.post('/api/contractuels/contrats', async (req: Request, res: Response) => {
 
     const { data, error } = await actionClient
       .from('contractuels_contrats')
-      .insert(newContrat)
+      .upsert(newContrat, { onConflict: 'id' })
       .select()
       .maybeSingle();
 
-    const db = readDB();
-    if (!db.contractuels_contrats) db.contractuels_contrats = [];
-    db.contractuels_contrats.push(newContrat);
-    writeDB(db);
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur création contrat Supabase: ' + error.message });
+    }
 
-    if (error) {
-      console.warn('Supabase contractuels_contrats insert warning (local stored):', error.message);
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (!db.contractuels_contrats) db.contractuels_contrats = [];
+      db.contractuels_contrats.push(newContrat);
+      writeDB(db);
     }
 
     return res.json({ success: true, contrat: data || newContrat });
@@ -4701,15 +5168,18 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
 
-    // Récupérer les contrats existants pour dédoublonner
-    const { data: existingData } = await actionClient
+    const { data: existingData, error: existingErr } = await actionClient
       .from('contractuels_contrats')
       .select('*')
       .eq('company_id', companyId);
 
-    const db = readDB();
-    if (!db.contractuels_contrats) db.contractuels_contrats = [];
-    const localExisting = db.contractuels_contrats.filter((c: any) => c.company_id === companyId);
+    if (existingErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture contrats Supabase: ' + existingErr.message });
+    }
+
+    const db = !isSupabaseConfigured ? readDB() : null;
+    if (db && !db.contractuels_contrats) db.contractuels_contrats = [];
+    const localExisting = db ? (db.contractuels_contrats || []).filter((c: any) => c.company_id === companyId) : [];
     const existingList = existingData || localExisting;
 
     const importedContrats: any[] = [];
@@ -4736,7 +5206,6 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
       const modeClean = (['JOUR', 'TACHE', 'UNITE', 'HEURE'].includes(rawMode) ? rawMode : 'JOUR') as any;
       const uniteClean = String(item.unite || modeClean).trim().toUpperCase();
 
-      // Vérifier si un contrat avec cette désignation existe déjà
       const existing = existingList.find(
         (c: any) => c.designation.toLowerCase().trim() === desigClean.toLowerCase()
       );
@@ -4746,7 +5215,6 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
           skippedCount++;
           continue;
         }
-        // Mise à jour du prix et des propriétés
         const updatedRecord = {
           ...existing,
           prix_unitaire: prix,
@@ -4757,19 +5225,24 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
           updated_at: now,
         };
 
-        await actionClient
+        const { error: updErr } = await actionClient
           .from('contractuels_contrats')
           .update(updatedRecord)
           .eq('id', existing.id)
           .eq('company_id', companyId);
 
-        const localIdx = db.contractuels_contrats.findIndex((c: any) => c.id === existing.id);
-        if (localIdx >= 0) db.contractuels_contrats[localIdx] = updatedRecord;
+        if (updErr && isSupabaseConfigured) {
+          throw new Error('Erreur mise à jour contrat Supabase: ' + updErr.message);
+        }
+
+        if (db?.contractuels_contrats) {
+          const localIdx = db.contractuels_contrats.findIndex((c: any) => c.id === existing.id);
+          if (localIdx >= 0) db.contractuels_contrats[localIdx] = updatedRecord;
+        }
 
         importedContrats.push(updatedRecord);
         updatedCount++;
       } else {
-        // Création
         const id = `ct_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
         const code = item.code ? String(item.code).trim().toUpperCase() : `CTR-${String(existingList.length + createdCount + 1).padStart(3, '0')}`;
 
@@ -4788,14 +5261,19 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
           updated_at: now,
         };
 
-        await actionClient.from('contractuels_contrats').insert(newRecord);
-        db.contractuels_contrats.push(newRecord);
+        const { error: insErr } = await actionClient
+          .from('contractuels_contrats')
+          .upsert(newRecord, { onConflict: 'id' });
+        if (insErr && isSupabaseConfigured) {
+          throw new Error('Erreur insertion contrat Supabase: ' + insErr.message);
+        }
+        if (db?.contractuels_contrats) db.contractuels_contrats.push(newRecord);
         importedContrats.push(newRecord);
         createdCount++;
       }
     }
 
-    writeDB(db);
+    if (db) writeDB(db);
 
     return res.json({
       success: true,
@@ -4854,17 +5332,19 @@ app.put('/api/contractuels/contrats/:id', async (req: Request, res: Response) =>
       .select()
       .maybeSingle();
 
-    const db = readDB();
-    if (db.contractuels_contrats) {
-      const idx = db.contractuels_contrats.findIndex((c: any) => c.id === id && c.company_id === companyId);
-      if (idx >= 0) {
-        db.contractuels_contrats[idx] = { ...db.contractuels_contrats[idx], ...updatePayload };
-        writeDB(db);
-      }
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur mise à jour contrat Supabase: ' + error.message });
     }
 
-    if (error) {
-      console.warn('Supabase contractuels_contrats update error:', error.message);
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (db.contractuels_contrats) {
+        const idx = db.contractuels_contrats.findIndex((c: any) => c.id === id && c.company_id === companyId);
+        if (idx >= 0) {
+          db.contractuels_contrats[idx] = { ...db.contractuels_contrats[idx], ...updatePayload };
+          writeDB(db);
+        }
+      }
     }
 
     return res.json({ success: true, contrat: data || updatePayload });
@@ -4886,16 +5366,22 @@ app.delete('/api/contractuels/contrats/:id', async (req: Request, res: Response)
     const companyId = auth.admin.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
 
-    await actionClient
+    const { error } = await actionClient
       .from('contractuels_contrats')
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
 
-    const db = readDB();
-    if (db.contractuels_contrats) {
-      db.contractuels_contrats = db.contractuels_contrats.filter((c: any) => c.id !== id || c.company_id !== companyId);
-      writeDB(db);
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur suppression contrat Supabase: ' + error.message });
+    }
+
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (db.contractuels_contrats) {
+        db.contractuels_contrats = db.contractuels_contrats.filter((c: any) => c.id !== id || c.company_id !== companyId);
+        writeDB(db);
+      }
     }
 
     return res.json({ success: true, message: 'Contrat supprimé avec succès.' });
@@ -4946,7 +5432,9 @@ app.get('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
     const { data, error } = await query.order('nom', { ascending: true });
 
     if (error) {
-      // Fallback base locale
+      if (isSupabaseConfigured) {
+        return res.status(500).json({ success: false, error: 'Erreur lecture ouvriers contractuels Supabase: ' + error.message });
+      }
       const db = readDB();
       let list = (db.contractuels_ouvriers || []).filter(
         (o: any) =>
@@ -4959,14 +5447,12 @@ app.get('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
       return res.json({ success: true, ouvriers: list });
     }
 
-    // Filtrer tout enregistrement de démonstration qui pourrait encore exister dans Supabase
     const cleanList = (data || []).filter(
       (o: any) =>
         !DEMO_CONTRACTUEL_IDS.includes(o.id) &&
         !DEMO_CONTRACTUEL_NAMES.includes(String(o.nom_complet || `${o.nom} ${o.prenom}`).trim().toUpperCase())
     );
 
-    // Nettoyage asynchrone des 4 fiches de démo si elles étaient présentes en base Supabase
     if (data && data.some((o: any) => DEMO_CONTRACTUEL_IDS.includes(o.id))) {
       actionClient
         .from('contractuels_ouvriers')
@@ -5045,19 +5531,19 @@ app.post('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
 
     const { data, error } = await actionClient
       .from('contractuels_ouvriers')
-      .insert(newOuvrier)
+      .upsert(newOuvrier, { onConflict: 'id' })
       .select()
       .maybeSingle();
 
-    // Persistance locale miroir
-    const db = readDB();
-    if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
-    db.contractuels_ouvriers.push(newOuvrier);
-    writeDB(db);
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur création ouvrier contractuel Supabase: ' + error.message });
+    }
 
-    if (error) {
-      console.warn('Supabase contractuels_ouvriers insert error (stored locally):', error.message);
-      return res.json({ success: true, ouvrier: newOuvrier });
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
+      db.contractuels_ouvriers.push(newOuvrier);
+      writeDB(db);
     }
 
     return res.json({ success: true, ouvrier: data || newOuvrier });
@@ -5118,18 +5604,19 @@ app.put('/api/contractuels/ouvriers/:id', async (req: Request, res: Response) =>
       .select()
       .maybeSingle();
 
-    // Mise à jour locale
-    const db = readDB();
-    if (db.contractuels_ouvriers) {
-      const idx = db.contractuels_ouvriers.findIndex((o: any) => o.id === id && o.company_id === companyId);
-      if (idx >= 0) {
-        db.contractuels_ouvriers[idx] = { ...db.contractuels_ouvriers[idx], ...updatePayload };
-        writeDB(db);
-      }
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur mise à jour ouvrier contractuel Supabase: ' + error.message });
     }
 
-    if (error) {
-      console.warn('Supabase contractuels_ouvriers update error:', error.message);
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (db.contractuels_ouvriers) {
+        const idx = db.contractuels_ouvriers.findIndex((o: any) => o.id === id && o.company_id === companyId);
+        if (idx >= 0) {
+          db.contractuels_ouvriers[idx] = { ...db.contractuels_ouvriers[idx], ...updatePayload };
+          writeDB(db);
+        }
+      }
     }
 
     return res.json({ success: true, ouvrier: data || updatePayload });
@@ -5151,16 +5638,22 @@ app.delete('/api/contractuels/ouvriers/:id', async (req: Request, res: Response)
     const companyId = auth.admin.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
 
-    await actionClient
+    const { error } = await actionClient
       .from('contractuels_ouvriers')
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
 
-    const db = readDB();
-    if (db.contractuels_ouvriers) {
-      db.contractuels_ouvriers = db.contractuels_ouvriers.filter((o: any) => o.id !== id || o.company_id !== companyId);
-      writeDB(db);
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur suppression ouvrier contractuel Supabase: ' + error.message });
+    }
+
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (db.contractuels_ouvriers) {
+        db.contractuels_ouvriers = db.contractuels_ouvriers.filter((o: any) => o.id !== id || o.company_id !== companyId);
+        writeDB(db);
+      }
     }
 
     return res.json({ success: true, message: 'Ouvrier contractuel supprimé.' });
@@ -5187,20 +5680,22 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
 
-    // Récupérer la liste des serres réelles de la société pour associer par nom/code
     const { data: realSerres } = await actionClient
       .from('serres')
       .select('id, nom, code')
       .eq('company_id', companyId);
 
-    // Récupérer les ouvriers existants de la société
-    const { data: existingOuvriers } = await actionClient
+    const { data: existingOuvriers, error: existingErr } = await actionClient
       .from('contractuels_ouvriers')
       .select('*')
       .eq('company_id', companyId);
 
-    const db = readDB();
-    const existingList = existingOuvriers || (db.contractuels_ouvriers || []).filter((o: any) => o.company_id === companyId);
+    if (existingErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture ouvriers contractuels Supabase: ' + existingErr.message });
+    }
+
+    const db = !isSupabaseConfigured ? readDB() : null;
+    const existingList = existingOuvriers || (db ? (db.contractuels_ouvriers || []).filter((o: any) => o.company_id === companyId) : []);
 
     let createdCount = 0;
     let updatedCount = 0;
@@ -5225,7 +5720,6 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
       const prix = Math.round(prixRaw * 100) / 100;
       const nomCompletClean = prenomClean ? `${nomClean} ${prenomClean}` : nomClean;
 
-      // Résolution de la serre si transmise
       let foundSerreId: string | null = null;
       if (item.serre_nom || item.serre) {
         const sTarget = String(item.serre_nom || item.serre).trim().toLowerCase();
@@ -5235,7 +5729,6 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
         if (found) foundSerreId = found.id;
       }
 
-      // Recherche du doublon par nom + prénom ou par matricule
       const existing = existingList.find((o: any) => {
         if (item.matricule && o.matricule && String(item.matricule).trim().toUpperCase() === String(o.matricule).trim().toUpperCase()) {
           return true;
@@ -5251,7 +5744,6 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
           skippedCount++;
           continue;
         }
-        // Mise à jour
         const updatedRecord = {
           ...existing,
           nom: nomClean,
@@ -5263,20 +5755,25 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
           updated_at: now,
         };
 
-        await actionClient
+        const { error: updErr } = await actionClient
           .from('contractuels_ouvriers')
           .update(updatedRecord)
           .eq('id', existing.id)
           .eq('company_id', companyId);
 
-        if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
-        const localIdx = db.contractuels_ouvriers.findIndex((o: any) => o.id === existing.id);
-        if (localIdx >= 0) db.contractuels_ouvriers[localIdx] = updatedRecord;
+        if (updErr && isSupabaseConfigured) {
+          throw new Error('Erreur mise à jour ouvrier import Supabase: ' + updErr.message);
+        }
+
+        if (db) {
+          if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
+          const localIdx = db.contractuels_ouvriers.findIndex((o: any) => o.id === existing.id);
+          if (localIdx >= 0) db.contractuels_ouvriers[localIdx] = updatedRecord;
+        }
 
         importedList.push(updatedRecord);
         updatedCount++;
       } else {
-        // Création
         const id = `co_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
         const finalMatricule = item.matricule ? String(item.matricule).trim().toUpperCase() : `C-${String(existingList.length + createdCount + 1).padStart(3, '0')}`;
 
@@ -5297,16 +5794,23 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
           updated_at: now,
         };
 
-        await actionClient.from('contractuels_ouvriers').insert(newRecord);
-        if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
-        db.contractuels_ouvriers.push(newRecord);
+        const { error: insErr } = await actionClient
+          .from('contractuels_ouvriers')
+          .upsert(newRecord, { onConflict: 'id' });
+        if (insErr && isSupabaseConfigured) {
+          throw new Error('Erreur insertion ouvrier import Supabase: ' + insErr.message);
+        }
+        if (db) {
+          if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
+          db.contractuels_ouvriers.push(newRecord);
+        }
 
         importedList.push(newRecord);
         createdCount++;
       }
     }
 
-    writeDB(db);
+    if (db) writeDB(db);
 
     return res.json({
       success: true,
@@ -5322,7 +5826,379 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
   }
 });
 
-// 5. GET /api/contractuels/pointages : Liste des pointages journaliers avec leurs activités
+const WORKFLOW_META_TACHE_ID = '__WORKFLOW_META__';
+
+const DEFAULT_CONTRACTUEL_TACHES = [
+  { id: 'tch_instable', company_id: 'cie_lahcen_pointeur', code: 'INS01', nom: 'INSTABLE', couleur: '#16a34a', actif: true },
+  { id: 'tch_stationnaire', company_id: 'cie_lahcen_pointeur', code: 'STA01', nom: 'STATIONNAIRE', couleur: '#0284c7', actif: true },
+  { id: 'tch_ebourgeonnage_d5', company_id: 'cie_lahcen_pointeur', code: 'EBD05', nom: 'ÉBOURGEONNAGE D5', couleur: '#ea580c', actif: true },
+  { id: 'tch_traitement_phyto', company_id: 'cie_lahcen_pointeur', code: 'PHY01', nom: 'TRAITEMENT PHYTO', couleur: '#dc2626', actif: true },
+  { id: 'tch_recolte', company_id: 'cie_lahcen_pointeur', code: 'R01', nom: 'RECOLTE', couleur: '#16a34a', actif: true },
+  { id: 'tch_effeuillage', company_id: 'cie_lahcen_pointeur', code: 'E01', nom: 'EFFEUILLAGE', couleur: '#2563eb', actif: true },
+  { id: 'tch_entretien', company_id: 'cie_lahcen_pointeur', code: 'EN01', nom: 'ENTRETIEN', couleur: '#d97706', actif: true },
+  { id: 'tch_plantation', company_id: 'cie_lahcen_pointeur', code: 'P01', nom: 'PLANTATION', couleur: '#7c3aed', actif: true },
+];
+
+function isMissingColumnSchemaError(err: any): boolean {
+  if (!err) return false;
+  const code = String(err.code || '');
+  const msg = String(err.message || '');
+  return code === '42703' || code === 'PGRST204' || /column|schema cache/i.test(msg);
+}
+
+function buildLegacyPointageRecord(rec: any) {
+  return {
+    id: rec.id,
+    company_id: rec.company_id,
+    ouvrier_id: rec.ouvrier_id,
+    matricule: rec.matricule,
+    nom_complet: rec.nom_complet,
+    date: rec.date,
+    present: rec.present,
+    domaine_id: rec.domaine_id,
+    serre_id: rec.serre_id || null,
+    montant_total_jour: rec.montant_total_jour,
+    created_by_id: rec.created_by_id,
+    created_by_nom: rec.created_by_nom,
+    created_at: rec.created_at,
+    updated_at: rec.updated_at,
+  };
+}
+
+function buildLegacyActiviteRecord(act: any) {
+  return {
+    id: act.id,
+    pointage_id: act.pointage_id,
+    company_id: act.company_id,
+    ouvrier_id: act.ouvrier_id,
+    nom_complet: act.nom_complet,
+    matricule: act.matricule,
+    date: act.date,
+    contrat_id: act.contrat_id || null,
+    contrat_nom: act.contrat_nom || null,
+    tache_id: act.tache_id,
+    tache_nom: act.tache_nom,
+    domaine_id: act.domaine_id,
+    serre_id: act.serre_id,
+    serre_nom: act.serre_nom,
+    mode_remuneration: act.mode_remuneration,
+    quantite: act.quantite,
+    unite: act.unite,
+    prix_unitaire: act.prix_unitaire,
+    montant_total: act.montant_total,
+    observation: act.observation || null,
+    created_by_id: act.created_by_id,
+    created_by_nom: act.created_by_nom,
+    created_at: act.created_at,
+    updated_at: act.updated_at,
+  };
+}
+
+function hydratePointageWithMeta(ptg: any, linkedActivitesRaw: any[], localMirror?: any) {
+  const metaRow = linkedActivitesRaw.find((a: any) => a.tache_id === WORKFLOW_META_TACHE_ID);
+  let metaObj: any = {};
+  if (metaRow?.observation) {
+    try {
+      metaObj = JSON.parse(metaRow.observation);
+    } catch {
+      metaObj = {};
+    }
+  }
+
+  const visibleActivites = linkedActivitesRaw.filter((a: any) => a.tache_id !== WORKFLOW_META_TACHE_ID);
+  const merged = {
+    ...(localMirror || {}),
+    ...(metaObj || {}),
+    ...ptg,
+  };
+
+  const statut = normalizeStatutValidation(
+    ptg.statut_validation ?? metaObj.statut_validation ?? localMirror?.statut_validation
+  );
+  const isPresent = Boolean(merged.present);
+
+  const tachesIds: string[] = Array.isArray(merged.taches_ids) && merged.taches_ids.length > 0
+    ? merged.taches_ids
+    : visibleActivites.map((a: any) => String(a.tache_id)).filter(Boolean);
+  const tachesNoms: string[] = Array.isArray(merged.taches_noms) && merged.taches_noms.length > 0
+    ? merged.taches_noms
+    : visibleActivites.map((a: any) => String(a.tache_nom)).filter(Boolean);
+  const tachesTexte: string | null = isPresent
+    ? (merged.taches_texte || (tachesNoms.length > 0 ? tachesNoms.join(', ') : null))
+    : null;
+
+  const serresIds: string[] = Array.isArray(merged.serres_ids) && merged.serres_ids.length > 0
+    ? merged.serres_ids
+    : (merged.serre_id ? [String(merged.serre_id)] : []);
+  const serresNoms: string[] = Array.isArray(merged.serres_noms) && merged.serres_noms.length > 0
+    ? merged.serres_noms
+    : (merged.serres_texte ? String(merged.serres_texte).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+  const serresTexte: string | null = isPresent
+    ? (merged.serres_texte || (serresNoms.length > 0 ? serresNoms.join(', ') : null))
+    : null;
+
+  const tarifInitial = roundAmount(Number(merged.tarif_initial ?? ptg.tarif_initial ?? 0));
+  const montantPropose = isPresent
+    ? roundAmount(Number(merged.montant_propose ?? ptg.montant_propose ?? ptg.montant_total_jour ?? tarifInitial))
+    : 0;
+  const montantValide =
+    statut === 'VALIDE'
+      ? (isPresent ? roundAmount(Number(merged.montant_valide ?? ptg.montant_valide ?? ptg.montant_total_jour ?? montantPropose)) : 0)
+      : null;
+
+  const heureDebut = isPresent ? (merged.heure_debut || null) : null;
+  const heureFin = isPresent ? (merged.heure_fin || null) : null;
+  const dureeHeures = isPresent
+    ? (computeWorkDurationHours(heureDebut, heureFin) ?? (merged.duree_heures !== undefined && merged.duree_heures !== null ? roundAmount(Number(merged.duree_heures)) : null))
+    : null;
+
+  const hydrated = {
+    ...merged,
+    serres_ids: isPresent ? serresIds : [],
+    serres_noms: isPresent ? serresNoms : [],
+    serres_texte: serresTexte,
+    taches_ids: isPresent ? tachesIds : [],
+    taches_noms: isPresent ? tachesNoms : [],
+    taches_texte: tachesTexte,
+    heure_debut: heureDebut,
+    heure_fin: heureFin,
+    duree_heures: dureeHeures,
+    tarif_initial: tarifInitial,
+    montant_propose: montantPropose,
+    montant_valide: montantValide,
+    tarif_modifie: isPresent ? Boolean(merged.tarif_modifie ?? isTarifModifie(tarifInitial, montantPropose, isPresent)) : false,
+    motif_modification: isPresent ? (merged.motif_modification || null) : null,
+    statut_validation: statut,
+    submitted_by_id: merged.submitted_by_id || null,
+    submitted_by_nom: merged.submitted_by_nom || null,
+    submitted_at: merged.submitted_at || null,
+    validated_by_id: merged.validated_by_id || null,
+    validated_by_nom: merged.validated_by_nom || null,
+    validated_at: merged.validated_at || null,
+    motif_refus: merged.motif_refus || null,
+    historique_validations: Array.isArray(merged.historique_validations) ? merged.historique_validations : [],
+    activites: visibleActivites.map((a: any) => ({
+      ...a,
+      statut_validation: normalizeStatutValidation(a.statut_validation || statut),
+    })),
+  };
+
+  // Règle absolue : seul un montant VALIDÉ par l'administrateur entre dans la rémunération officielle
+  hydrated.montant_total_jour = getOfficialPointageMontant(hydrated);
+  return hydrated;
+}
+
+async function persistPointageResilient(
+  actionClient: any,
+  pointageRecord: any,
+  formattedActivites: any[],
+  validationLogEntry: any,
+  companyId: string,
+  dateClean: string,
+  ouvrierId: string
+) {
+  // 1. UPSERT sécurisé sur contractuels_pointages (jamais DELETE + INSERT destructif)
+  let usedSchemaFallback = false;
+  const { error: ptgErr } = await actionClient
+    .from('contractuels_pointages')
+    .upsert(pointageRecord, { onConflict: 'id' });
+
+  if (ptgErr) {
+    if (isMissingColumnSchemaError(ptgErr)) {
+      usedSchemaFallback = true;
+      const { error: legacyErr } = await actionClient
+        .from('contractuels_pointages')
+        .upsert(buildLegacyPointageRecord(pointageRecord), { onConflict: 'id' });
+      if (legacyErr) {
+        throw new Error('Erreur sauvegarde pointage contractuel (legacy Supabase): ' + legacyErr.message);
+      }
+    } else {
+      throw new Error('Erreur sauvegarde pointage contractuel Supabase: ' + ptgErr.message);
+    }
+  }
+
+  // 2. UPSERT des activités visibles + nettoyage ciblé des activités retirées uniquement
+  if (formattedActivites.length > 0) {
+    const { error: actErr } = await actionClient
+      .from('contractuels_activites')
+      .upsert(formattedActivites, { onConflict: 'id' });
+    if (actErr) {
+      if (isMissingColumnSchemaError(actErr)) {
+        usedSchemaFallback = true;
+        const { error: legacyActErr } = await actionClient
+          .from('contractuels_activites')
+          .upsert(formattedActivites.map(buildLegacyActiviteRecord), { onConflict: 'id' });
+        if (legacyActErr) {
+          throw new Error('Erreur sauvegarde activités contractuelles (legacy Supabase): ' + legacyActErr.message);
+        }
+      } else {
+        throw new Error('Erreur sauvegarde activités contractuelles Supabase: ' + actErr.message);
+      }
+    }
+  }
+
+  // Supprimer uniquement les activités de ce pointage qui ont été retirées par l'utilisateur
+  const keepIds = new Set(formattedActivites.map((a: any) => String(a.id)));
+  const { data: existingActs } = await actionClient
+    .from('contractuels_activites')
+    .select('id, tache_id')
+    .eq('company_id', companyId)
+    .eq('pointage_id', pointageRecord.id);
+
+  if (Array.isArray(existingActs) && existingActs.length > 0) {
+    const obsoleteIds = existingActs
+      .filter((a: any) => !keepIds.has(String(a.id)) && (!usedSchemaFallback || a.tache_id !== WORKFLOW_META_TACHE_ID))
+      .map((a: any) => a.id);
+    if (obsoleteIds.length > 0) {
+      const { error: delObsoleteErr } = await actionClient
+        .from('contractuels_activites')
+        .delete()
+        .eq('company_id', companyId)
+        .in('id', obsoleteIds);
+      if (delObsoleteErr && isSupabaseConfigured) {
+        throw new Error('Erreur nettoyage activités retirées Supabase: ' + delObsoleteErr.message);
+      }
+    }
+  }
+
+  // 3. Fallback __WORKFLOW_META__ uniquement si le schéma Supabase n'a pas encore toutes les colonnes V2
+  if (usedSchemaFallback) {
+    const metaPayload = {
+      serres_ids: pointageRecord.serres_ids,
+      serres_noms: pointageRecord.serres_noms,
+      serres_texte: pointageRecord.serres_texte,
+      taches_ids: pointageRecord.taches_ids,
+      taches_noms: pointageRecord.taches_noms,
+      taches_texte: pointageRecord.taches_texte,
+      heure_debut: pointageRecord.heure_debut,
+      heure_fin: pointageRecord.heure_fin,
+      duree_heures: pointageRecord.duree_heures,
+      tarif_initial: pointageRecord.tarif_initial,
+      montant_propose: pointageRecord.montant_propose,
+      montant_valide: pointageRecord.montant_valide,
+      tarif_modifie: pointageRecord.tarif_modifie,
+      motif_modification: pointageRecord.motif_modification,
+      statut_validation: pointageRecord.statut_validation,
+      submitted_by_id: pointageRecord.submitted_by_id,
+      submitted_by_nom: pointageRecord.submitted_by_nom,
+      submitted_at: pointageRecord.submitted_at,
+      validated_by_id: pointageRecord.validated_by_id,
+      validated_by_nom: pointageRecord.validated_by_nom,
+      validated_at: pointageRecord.validated_at,
+      motif_refus: pointageRecord.motif_refus,
+      historique_validations: pointageRecord.historique_validations,
+    };
+
+    const { error: metaErr } = await actionClient.from('contractuels_activites').upsert(
+      {
+        id: `ca_meta_${pointageRecord.id}`,
+        pointage_id: pointageRecord.id,
+        company_id: companyId,
+        ouvrier_id: ouvrierId,
+        nom_complet: pointageRecord.nom_complet,
+        matricule: pointageRecord.matricule,
+        date: dateClean,
+        tache_id: WORKFLOW_META_TACHE_ID,
+        tache_nom: WORKFLOW_META_TACHE_ID,
+        domaine_id: pointageRecord.domaine_id,
+        serre_id: pointageRecord.serre_id || 'serre_1',
+        serre_nom: pointageRecord.serres_texte || 'Meta',
+        mode_remuneration: 'JOUR',
+        quantite: 0,
+        unite: 'META',
+        prix_unitaire: 0,
+        montant_total: 0,
+        observation: JSON.stringify(metaPayload),
+        created_by_id: pointageRecord.created_by_id,
+        created_by_nom: pointageRecord.created_by_nom,
+        created_at: pointageRecord.created_at,
+        updated_at: pointageRecord.updated_at,
+      },
+      { onConflict: 'id' }
+    );
+    if (metaErr) {
+      throw new Error('Erreur sauvegarde métadonnées workflow Supabase: ' + metaErr.message);
+    }
+  }
+
+  // 4. Journal d'audit contractuels_validation_logs
+  if (validationLogEntry) {
+    const { error: logErr } = await actionClient
+      .from('contractuels_validation_logs')
+      .insert(validationLogEntry);
+    if (logErr) {
+      const code = String((logErr as any).code || '');
+      const msg = String(logErr.message || '');
+      if (code !== '42P01' && code !== 'PGRST205' && !/does not exist|schema cache/i.test(msg)) {
+        console.warn('Avertissement journal contractuels_validation_logs:', msg);
+      }
+    }
+  }
+
+  // 5. Persistance locale uniquement hors mode Supabase (dev offline tests)
+  if (!isSupabaseConfigured) {
+    const db = readDB();
+    if (!db.contractuels_pointages) db.contractuels_pointages = [];
+    if (!db.contractuels_activites) db.contractuels_activites = [];
+    if (!db.contractuels_validation_logs) db.contractuels_validation_logs = [];
+
+    db.contractuels_pointages = db.contractuels_pointages.filter(
+      (p: any) => !(p.company_id === companyId && p.date === dateClean && p.ouvrier_id === ouvrierId)
+    );
+    db.contractuels_activites = db.contractuels_activites.filter(
+      (a: any) => !(a.company_id === companyId && a.date === dateClean && a.ouvrier_id === ouvrierId)
+    );
+
+    db.contractuels_pointages.push(pointageRecord);
+    for (const a of formattedActivites) {
+      db.contractuels_activites.push(a);
+    }
+    if (validationLogEntry) {
+      db.contractuels_validation_logs.push(validationLogEntry);
+    }
+    writeDB(db);
+  }
+}
+
+// 4b. GET /api/contractuels/taches : Liste réelle des tâches de l'application accessibles au Caporal & Admin
+app.get('/api/contractuels/taches', async (req: Request, res: Response) => {
+  const auth = await authenticateContractuelCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  try {
+    const companyId = auth.user.company_id;
+    const actionClient = supabaseAdmin || auth.supabaseClient;
+    let tachesList: any[] = [];
+
+    const { data, error } = await actionClient
+      .from('taches')
+      .select('*')
+      .eq('company_id', companyId);
+
+    if (error && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture tâches Supabase: ' + error.message });
+    }
+
+    if (!error && Array.isArray(data) && data.length > 0) {
+      tachesList = data.filter((t: any) => t.actif !== false);
+    }
+
+    if (tachesList.length === 0 && !isSupabaseConfigured) {
+      const db = readDB();
+      const localTaches = (db.taches || []).filter((t: any) => t.company_id === companyId && t.actif !== false);
+      tachesList = localTaches.length > 0 ? localTaches : DEFAULT_CONTRACTUEL_TACHES.map((t) => ({ ...t, company_id: companyId }));
+    }
+
+    return res.json({ success: true, taches: tachesList });
+  } catch (err: any) {
+    console.error('Erreur GET /api/contractuels/taches:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. GET /api/contractuels/pointages : Liste des pointages journaliers avec leurs activités et statut de validation
 app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
   const auth = await authenticateContractuelCaporalOrAdmin(req);
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
@@ -5332,7 +6208,7 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
   try {
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
-    const { date, startDate, endDate, domaineId, serreId, ouvrierId } = req.query;
+    const { date, startDate, endDate, domaineId, serreId, ouvrierId, statutValidation } = req.query;
 
     let pQuery = actionClient
       .from('contractuels_pointages')
@@ -5351,13 +6227,9 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
       pQuery = pQuery.eq('ouvrier_id', String(ouvrierId));
     }
 
-    if (auth.user.role === 'caporal_contractuelles' && auth.user.domaines_autorises && auth.user.domaines_autorises.length > 0) {
-      pQuery = pQuery.in('domaine_id', auth.user.domaines_autorises);
-    }
-
     const { data: pointagesData, error: pErr } = await pQuery.order('date', { ascending: false });
 
-    // Activités
+    // Activités (NE JAMAIS filtrer par serre_id en SQL ici pour préserver __WORKFLOW_META__ et multi-serres)
     let aQuery = actionClient
       .from('contractuels_activites')
       .select('*')
@@ -5371,70 +6243,96 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
     if (domaineId && domaineId !== 'ALL') {
       aQuery = aQuery.eq('domaine_id', String(domaineId));
     }
-    if (serreId && serreId !== 'ALL') {
-      aQuery = aQuery.eq('serre_id', String(serreId));
-    }
     if (ouvrierId) {
       aQuery = aQuery.eq('ouvrier_id', String(ouvrierId));
     }
 
-    const { data: activitesData } = await aQuery.order('created_at', { ascending: true });
+    const { data: activitesData, error: aErr } = await aQuery.order('created_at', { ascending: true });
+
+    if (isSupabaseConfigured && (pErr || aErr)) {
+      return res.status(500).json({
+        success: false,
+        error: 'Erreur lecture pointages contractuels Supabase: ' + (pErr?.message || aErr?.message),
+      });
+    }
 
     let finalPointages = pointagesData || [];
     let finalActivites = activitesData || [];
+    let localMirrorList: any[] = [];
 
-    // Fallback local db if remote tables empty or error
-    if (pErr || (!pointagesData && !activitesData)) {
+    if (!isSupabaseConfigured) {
       const db = readDB();
-      let localP = (db.contractuels_pointages || []).filter((p: any) => p.company_id === companyId);
-      let localA = (db.contractuels_activites || []).filter((a: any) => a.company_id === companyId);
+      if (pErr || (!pointagesData && !activitesData)) {
+        let localP = (db.contractuels_pointages || []).filter((p: any) => p.company_id === companyId);
+        let localA = (db.contractuels_activites || []).filter((a: any) => a.company_id === companyId);
 
-      if (date) {
-        localP = localP.filter((p: any) => p.date === String(date));
-        localA = localA.filter((a: any) => a.date === String(date));
-      } else if (startDate && endDate) {
-        localP = localP.filter((p: any) => p.date >= String(startDate) && p.date <= String(endDate));
-        localA = localA.filter((a: any) => a.date >= String(startDate) && a.date <= String(endDate));
+        if (date) {
+          localP = localP.filter((p: any) => p.date === String(date));
+          localA = localA.filter((a: any) => a.date === String(date));
+        } else if (startDate && endDate) {
+          localP = localP.filter((p: any) => p.date >= String(startDate) && p.date <= String(endDate));
+          localA = localA.filter((a: any) => a.date >= String(startDate) && a.date <= String(endDate));
+        }
+        if (domaineId && domaineId !== 'ALL') {
+          localP = localP.filter((p: any) => p.domaine_id === String(domaineId));
+          localA = localA.filter((a: any) => a.domaine_id === String(domaineId));
+        }
+        if (ouvrierId) {
+          localP = localP.filter((p: any) => p.ouvrier_id === String(ouvrierId));
+          localA = localA.filter((a: any) => a.ouvrier_id === String(ouvrierId));
+        }
+        finalPointages = localP;
+        finalActivites = localA;
       }
-      if (domaineId && domaineId !== 'ALL') {
-        localP = localP.filter((p: any) => p.domaine_id === String(domaineId));
-        localA = localA.filter((a: any) => a.domaine_id === String(domaineId));
-      }
-      if (serreId && serreId !== 'ALL') {
-        localA = localA.filter((a: any) => a.serre_id === String(serreId));
-      }
-      if (ouvrierId) {
-        localP = localP.filter((p: any) => p.ouvrier_id === String(ouvrierId));
-        localA = localA.filter((a: any) => a.ouvrier_id === String(ouvrierId));
-      }
-      finalPointages = localP;
-      finalActivites = localA;
+      localMirrorList = (db.contractuels_pointages || []).filter((p: any) => p.company_id === companyId);
     }
 
-    // Associer les activités à chaque pointage
-    const enrichedPointages = finalPointages.map((ptg: any) => {
+    // Associer les activités à chaque pointage + hydrater le workflow (sans jamais écraser Supabase par le local)
+    let enrichedPointages = finalPointages.map((ptg: any) => {
       const linkedActivites = finalActivites.filter(
         (act: any) => (act.pointage_id && act.pointage_id === ptg.id) || (act.ouvrier_id === ptg.ouvrier_id && act.date === ptg.date)
       );
-      return {
-        ...ptg,
-        activites: linkedActivites,
-      };
+      const localMirror = !isSupabaseConfigured
+        ? localMirrorList.find((lp: any) => lp.id === ptg.id || (lp.ouvrier_id === ptg.ouvrier_id && lp.date === ptg.date))
+        : undefined;
+      return hydratePointageWithMeta(ptg, linkedActivites, localMirror);
     });
 
-    return res.json({ success: true, pointages: enrichedPointages, activites: finalActivites });
+    if (serreId && serreId !== 'ALL') {
+      const sTarget = String(serreId).trim().toLowerCase();
+      enrichedPointages = enrichedPointages.filter((p: any) => {
+        if (String(p.serre_id || '').toLowerCase() === sTarget) return true;
+        if (Array.isArray(p.serres_ids) && p.serres_ids.some((sid: any) => String(sid).toLowerCase() === sTarget)) return true;
+        if (Array.isArray(p.serres_noms) && p.serres_noms.some((sn: any) => String(sn).toLowerCase().includes(sTarget))) return true;
+        if (String(p.serres_texte || '').toLowerCase().includes(sTarget)) return true;
+        if (Array.isArray(p.activites) && p.activites.some((a: any) => String(a.serre_id || '').toLowerCase() === sTarget)) return true;
+        return false;
+      });
+    }
+
+    if (statutValidation && statutValidation !== 'ALL') {
+      const targetStatut = normalizeStatutValidation(String(statutValidation));
+      enrichedPointages = enrichedPointages.filter(
+        (p: any) => normalizeStatutValidation(p.statut_validation) === targetStatut
+      );
+    }
+
+    const visibleActivites = finalActivites.filter((a: any) => a.tache_id !== WORKFLOW_META_TACHE_ID);
+
+    return res.json({ success: true, pointages: enrichedPointages, activites: visibleActivites });
   } catch (err: any) {
     console.error('Erreur GET /api/contractuels/pointages:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 6. POST /api/contractuels/pointages : Enregistrer un pointage et ses activités (Présence, Tâches, Serres, Tarifs)
+// 6. POST /api/contractuels/pointages : Enregistrer un pointage (Brouillon ou Soumis par Caporal, ou Admin)
 app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
   const auth = await authenticateContractuelCaporalOrAdmin(req);
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
+  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const {
@@ -5445,6 +6343,16 @@ app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
       present,
       domaine_id,
       serre_id,
+      serres_ids,
+      serres_noms,
+      serres_texte,
+      taches_ids,
+      taches_noms,
+      taches_texte,
+      heure_debut,
+      heure_fin,
+      duree_heures,
+      motif_modification,
       activites,
     } = req.body;
 
@@ -5452,145 +6360,386 @@ app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Ouvrier et date obligatoires.' });
     }
 
-    const companyId = auth.user.company_id;
+    const currentUser = auth.user;
+    const companyId = currentUser.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
     const isPresent = Boolean(present);
     const dateClean = String(date).slice(0, 10);
-    const pointageId = `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-    // Calcul du montant total
-    let montantTotalJour = isPresent ? Math.max(0, Number(req.body.montant_total_jour ?? req.body.montant ?? 0)) : 0;
-    const formattedActivites: any[] = [];
-    const allSelectedSerresIds = new Set<string>();
-    const allSelectedSerresNoms = new Set<string>();
+    // Vérifier l'existant dans Supabase (ne jamais laisser recolte_db.json écraser Supabase)
+    let existingPointage: any = null;
+    const { data: existingRows, error: existingErr } = await actionClient
+      .from('contractuels_pointages')
+      .select('*')
+      .eq('company_id', companyId)
+      .eq('date', dateClean)
+      .eq('ouvrier_id', ouvrier_id);
 
-    if (isPresent && Array.isArray(activites) && activites.length > 0) {
-      let actSum = 0;
-      for (const act of activites) {
-        const qte = Number(act.quantite) || 1;
-        const prix = Number(act.prix_unitaire) || 0;
-        const mTotal = Math.round(qte * prix * 100) / 100;
-        actSum += mTotal;
+    if (existingErr && isSupabaseConfigured) {
+      throw new Error('Erreur lecture pointage existant Supabase: ' + existingErr.message);
+    }
 
-        // Normalisation multi-serres
-        const sIds: string[] = Array.isArray(act.serres_ids) && act.serres_ids.length > 0
-          ? act.serres_ids
-          : (act.serre_id ? [String(act.serre_id)] : []);
-        const sNoms: string[] = Array.isArray(act.serres_noms) && act.serres_noms.length > 0
-          ? act.serres_noms
-          : (act.serre_nom ? [String(act.serre_nom)] : []);
-        const sTexte: string = act.serres_texte || (sNoms.length > 0 ? sNoms.join(', ') : (act.serre_nom || 'Non affectée'));
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
+      const { data: existingActs } = await actionClient
+        .from('contractuels_activites')
+        .select('*')
+        .eq('company_id', companyId)
+        .eq('pointage_id', existingRows[0].id);
+      existingPointage = hydratePointageWithMeta(existingRows[0], existingActs || []);
+    }
 
-        sIds.forEach((id) => allSelectedSerresIds.add(id));
-        sNoms.forEach((nom) => allSelectedSerresNoms.add(nom));
-
-        const actId = act.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        formattedActivites.push({
-          id: actId,
-          pointage_id: pointageId,
-          company_id: companyId,
-          ouvrier_id,
-          nom_complet: nom_complet || 'Ouvrier Contractuel',
-          matricule: String(matricule || ''),
-          date: dateClean,
-          contrat_id: act.contrat_id ? String(act.contrat_id) : null,
-          contrat_nom: act.contrat_nom ? String(act.contrat_nom) : null,
-          tache_id: String(act.tache_id || 'tch_contractuel'),
-          tache_nom: String(act.tache_nom || 'Tâche contractuelle').trim(), // Saisie libre
-          domaine_id: String(act.domaine_id || domaine_id || 'dom_d2'),
-          serre_id: sIds[0] || String(act.serre_id || serre_id || 'serre_1'),
-          serre_nom: sTexte,
-          serres_ids: sIds,
-          serres_noms: sNoms,
-          serres_texte: sTexte,
-          mode_remuneration: act.mode_remuneration || 'JOUR',
-          quantite: qte,
-          unite: String(act.unite || 'JOUR').toUpperCase(),
-          prix_unitaire: prix, // Tarif historique figé au pointage
-          montant_total: mTotal,
-          observation: act.observation ? String(act.observation).trim() : null,
-          created_by_id: auth.user.id,
-          created_by_nom: auth.user.nom,
-          created_at: now,
-          updated_at: now,
-        });
-      }
-      if (req.body.montant_total_jour === undefined && req.body.montant === undefined) {
-        montantTotalJour = Math.round(actSum * 100) / 100;
+    const dbRead = !isSupabaseConfigured ? readDB() : null;
+    if (!isSupabaseConfigured && dbRead) {
+      const localExisting = (dbRead.contractuels_pointages || []).find(
+        (p: any) => p.company_id === companyId && p.date === dateClean && p.ouvrier_id === ouvrier_id
+      );
+      if (localExisting) {
+        existingPointage = { ...(existingPointage || {}), ...localExisting };
       }
     }
 
-    montantTotalJour = isPresent ? Math.max(0, Math.round(montantTotalJour * 100) / 100) : 0;
+    const existingStatut = existingPointage
+      ? normalizeStatutValidation(existingPointage.statut_validation)
+      : null;
 
-    const aggregatedSerresIds = Array.from(allSelectedSerresIds);
-    const aggregatedSerresNoms = Array.from(allSelectedSerresNoms);
-    const aggregatedSerresTexte = aggregatedSerresNoms.join(', ') || null;
+    if (existingStatut === 'VALIDE' && auth.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Ce pointage est déjà VALIDÉ par l\'administrateur et ne peut plus être modifié par le caporal.',
+      });
+    }
+
+    const requestedStatut = normalizeStatutValidation(req.body.statut_validation || 'BROUILLON');
+    if (auth.user.role !== 'admin' && (requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE')) {
+      return res.status(403).json({
+        success: false,
+        error: 'Action interdite : seul l\'administrateur peut valider ou refuser une rémunération.',
+      });
+    }
+
+    let workerCatalogRecord: any = null;
+    const { data: wData } = await actionClient
+      .from('contractuels_ouvriers')
+      .select('id, prix_convenu, domaine_id, matricule, nom_complet, mode_remuneration, unite')
+      .eq('id', ouvrier_id)
+      .eq('company_id', companyId)
+      .maybeSingle();
+    if (wData) workerCatalogRecord = wData;
+    if (!workerCatalogRecord && !isSupabaseConfigured && dbRead) {
+      workerCatalogRecord = (dbRead.contractuels_ouvriers || []).find(
+        (o: any) => o.id === ouvrier_id && o.company_id === companyId
+      );
+    }
+
+    const tarifInitial = roundAmount(
+      Number(workerCatalogRecord?.prix_convenu ?? req.body.tarif_initial ?? existingPointage?.tarif_initial ?? 0)
+    );
+    const workerDomaineId = String(domaine_id || workerCatalogRecord?.domaine_id || existingPointage?.domaine_id || 'dom_d2');
+    const workerMatricule = String(matricule || workerCatalogRecord?.matricule || '');
+    const workerNomComplet = String(nom_complet || workerCatalogRecord?.nom_complet || 'Ouvrier Contractuel');
+
+    const pointageId = existingPointage?.id || `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    const heureDebutClean = isPresent && heure_debut ? String(heure_debut).trim() : null;
+    const heureFinClean = isPresent && heure_fin ? String(heure_fin).trim() : null;
+    const computedDuree = isPresent
+      ? (computeWorkDurationHours(heureDebutClean, heureFinClean) ??
+        (duree_heures !== undefined && duree_heures !== null && !isNaN(Number(duree_heures))
+          ? roundAmount(Number(duree_heures))
+          : null))
+      : null;
+
+    const rawProposed = req.body.montant_propose ?? req.body.montant_total_jour ?? req.body.montant ?? tarifInitial;
+    const montantPropose = isPresent ? roundAmount(Number(rawProposed)) : 0;
+    const tarifModifie = isPresent ? isTarifModifie(tarifInitial, montantPropose, true) : false;
+
+    const montantValide =
+      requestedStatut === 'VALIDE'
+        ? (isPresent ? roundAmount(Number(req.body.montant_valide ?? montantPropose)) : 0)
+        : null;
+
+    const montantTotalJourOfficiel =
+      isPresent && requestedStatut === 'VALIDE' ? (montantValide ?? 0) : 0;
+
+    const normalizedSerresIds: string[] = isPresent
+      ? (Array.isArray(serres_ids) && serres_ids.length > 0
+          ? serres_ids.map(String)
+          : (serre_id ? [String(serre_id)] : []))
+      : [];
+    const normalizedSerresNoms: string[] = isPresent
+      ? (Array.isArray(serres_noms) && serres_noms.length > 0
+          ? serres_noms.map(String)
+          : (serres_texte ? String(serres_texte).split(',').map((s: string) => s.trim()).filter(Boolean) : []))
+      : [];
+
+    const normalizedTachesIds: string[] = isPresent && Array.isArray(taches_ids) ? taches_ids.map(String) : [];
+    const normalizedTachesNoms: string[] = isPresent && Array.isArray(taches_noms)
+      ? taches_noms.map((n: any) => String(n).trim()).filter(Boolean)
+      : (isPresent && taches_texte ? String(taches_texte).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+
+    const formattedActivites: any[] = [];
+    const allSelectedSerresIds = new Set<string>(normalizedSerresIds);
+    const allSelectedSerresNoms = new Set<string>(normalizedSerresNoms);
+    const allSelectedTachesIds = new Set<string>(normalizedTachesIds);
+    const allSelectedTachesNoms = new Set<string>(normalizedTachesNoms);
+
+    if (isPresent) {
+      if (Array.isArray(activites) && activites.length > 0) {
+        const count = activites.length;
+        let runningAllocated = 0;
+        activites.forEach((act: any, idx: number) => {
+          const sIds: string[] = Array.isArray(act.serres_ids) && act.serres_ids.length > 0
+            ? act.serres_ids.map(String)
+            : (normalizedSerresIds.length > 0 ? normalizedSerresIds : (act.serre_id ? [String(act.serre_id)] : []));
+          const sNoms: string[] = Array.isArray(act.serres_noms) && act.serres_noms.length > 0
+            ? act.serres_noms.map(String)
+            : (normalizedSerresNoms.length > 0 ? normalizedSerresNoms : (act.serre_nom ? [String(act.serre_nom)] : []));
+          const sTexte: string = act.serres_texte || (sNoms.length > 0 ? sNoms.join(', ') : (act.serre_nom || 'Non affectée'));
+
+          sIds.forEach((id) => allSelectedSerresIds.add(id));
+          sNoms.forEach((nom) => allSelectedSerresNoms.add(nom));
+
+          const tId = String(act.tache_id || normalizedTachesIds[idx] || 'tch_contractuel');
+          const tNom = String(act.tache_nom || normalizedTachesNoms[idx] || 'Tâche contractuelle').trim();
+          allSelectedTachesIds.add(tId);
+          allSelectedTachesNoms.add(tNom);
+
+          let actMontant = Number(act.montant_total);
+          if (isNaN(actMontant) || req.body.montant_propose !== undefined) {
+            if (idx === count - 1) {
+              actMontant = roundAmount(Math.max(0, montantPropose - runningAllocated));
+            } else {
+              actMontant = roundAmount(montantPropose / count);
+              runningAllocated += actMontant;
+            }
+          }
+
+          formattedActivites.push({
+            id: act.id || `ca_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+            pointage_id: pointageId,
+            company_id: companyId,
+            ouvrier_id,
+            nom_complet: workerNomComplet,
+            matricule: workerMatricule,
+            date: dateClean,
+            contrat_id: act.contrat_id ? String(act.contrat_id) : null,
+            contrat_nom: act.contrat_nom ? String(act.contrat_nom) : null,
+            tache_id: tId,
+            tache_nom: tNom,
+            domaine_id: String(act.domaine_id || workerDomaineId),
+            serre_id: sIds[0] || String(act.serre_id || serre_id || 'serre_1'),
+            serre_nom: sTexte,
+            serres_ids: sIds,
+            serres_noms: sNoms,
+            serres_texte: sTexte,
+            heure_debut: heureDebutClean,
+            heure_fin: heureFinClean,
+            duree_heures: computedDuree,
+            tarif_initial: tarifInitial,
+            montant_propose: montantPropose,
+            montant_valide: montantValide,
+            statut_validation: requestedStatut,
+            mode_remuneration: act.mode_remuneration || workerCatalogRecord?.mode_remuneration || 'JOUR',
+            quantite: Number(act.quantite) || 1,
+            unite: String(act.unite || workerCatalogRecord?.unite || 'JOUR').toUpperCase(),
+            prix_unitaire: roundAmount(Number(act.prix_unitaire ?? actMontant)),
+            montant_total: roundAmount(actMontant),
+            observation: act.observation ? String(act.observation).trim() : (motif_modification ? String(motif_modification).trim() : null),
+            created_by_id: currentUser.id,
+            created_by_nom: currentUser.nom,
+            created_at: now,
+            updated_at: now,
+          });
+        });
+      } else if (normalizedTachesIds.length > 0 || normalizedTachesNoms.length > 0) {
+        const count = Math.max(normalizedTachesIds.length, normalizedTachesNoms.length);
+        const sIds = Array.from(allSelectedSerresIds);
+        const sNoms = Array.from(allSelectedSerresNoms);
+        const sTexte = sNoms.join(', ') || 'Non affectée';
+        let runningAllocated = 0;
+
+        for (let idx = 0; idx < count; idx++) {
+          const tId = normalizedTachesIds[idx] || `tch_${idx}`;
+          const tNom = normalizedTachesNoms[idx] || tId;
+          const actMontant =
+            idx === count - 1
+              ? roundAmount(Math.max(0, montantPropose - runningAllocated))
+              : roundAmount(montantPropose / count);
+          if (idx < count - 1) runningAllocated += actMontant;
+
+          formattedActivites.push({
+            id: `ca_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+            pointage_id: pointageId,
+            company_id: companyId,
+            ouvrier_id,
+            nom_complet: workerNomComplet,
+            matricule: workerMatricule,
+            date: dateClean,
+            contrat_id: null,
+            contrat_nom: null,
+            tache_id: tId,
+            tache_nom: tNom,
+            domaine_id: workerDomaineId,
+            serre_id: sIds[0] || String(serre_id || 'serre_1'),
+            serre_nom: sTexte,
+            serres_ids: sIds,
+            serres_noms: sNoms,
+            serres_texte: sTexte,
+            heure_debut: heureDebutClean,
+            heure_fin: heureFinClean,
+            duree_heures: computedDuree,
+            tarif_initial: tarifInitial,
+            montant_propose: montantPropose,
+            montant_valide: montantValide,
+            statut_validation: requestedStatut,
+            mode_remuneration: workerCatalogRecord?.mode_remuneration || 'JOUR',
+            quantite: computedDuree || 1,
+            unite: computedDuree ? 'HEURE' : (workerCatalogRecord?.unite || 'JOUR'),
+            prix_unitaire: actMontant,
+            montant_total: actMontant,
+            observation: motif_modification ? String(motif_modification).trim() : null,
+            created_by_id: auth.user.id,
+            created_by_nom: auth.user.nom,
+            created_at: now,
+            updated_at: now,
+          });
+        }
+      }
+    }
+
+    const aggregatedSerresIds = isPresent ? Array.from(allSelectedSerresIds) : [];
+    const aggregatedSerresNoms = isPresent ? Array.from(allSelectedSerresNoms) : [];
+    const aggregatedSerresTexte = isPresent ? (aggregatedSerresNoms.join(', ') || null) : null;
+
+    const aggregatedTachesIds = isPresent ? Array.from(allSelectedTachesIds) : [];
+    const aggregatedTachesNoms = isPresent ? Array.from(allSelectedTachesNoms) : [];
+    const aggregatedTachesTexte = isPresent ? (aggregatedTachesNoms.join(', ') || taches_texte || null) : null;
+
+    const actionType =
+      requestedStatut === 'VALIDE'
+        ? 'VALIDATION'
+        : requestedStatut === 'REFUSE'
+        ? 'REFUS'
+        : requestedStatut === 'SOUMIS'
+        ? 'SOUMISSION'
+        : existingPointage
+        ? 'MODIFICATION'
+        : 'CREATION';
+
+    const historyEntry = buildHistoriqueEntry({
+      action: actionType,
+      auteur_id: auth.user.id,
+      auteur_nom: auth.user.nom,
+      auteur_role: auth.user.role,
+      statut_avant: existingStatut,
+      statut_apres: requestedStatut,
+      present: isPresent,
+      domaine_id: workerDomaineId,
+      taches_ids: aggregatedTachesIds,
+      taches_noms: aggregatedTachesNoms,
+      serres_ids: aggregatedSerresIds,
+      serres_noms: aggregatedSerresNoms,
+      heure_debut: heureDebutClean,
+      heure_fin: heureFinClean,
+      duree_heures: computedDuree,
+      tarif_initial: tarifInitial,
+      montant_propose: montantPropose,
+      montant_valide: montantValide,
+      tarif_modifie: tarifModifie,
+      motif:
+        requestedStatut === 'REFUSE'
+          ? (req.body.motif_refus || req.body.motif || null)
+          : (motif_modification ? String(motif_modification).trim() : null),
+      timestamp: now,
+    });
+
+    const updatedHistorique = appendHistorique(existingPointage?.historique_validations, historyEntry);
 
     const pointageRecord = {
       id: pointageId,
       company_id: companyId,
       ouvrier_id,
-      matricule: String(matricule || ''),
-      nom_complet: nom_complet || 'Ouvrier Contractuel',
+      matricule: workerMatricule,
+      nom_complet: workerNomComplet,
       date: dateClean,
       present: isPresent,
-      domaine_id: String(domaine_id || 'dom_d2'),
-      serre_id: aggregatedSerresIds[0] || (serre_id ? String(serre_id) : null),
+      domaine_id: workerDomaineId,
+      serre_id: aggregatedSerresIds[0] || (isPresent && serre_id ? String(serre_id) : null),
       serres_ids: aggregatedSerresIds,
       serres_noms: aggregatedSerresNoms,
       serres_texte: aggregatedSerresTexte,
-      montant_total_jour: montantTotalJour,
-      created_by_id: auth.user.id,
-      created_by_nom: auth.user.nom,
-      created_at: now,
+      taches_ids: aggregatedTachesIds,
+      taches_noms: aggregatedTachesNoms,
+      taches_texte: aggregatedTachesTexte,
+      heure_debut: heureDebutClean,
+      heure_fin: heureFinClean,
+      duree_heures: computedDuree,
+      tarif_initial: tarifInitial,
+      montant_propose: montantPropose,
+      montant_valide: montantValide,
+      tarif_modifie: tarifModifie,
+      motif_modification: isPresent && motif_modification ? String(motif_modification).trim() : null,
+      statut_validation: requestedStatut,
+      submitted_by_id:
+        requestedStatut === 'SOUMIS'
+          ? auth.user.id
+          : (existingPointage?.submitted_by_id || (requestedStatut === 'BROUILLON' ? null : auth.user.id)),
+      submitted_by_nom:
+        requestedStatut === 'SOUMIS'
+          ? auth.user.nom
+          : (existingPointage?.submitted_by_nom || (requestedStatut === 'BROUILLON' ? null : auth.user.nom)),
+      submitted_at:
+        requestedStatut === 'SOUMIS'
+          ? now
+          : (existingPointage?.submitted_at || null),
+      validated_by_id: requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE' ? auth.user.id : null,
+      validated_by_nom: requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE' ? auth.user.nom : null,
+      validated_at: requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE' ? now : null,
+      motif_refus: requestedStatut === 'REFUSE' ? (req.body.motif_refus || req.body.motif || null) : null,
+      historique_validations: updatedHistorique,
+      montant_total_jour: montantTotalJourOfficiel,
+      created_by_id: existingPointage?.created_by_id || auth.user.id,
+      created_by_nom: existingPointage?.created_by_nom || auth.user.nom,
+      created_at: existingPointage?.created_at || now,
       updated_at: now,
     };
 
-    // Supprimer l'ancien pointage et anciennes activités de ce jour pour cet ouvrier pour éviter les doublons
-    await actionClient
-      .from('contractuels_pointages')
-      .delete()
-      .eq('company_id', companyId)
-      .eq('date', dateClean)
-      .eq('ouvrier_id', ouvrier_id);
+    const validationLogRow = {
+      id: `vlog_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      pointage_id: pointageId,
+      company_id: companyId,
+      ouvrier_id,
+      date: dateClean,
+      action: actionType,
+      auteur_id: auth.user.id,
+      auteur_nom: auth.user.nom,
+      auteur_role: auth.user.role,
+      statut_avant: existingStatut,
+      statut_apres: requestedStatut,
+      present: isPresent,
+      tarif_initial: tarifInitial,
+      montant_propose: montantPropose,
+      montant_valide: montantValide,
+      tarif_modifie: tarifModifie,
+      taches_noms: aggregatedTachesNoms,
+      serres_noms: aggregatedSerresNoms,
+      heure_debut: heureDebutClean,
+      heure_fin: heureFinClean,
+      duree_heures: computedDuree,
+      motif: historyEntry.motif,
+      created_at: now,
+    };
 
-    await actionClient
-      .from('contractuels_activites')
-      .delete()
-      .eq('company_id', companyId)
-      .eq('date', dateClean)
-      .eq('ouvrier_id', ouvrier_id);
-
-    // Insérer le nouveau pointage
-    await actionClient
-      .from('contractuels_pointages')
-      .insert(pointageRecord);
-
-    // Insérer les activités si présent
-    if (formattedActivites.length > 0) {
-      await actionClient
-        .from('contractuels_activites')
-        .insert(formattedActivites);
-    }
-
-    // Persistance locale miroir
-    const db = readDB();
-    if (!db.contractuels_pointages) db.contractuels_pointages = [];
-    if (!db.contractuels_activites) db.contractuels_activites = [];
-
-    db.contractuels_pointages = db.contractuels_pointages.filter(
-      (p: any) => !(p.company_id === companyId && p.date === dateClean && p.ouvrier_id === ouvrier_id)
+    await persistPointageResilient(
+      actionClient,
+      pointageRecord,
+      formattedActivites,
+      validationLogRow,
+      companyId,
+      dateClean,
+      ouvrier_id
     );
-    db.contractuels_activites = db.contractuels_activites.filter(
-      (a: any) => !(a.company_id === companyId && a.date === dateClean && a.ouvrier_id === ouvrier_id)
-    );
-
-    db.contractuels_pointages.push(pointageRecord);
-    for (const a of formattedActivites) {
-      db.contractuels_activites.push(a);
-    }
-    writeDB(db);
 
     return res.json({
       success: true,
@@ -5598,10 +6747,371 @@ app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
         ...pointageRecord,
         activites: formattedActivites,
       },
-      message: `Pointage enregistré (${isPresent ? 'Présent' : 'Absent'}, ${montantTotalJour} DH).`,
+      message: `Pointage enregistré (${isPresent ? 'Présent' : 'Absent'} • ${requestedStatut}, proposé ${montantPropose} DH).`,
     });
   } catch (err: any) {
     console.error('Erreur POST /api/contractuels/pointages:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6b. POST /api/contractuels/pointages/:id/validate : Validation / Refus ADMINISTRATEUR UNIQUEMENT
+app.post('/api/contractuels/pointages/:id/validate', async (req: Request, res: Response) => {
+  const auth = await authenticateContractuelCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  if (auth.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Action interdite : seul l\'administrateur peut valider ou refuser une rémunération contractuelle.',
+    });
+  }
+
+  try {
+    const { id } = req.params;
+    const { decision, montant_valide, motif } = req.body;
+    const decisionClean = normalizeStatutValidation(decision);
+
+    if (decisionClean !== 'VALIDE' && decisionClean !== 'REFUSE') {
+      return res.status(400).json({
+        success: false,
+        error: 'Décision invalide. Valeurs attendues : VALIDE ou REFUSE.',
+      });
+    }
+
+    const companyId = auth.user.company_id;
+    const actionClient = supabaseAdmin || auth.supabaseClient;
+    const now = new Date().toISOString();
+
+    let existingPtg: any = null;
+    let existingActs: any[] = [];
+    const { data: ptgRow, error: ptgReadErr } = await actionClient
+      .from('contractuels_pointages')
+      .select('*')
+      .eq('id', id)
+      .eq('company_id', companyId)
+      .maybeSingle();
+
+    if (ptgReadErr && isSupabaseConfigured) {
+      throw new Error('Erreur lecture pointage Supabase: ' + ptgReadErr.message);
+    }
+    if (ptgRow) existingPtg = ptgRow;
+
+    const { data: actsRows, error: actsReadErr } = await actionClient
+      .from('contractuels_activites')
+      .select('*')
+      .eq('pointage_id', id)
+      .eq('company_id', companyId);
+
+    if (actsReadErr && isSupabaseConfigured) {
+      throw new Error('Erreur lecture activités Supabase: ' + actsReadErr.message);
+    }
+    if (Array.isArray(actsRows)) existingActs = actsRows;
+
+    let localMirror: any = undefined;
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      localMirror = (db.contractuels_pointages || []).find(
+        (p: any) => p.id === id && p.company_id === companyId
+      );
+      if (!existingPtg && localMirror) {
+        existingPtg = localMirror;
+        existingActs = (db.contractuels_activites || []).filter(
+          (a: any) => a.pointage_id === id && a.company_id === companyId
+        );
+      }
+    }
+
+    if (!existingPtg) {
+      return res.status(404).json({ success: false, error: 'Pointage contractuel introuvable.' });
+    }
+
+    const hydrated = hydratePointageWithMeta(existingPtg, existingActs, localMirror);
+    const statutAvant = normalizeStatutValidation(hydrated.statut_validation);
+    const isPresent = Boolean(hydrated.present);
+
+    let finalMontantValide: number | null = null;
+    let finalMontantOfficiel = 0;
+    let finalMotifRefus: string | null = null;
+
+    if (decisionClean === 'VALIDE') {
+      finalMontantValide = isPresent
+        ? roundAmount(Number(montant_valide ?? hydrated.montant_propose ?? hydrated.tarif_initial ?? 0))
+        : 0;
+      finalMontantOfficiel = finalMontantValide;
+      finalMotifRefus = null;
+    } else {
+      finalMontantValide = null;
+      finalMontantOfficiel = 0;
+      finalMotifRefus = motif ? String(motif).trim() : 'Refusé par l\'administrateur';
+    }
+
+    const historyEntry = buildHistoriqueEntry({
+      action: decisionClean === 'VALIDE' ? 'VALIDATION' : 'REFUS',
+      auteur_id: auth.user.id,
+      auteur_nom: auth.user.nom,
+      auteur_role: auth.user.role,
+      statut_avant: statutAvant,
+      statut_apres: decisionClean,
+      present: isPresent,
+      domaine_id: hydrated.domaine_id,
+      taches_ids: hydrated.taches_ids,
+      taches_noms: hydrated.taches_noms,
+      serres_ids: hydrated.serres_ids,
+      serres_noms: hydrated.serres_noms,
+      heure_debut: hydrated.heure_debut,
+      heure_fin: hydrated.heure_fin,
+      duree_heures: hydrated.duree_heures,
+      tarif_initial: hydrated.tarif_initial,
+      montant_propose: hydrated.montant_propose,
+      montant_valide: finalMontantValide,
+      tarif_modifie: hydrated.tarif_modifie,
+      motif: motif ? String(motif).trim() : finalMotifRefus,
+      timestamp: now,
+    });
+
+    const updatedHistorique = appendHistorique(hydrated.historique_validations, historyEntry);
+
+    const updatedRecord = {
+      ...hydrated,
+      statut_validation: decisionClean,
+      montant_valide: finalMontantValide,
+      montant_total_jour: finalMontantOfficiel,
+      validated_by_id: auth.user.id,
+      validated_by_nom: auth.user.nom,
+      validated_at: now,
+      motif_refus: finalMotifRefus,
+      historique_validations: updatedHistorique,
+      updated_at: now,
+    };
+    delete (updatedRecord as any).activites;
+
+    const visibleActs = Array.isArray(hydrated.activites) ? hydrated.activites : [];
+    const updatedActs = visibleActs.map((act: any, idx: number) => {
+      let mAct = Number(act.montant_total) || 0;
+      if (decisionClean === 'VALIDE' && isPresent && finalMontantValide !== null && visibleActs.length > 0) {
+        if (montant_valide !== undefined || visibleActs.length === 1) {
+          mAct = idx === 0 ? finalMontantValide : 0;
+          if (visibleActs.length > 1) {
+            const perAct = roundAmount(finalMontantValide / visibleActs.length);
+            mAct = idx === visibleActs.length - 1
+              ? roundAmount(Math.max(0, finalMontantValide - perAct * (visibleActs.length - 1)))
+              : perAct;
+          }
+        }
+      }
+      return {
+        ...act,
+        montant_valide: finalMontantValide,
+        statut_validation: decisionClean,
+        montant_total: mAct,
+        updated_at: now,
+      };
+    });
+
+    const validationLogRow = {
+      id: `vlog_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      pointage_id: hydrated.id,
+      company_id: companyId,
+      ouvrier_id: hydrated.ouvrier_id,
+      date: hydrated.date,
+      action: decisionClean === 'VALIDE' ? 'VALIDATION' : 'REFUS',
+      auteur_id: auth.user.id,
+      auteur_nom: auth.user.nom,
+      auteur_role: auth.user.role,
+      statut_avant: statutAvant,
+      statut_apres: decisionClean,
+      present: isPresent,
+      tarif_initial: hydrated.tarif_initial,
+      montant_propose: hydrated.montant_propose,
+      montant_valide: finalMontantValide,
+      tarif_modifie: hydrated.tarif_modifie,
+      taches_noms: hydrated.taches_noms,
+      serres_noms: hydrated.serres_noms,
+      heure_debut: hydrated.heure_debut,
+      heure_fin: hydrated.heure_fin,
+      duree_heures: hydrated.duree_heures,
+      motif: historyEntry.motif,
+      created_at: now,
+    };
+
+    await persistPointageResilient(
+      actionClient,
+      updatedRecord,
+      updatedActs,
+      validationLogRow,
+      companyId,
+      hydrated.date,
+      hydrated.ouvrier_id
+    );
+
+    return res.json({
+      success: true,
+      pointage: {
+        ...updatedRecord,
+        activites: updatedActs,
+      },
+      message:
+        decisionClean === 'VALIDE'
+          ? `Rémunération validée (${finalMontantOfficiel} DH).`
+          : `Rémunération refusée (${finalMotifRefus}).`,
+    });
+  } catch (err: any) {
+    console.error('Erreur POST /api/contractuels/pointages/:id/validate:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6c. POST /api/contractuels/pointages/validate-batch : Validation en lot (Admin uniquement)
+app.post('/api/contractuels/pointages/validate-batch', async (req: Request, res: Response) => {
+  const auth = await authenticateContractuelCaporalOrAdmin(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
+  if (auth.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Action interdite : seul l\'administrateur peut valider en lot.',
+    });
+  }
+
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, error: 'Aucun élément à valider.' });
+    }
+
+    const companyId = auth.user.company_id;
+    const actionClient = supabaseAdmin || auth.supabaseClient;
+    const now = new Date().toISOString();
+    const updatedList: any[] = [];
+
+    for (const item of items) {
+      if (!item?.id) continue;
+      const decisionClean = normalizeStatutValidation(item.decision || 'VALIDE');
+      if (decisionClean !== 'VALIDE' && decisionClean !== 'REFUSE') continue;
+
+      let existingPtg: any = null;
+      let existingActs: any[] = [];
+      const { data: pRow, error: pErr } = await actionClient
+        .from('contractuels_pointages')
+        .select('*')
+        .eq('id', item.id)
+        .eq('company_id', companyId)
+        .maybeSingle();
+      if (pErr && isSupabaseConfigured) {
+        throw new Error('Erreur lecture pointage batch Supabase: ' + pErr.message);
+      }
+      if (pRow) existingPtg = pRow;
+
+      const { data: aRows, error: aErr } = await actionClient
+        .from('contractuels_activites')
+        .select('*')
+        .eq('pointage_id', item.id)
+        .eq('company_id', companyId);
+      if (aErr && isSupabaseConfigured) {
+        throw new Error('Erreur lecture activités batch Supabase: ' + aErr.message);
+      }
+      if (Array.isArray(aRows)) existingActs = aRows;
+
+      let localMirror: any = undefined;
+      if (!isSupabaseConfigured) {
+        const db = readDB();
+        localMirror = (db.contractuels_pointages || []).find(
+          (p: any) => p.id === item.id && p.company_id === companyId
+        );
+        if (!existingPtg && localMirror) {
+          existingPtg = localMirror;
+          existingActs = (db.contractuels_activites || []).filter(
+            (a: any) => a.pointage_id === item.id && a.company_id === companyId
+          );
+        }
+      }
+      if (!existingPtg) continue;
+
+      const hydrated = hydratePointageWithMeta(existingPtg, existingActs, localMirror);
+      const statutAvant = normalizeStatutValidation(hydrated.statut_validation);
+      const isPresent = Boolean(hydrated.present);
+
+      const finalMontantValide =
+        decisionClean === 'VALIDE'
+          ? (isPresent ? roundAmount(Number(item.montant_valide ?? hydrated.montant_propose ?? hydrated.tarif_initial ?? 0)) : 0)
+          : null;
+      const finalMontantOfficiel = decisionClean === 'VALIDE' ? (finalMontantValide ?? 0) : 0;
+      const finalMotifRefus = decisionClean === 'REFUSE'
+        ? (item.motif ? String(item.motif).trim() : 'Refusé par l\'administrateur')
+        : null;
+
+      const historyEntry = buildHistoriqueEntry({
+        action: decisionClean === 'VALIDE' ? 'VALIDATION' : 'REFUS',
+        auteur_id: auth.user.id,
+        auteur_nom: auth.user.nom,
+        auteur_role: auth.user.role,
+        statut_avant: statutAvant,
+        statut_apres: decisionClean,
+        present: isPresent,
+        domaine_id: hydrated.domaine_id,
+        taches_ids: hydrated.taches_ids,
+        taches_noms: hydrated.taches_noms,
+        serres_ids: hydrated.serres_ids,
+        serres_noms: hydrated.serres_noms,
+        heure_debut: hydrated.heure_debut,
+        heure_fin: hydrated.heure_fin,
+        duree_heures: hydrated.duree_heures,
+        tarif_initial: hydrated.tarif_initial,
+        montant_propose: hydrated.montant_propose,
+        montant_valide: finalMontantValide,
+        tarif_modifie: hydrated.tarif_modifie,
+        motif: item.motif ? String(item.motif).trim() : finalMotifRefus,
+        timestamp: now,
+      });
+
+      const updatedRecord = {
+        ...hydrated,
+        statut_validation: decisionClean,
+        montant_valide: finalMontantValide,
+        montant_total_jour: finalMontantOfficiel,
+        validated_by_id: auth.user.id,
+        validated_by_nom: auth.user.nom,
+        validated_at: now,
+        motif_refus: finalMotifRefus,
+        historique_validations: appendHistorique(hydrated.historique_validations, historyEntry),
+        updated_at: now,
+      };
+      delete (updatedRecord as any).activites;
+
+      const visibleActs = Array.isArray(hydrated.activites) ? hydrated.activites : [];
+      const updatedActs = visibleActs.map((act: any) => ({
+        ...act,
+        montant_valide: finalMontantValide,
+        statut_validation: decisionClean,
+        updated_at: now,
+      }));
+
+      await persistPointageResilient(
+        actionClient,
+        updatedRecord,
+        updatedActs,
+        null,
+        companyId,
+        hydrated.date,
+        hydrated.ouvrier_id
+      );
+
+      updatedList.push({ ...updatedRecord, activites: updatedActs });
+    }
+
+    return res.json({
+      success: true,
+      count: updatedList.length,
+      pointages: updatedList,
+      message: `${updatedList.length} pointage(s) traité(s) par l'administrateur.`,
+    });
+  } catch (err: any) {
+    console.error('Erreur POST /api/contractuels/pointages/validate-batch:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -5612,32 +7122,75 @@ app.delete('/api/contractuels/pointages/:id', async (req: Request, res: Response
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
+  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const { id } = req.params;
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
 
-    await actionClient
+    // Vérifier le statut VALIDE directement en base
+    const { data: remotePtg, error: readErr } = await actionClient
+      .from('contractuels_pointages')
+      .select('*')
+      .eq('id', id)
+      .eq('company_id', companyId)
+      .maybeSingle();
+
+    if (readErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture pointage Supabase: ' + readErr.message });
+    }
+
+    let targetPtg = remotePtg;
+    if (targetPtg) {
+      const { data: remoteActs } = await actionClient
+        .from('contractuels_activites')
+        .select('*')
+        .eq('pointage_id', id)
+        .eq('company_id', companyId);
+      targetPtg = hydratePointageWithMeta(targetPtg, remoteActs || []);
+    } else if (!isSupabaseConfigured) {
+      const dbCheck = readDB();
+      targetPtg = (dbCheck.contractuels_pointages || []).find((p: any) => p.id === id && p.company_id === companyId);
+    }
+
+    if (targetPtg && normalizeStatutValidation(targetPtg.statut_validation) === 'VALIDE' && auth.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Action interdite : un pointage déjà validé par l\'administrateur ne peut pas être supprimé par le caporal.',
+      });
+    }
+
+    const { error: delActErr } = await actionClient
       .from('contractuels_activites')
       .delete()
       .eq('pointage_id', id)
       .eq('company_id', companyId);
 
-    await actionClient
+    if (delActErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur suppression activités Supabase: ' + delActErr.message });
+    }
+
+    const { error: delPtgErr } = await actionClient
       .from('contractuels_pointages')
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
 
-    const db = readDB();
-    if (db.contractuels_pointages) {
-      db.contractuels_pointages = db.contractuels_pointages.filter((p: any) => p.id !== id || p.company_id !== companyId);
+    if (delPtgErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur suppression pointage Supabase: ' + delPtgErr.message });
     }
-    if (db.contractuels_activites) {
-      db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.pointage_id !== id || a.company_id !== companyId);
+
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (db.contractuels_pointages) {
+        db.contractuels_pointages = db.contractuels_pointages.filter((p: any) => p.id !== id || p.company_id !== companyId);
+      }
+      if (db.contractuels_activites) {
+        db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.pointage_id !== id || a.company_id !== companyId);
+      }
+      writeDB(db);
     }
-    writeDB(db);
 
     return res.json({ success: true, message: 'Pointage contractuel supprimé.' });
   } catch (err: any) {
@@ -5652,44 +7205,92 @@ app.delete('/api/contractuels/activites/:id', async (req: Request, res: Response
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
+  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const { id } = req.params;
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
 
-    // Récupérer l'activité pour connaître le pointage_id
-    const { data: act } = await actionClient
+    const { data: act, error: actErr } = await actionClient
       .from('contractuels_activites')
       .select('pointage_id, montant_total')
       .eq('id', id)
       .eq('company_id', companyId)
       .maybeSingle();
 
-    await actionClient
+    if (actErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur lecture activité Supabase: ' + actErr.message });
+    }
+
+    if (act?.pointage_id && auth.user.role !== 'admin') {
+      const { data: parentRow } = await actionClient
+        .from('contractuels_pointages')
+        .select('*')
+        .eq('id', act.pointage_id)
+        .eq('company_id', companyId)
+        .maybeSingle();
+
+      let parentPtg = parentRow;
+      if (parentPtg) {
+        const { data: pActs } = await actionClient
+          .from('contractuels_activites')
+          .select('*')
+          .eq('pointage_id', act.pointage_id)
+          .eq('company_id', companyId);
+        parentPtg = hydratePointageWithMeta(parentPtg, pActs || []);
+      } else if (!isSupabaseConfigured) {
+        const dbCheck = readDB();
+        parentPtg = (dbCheck.contractuels_pointages || []).find((p: any) => p.id === act.pointage_id);
+      }
+
+      if (parentPtg && normalizeStatutValidation(parentPtg.statut_validation) === 'VALIDE') {
+        return res.status(403).json({
+          success: false,
+          error: 'Action interdite : ce pointage est déjà validé par l\'administrateur.',
+        });
+      }
+    }
+
+    const { error: delErr } = await actionClient
       .from('contractuels_activites')
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
 
-    // Mettre à jour le montant du pointage parent si trouvé
+    if (delErr && isSupabaseConfigured) {
+      return res.status(500).json({ success: false, error: 'Erreur suppression activité Supabase: ' + delErr.message });
+    }
+
     if (act?.pointage_id) {
       const { data: remainingActs } = await actionClient
         .from('contractuels_activites')
-        .select('montant_total')
-        .eq('pointage_id', act.pointage_id);
+        .select('tache_id, montant_total')
+        .eq('pointage_id', act.pointage_id)
+        .eq('company_id', companyId);
 
-      const newTotal = (remainingActs || []).reduce((sum: number, a: any) => sum + (Number(a.montant_total) || 0), 0);
-      await actionClient
+      const newTotal = (remainingActs || [])
+        .filter((a: any) => a.tache_id !== WORKFLOW_META_TACHE_ID)
+        .reduce((sum: number, a: any) => sum + (Number(a.montant_total) || 0), 0);
+
+      const rounded = roundAmount(newTotal);
+      const { error: updErr } = await actionClient
         .from('contractuels_pointages')
-        .update({ montant_total_jour: Math.round(newTotal * 100) / 100 })
-        .eq('id', act.pointage_id);
+        .update({ montant_propose: rounded })
+        .eq('id', act.pointage_id)
+        .eq('company_id', companyId);
+
+      if (updErr && !isMissingColumnSchemaError(updErr) && isSupabaseConfigured) {
+        return res.status(500).json({ success: false, error: 'Erreur mise à jour pointage parent Supabase: ' + updErr.message });
+      }
     }
 
-    const db = readDB();
-    if (db.contractuels_activites) {
-      db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.id !== id || a.company_id !== companyId);
-      writeDB(db);
+    if (!isSupabaseConfigured) {
+      const db = readDB();
+      if (db.contractuels_activites) {
+        db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.id !== id || a.company_id !== companyId);
+        writeDB(db);
+      }
     }
 
     return res.json({ success: true, message: 'Activité supprimée avec succès.' });
@@ -5699,83 +7300,218 @@ app.delete('/api/contractuels/activites/:id', async (req: Request, res: Response
   }
 });
 
-// 9. POST /api/contractuels/sync : Synchronisation hors ligne des contractuelles
+// 9. POST /api/contractuels/sync : Synchronisation hors ligne V2 des contractuelles (sans jamais écraser plus récent/validé)
 app.post('/api/contractuels/sync', async (req: Request, res: Response) => {
   const auth = await authenticateContractuelCaporalOrAdmin(req);
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
+  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const { pendingPointages } = req.body;
     if (!Array.isArray(pendingPointages) || pendingPointages.length === 0) {
-      return res.json({ success: true, count: 0 });
+      return res.json({ success: true, count: 0, pointages: [] });
     }
 
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
+    const now = new Date().toISOString();
+    const syncedPointages: any[] = [];
     let synced = 0;
 
     for (const item of pendingPointages) {
-      if (!item.ouvrier_id || !item.date) continue;
+      if (!item?.ouvrier_id || !item?.date) continue;
 
       const dateClean = String(item.date).slice(0, 10);
       const isPresent = Boolean(item.present);
-      const montantTotal = Number(item.montant_total_jour) || 0;
-      const pointageId = item.id || `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-      await actionClient
+      // Lire l'existant en base pour protéger VALIDE et données plus récentes
+      const { data: existingRows, error: existingErr } = await actionClient
         .from('contractuels_pointages')
-        .upsert({
-          id: pointageId,
-          company_id: companyId,
-          ouvrier_id: item.ouvrier_id,
-          matricule: String(item.matricule || ''),
-          nom_complet: String(item.nom_complet || ''),
-          date: dateClean,
-          present: isPresent,
-          domaine_id: String(item.domaine_id || 'dom_d2'),
-          serre_id: item.serre_id || null,
-          montant_total_jour: montantTotal,
-          created_by_id: auth.user.id,
-          created_by_nom: auth.user.nom,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'id' });
+        .select('*')
+        .eq('company_id', companyId)
+        .eq('date', dateClean)
+        .eq('ouvrier_id', item.ouvrier_id);
 
-      if (Array.isArray(item.activites)) {
-        for (const act of item.activites) {
-          const actId = act.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-          await actionClient
-            .from('contractuels_activites')
-            .upsert({
-              id: actId,
-              pointage_id: pointageId,
-              company_id: companyId,
-              ouvrier_id: item.ouvrier_id,
-              nom_complet: String(item.nom_complet || ''),
-              matricule: String(item.matricule || ''),
-              date: dateClean,
-              tache_id: String(act.tache_id),
-              tache_nom: String(act.tache_nom),
-              domaine_id: String(act.domaine_id || item.domaine_id || 'dom_d2'),
-              serre_id: String(act.serre_id || 'serre_1'),
-              serre_nom: String(act.serre_nom || 'Serre'),
-              mode_remuneration: act.mode_remuneration || 'JOUR',
-              quantite: Number(act.quantite) || 1,
-              unite: String(act.unite || 'JOUR'),
-              prix_unitaire: Number(act.prix_unitaire) || 0,
-              montant_total: Number(act.montant_total) || 0,
-              observation: act.observation || null,
-              created_by_id: auth.user.id,
-              created_by_nom: auth.user.nom,
-              updated_at: new Date().toISOString(),
-            }, { onConflict: 'id' });
+      if (existingErr && isSupabaseConfigured) {
+        throw new Error('Erreur lecture pointage existant pendant sync Supabase: ' + existingErr.message);
+      }
+
+      let existingPointage: any = null;
+      if (Array.isArray(existingRows) && existingRows.length > 0) {
+        const { data: existingActs } = await actionClient
+          .from('contractuels_activites')
+          .select('*')
+          .eq('company_id', companyId)
+          .eq('pointage_id', existingRows[0].id);
+        existingPointage = hydratePointageWithMeta(existingRows[0], existingActs || []);
+      }
+
+      if (existingPointage) {
+        const existingStatut = normalizeStatutValidation(existingPointage.statut_validation);
+        if (existingStatut === 'VALIDE' && auth.user.role !== 'admin') {
+          continue; // Jamais écraser un pointage déjà validé par un cache caporal hors ligne
+        }
+        const serverTs = existingPointage.updated_at || existingPointage.created_at || '';
+        const clientTs = item.updated_at || item.created_at || '';
+        if (serverTs && clientTs && serverTs > clientTs) {
+          continue; // Jamais écraser une donnée serveur plus récente par un cache ancien
         }
       }
+
+      const requestedStatut = normalizeStatutValidation(item.statut_validation || 'BROUILLON');
+      const safeStatut =
+        auth.user.role !== 'admin' && (requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE')
+          ? 'SOUMIS'
+          : requestedStatut;
+
+      const tarifInitial = roundAmount(Number(item.tarif_initial ?? existingPointage?.tarif_initial ?? 0));
+      const montantPropose = isPresent
+        ? roundAmount(Number(item.montant_propose ?? item.montant_total_jour ?? tarifInitial))
+        : 0;
+      const montantValide =
+        safeStatut === 'VALIDE'
+          ? (isPresent ? roundAmount(Number(item.montant_valide ?? montantPropose)) : 0)
+          : null;
+      const montantOfficiel = safeStatut === 'VALIDE' && isPresent ? (montantValide ?? 0) : 0;
+      const pointageId = existingPointage?.id || item.id || `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      const heureDebutClean = isPresent && item.heure_debut ? String(item.heure_debut).trim() : null;
+      const heureFinClean = isPresent && item.heure_fin ? String(item.heure_fin).trim() : null;
+      const dureeHeures = isPresent
+        ? (computeWorkDurationHours(heureDebutClean, heureFinClean) ??
+          (item.duree_heures !== undefined && item.duree_heures !== null ? roundAmount(Number(item.duree_heures)) : null))
+        : null;
+
+      const serresIds = isPresent && Array.isArray(item.serres_ids) ? item.serres_ids.map(String) : [];
+      const serresNoms = isPresent && Array.isArray(item.serres_noms) ? item.serres_noms.map(String) : [];
+      const tachesIds = isPresent && Array.isArray(item.taches_ids) ? item.taches_ids.map(String) : [];
+      const tachesNoms = isPresent && Array.isArray(item.taches_noms) ? item.taches_noms.map(String) : [];
+      const tarifModifie = isPresent ? isTarifModifie(tarifInitial, montantPropose, true) : false;
+
+      const historyEntry = buildHistoriqueEntry({
+        action: safeStatut === 'SOUMIS' ? 'SOUMISSION' : existingPointage ? 'MODIFICATION' : 'CREATION',
+        auteur_id: auth.user.id,
+        auteur_nom: auth.user.nom,
+        auteur_role: auth.user.role,
+        statut_avant: existingPointage ? normalizeStatutValidation(existingPointage.statut_validation) : null,
+        statut_apres: safeStatut,
+        present: isPresent,
+        domaine_id: String(item.domaine_id || 'dom_d2'),
+        taches_ids: tachesIds,
+        taches_noms: tachesNoms,
+        serres_ids: serresIds,
+        serres_noms: serresNoms,
+        heure_debut: heureDebutClean,
+        heure_fin: heureFinClean,
+        duree_heures: dureeHeures,
+        tarif_initial: tarifInitial,
+        montant_propose: montantPropose,
+        montant_valide: montantValide,
+        tarif_modifie: tarifModifie,
+        motif: item.motif_modification || 'Synchronisation hors ligne',
+        timestamp: now,
+      });
+
+      const baseHist = Array.isArray(item.historique_validations) && item.historique_validations.length > 0
+        ? item.historique_validations
+        : existingPointage?.historique_validations;
+
+      const pointageRecord = {
+        id: pointageId,
+        company_id: companyId,
+        ouvrier_id: item.ouvrier_id,
+        matricule: String(item.matricule || ''),
+        nom_complet: String(item.nom_complet || ''),
+        date: dateClean,
+        present: isPresent,
+        domaine_id: String(item.domaine_id || 'dom_d2'),
+        serre_id: serresIds[0] || item.serre_id || null,
+        serres_ids: serresIds,
+        serres_noms: serresNoms,
+        serres_texte: isPresent ? (item.serres_texte || serresNoms.join(', ') || null) : null,
+        taches_ids: tachesIds,
+        taches_noms: tachesNoms,
+        taches_texte: isPresent ? (item.taches_texte || tachesNoms.join(', ') || null) : null,
+        heure_debut: heureDebutClean,
+        heure_fin: heureFinClean,
+        duree_heures: dureeHeures,
+        tarif_initial: tarifInitial,
+        montant_propose: montantPropose,
+        montant_valide: montantValide,
+        tarif_modifie: tarifModifie,
+        motif_modification: isPresent ? (item.motif_modification || null) : null,
+        statut_validation: safeStatut,
+        submitted_by_id: safeStatut === 'SOUMIS' ? auth.user.id : (existingPointage?.submitted_by_id || null),
+        submitted_by_nom: safeStatut === 'SOUMIS' ? auth.user.nom : (existingPointage?.submitted_by_nom || null),
+        submitted_at: safeStatut === 'SOUMIS' ? now : (existingPointage?.submitted_at || null),
+        validated_by_id: safeStatut === 'VALIDE' ? auth.user.id : null,
+        validated_by_nom: safeStatut === 'VALIDE' ? auth.user.nom : null,
+        validated_at: safeStatut === 'VALIDE' ? now : null,
+        motif_refus: null,
+        historique_validations: appendHistorique(baseHist, historyEntry),
+        montant_total_jour: montantOfficiel,
+        created_by_id: existingPointage?.created_by_id || auth.user.id,
+        created_by_nom: existingPointage?.created_by_nom || auth.user.nom,
+        created_at: existingPointage?.created_at || item.created_at || now,
+        updated_at: item.updated_at || now,
+      };
+
+      const formattedActs = isPresent && Array.isArray(item.activites)
+        ? item.activites.map((act: any, idx: number) => ({
+            id: act.id || `ca_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+            pointage_id: pointageId,
+            company_id: companyId,
+            ouvrier_id: item.ouvrier_id,
+            nom_complet: String(item.nom_complet || ''),
+            matricule: String(item.matricule || ''),
+            date: dateClean,
+            contrat_id: act.contrat_id || null,
+            contrat_nom: act.contrat_nom || null,
+            tache_id: String(act.tache_id || 'tch_contractuel'),
+            tache_nom: String(act.tache_nom || 'Tâche contractuelle'),
+            domaine_id: String(act.domaine_id || item.domaine_id || 'dom_d2'),
+            serre_id: String(act.serre_id || serresIds[0] || 'serre_1'),
+            serre_nom: String(act.serre_nom || item.serres_texte || 'Serre'),
+            serres_ids: serresIds,
+            serres_noms: serresNoms,
+            serres_texte: pointageRecord.serres_texte,
+            heure_debut: heureDebutClean,
+            heure_fin: heureFinClean,
+            duree_heures: dureeHeures,
+            tarif_initial: tarifInitial,
+            montant_propose: montantPropose,
+            montant_valide: montantValide,
+            statut_validation: safeStatut,
+            mode_remuneration: act.mode_remuneration || 'JOUR',
+            quantite: Number(act.quantite) || 1,
+            unite: String(act.unite || 'JOUR'),
+            prix_unitaire: Number(act.prix_unitaire) || 0,
+            montant_total: Number(act.montant_total) || 0,
+            observation: act.observation || null,
+            created_by_id: auth.user?.id || 'usr_admin',
+            created_by_nom: auth.user?.nom || 'Admin',
+            created_at: act.created_at || now,
+            updated_at: now,
+          }))
+        : [];
+
+      await persistPointageResilient(
+        actionClient,
+        pointageRecord,
+        formattedActs,
+        null,
+        companyId,
+        dateClean,
+        item.ouvrier_id
+      );
+
+      syncedPointages.push({ ...pointageRecord, activites: formattedActs });
       synced++;
     }
 
-    return res.json({ success: true, count: synced });
+    return res.json({ success: true, count: synced, pointages: syncedPointages });
   } catch (err: any) {
     console.error('Erreur POST /api/contractuels/sync:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -5809,6 +7545,8 @@ async function startServer() {
 
 export { app };
 
-startServer().catch((err) => {
-  console.error('Erreur démarrage serveur:', err);
-});
+if (process.env.DISABLE_AUTO_LISTEN !== '1') {
+  startServer().catch((err) => {
+    console.error('Erreur démarrage serveur:', err);
+  });
+}

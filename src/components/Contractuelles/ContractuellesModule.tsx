@@ -38,14 +38,17 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
   taches,
   currentUser,
 }) => {
+  const isReadOnly = currentUser.role === 'lecteur';
+  const isAdmin = currentUser.role === 'admin';
   const isCaporalContractuel =
-    currentUser.role === 'caporal_contractuelles' ||
-    currentUser.module_attribue === 'contractuelles';
+    !isReadOnly &&
+    (currentUser.role === 'caporal_contractuelles' ||
+      currentUser.module_attribue === 'contractuelles');
 
-  // Sous-onglets pour l'administrateur
+  // Sous-onglets pour l'administrateur et le lecteur (consultation seule)
   const [adminTab, setAdminTab] = useState<
     'pointage' | 'contrats' | 'dashboard' | 'ouvriers' | 'caporal'
-  >('pointage');
+  >(isReadOnly ? 'dashboard' : 'pointage');
 
   // Si l'utilisateur est un Caporal dédié aux Contractuelles, affichage direct de son écran de saisie
   if (isCaporalContractuel) {
@@ -74,12 +77,13 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           taches={taches}
           currentUser={currentUser}
           isAdmin={false}
+          isReadOnly={false}
         />
       </div>
     );
   }
 
-  // Si Administrateur : Vue complète avec onglets de gestion
+  // Si Administrateur ou Lecteur : Vue complète avec onglets de gestion (verrouillée en écriture pour Lecteur)
   return (
     <div className="space-y-4">
       {/* 1. BANNIÈRE MODULE ADMIN */}
@@ -93,7 +97,9 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
               Gestion des Ouvriers Contractuels
             </h2>
             <p className="text-[11px] text-slate-500">
-              Pointage journalier, rémunérations à la tâche/jour, suivi par serre & export Excel
+              {isReadOnly
+                ? 'Consultation seule — Pointages, validations Admin, travailleurs et contrats'
+                : 'Pointage journalier, rémunérations à la tâche/jour, suivi par serre & export Excel'}
             </p>
           </div>
         </div>
@@ -124,7 +130,7 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           }`}
         >
           <Users className="w-3.5 h-3.5" />
-          <span>Travailleurs & Import Excel</span>
+          <span>Travailleurs</span>
         </button>
 
         <button
@@ -150,7 +156,7 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           }`}
         >
           <TrendingUp className="w-3.5 h-3.5" />
-          <span>Historique & Tableau de Bord</span>
+          <span>Validation Admin & Tableau de Bord</span>
         </button>
 
         <button
@@ -176,7 +182,8 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           serres={serres}
           taches={taches}
           currentUser={currentUser}
-          isAdmin={true}
+          isAdmin={isAdmin}
+          isReadOnly={isReadOnly}
         />
       )}
 
@@ -184,6 +191,7 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
         <ContractuelContratManagement
           domaines={domaines}
           currentUser={currentUser}
+          isReadOnly={isReadOnly}
         />
       )}
 
@@ -192,6 +200,7 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           domaines={domaines}
           serres={serres}
           currentUser={currentUser}
+          isReadOnly={isReadOnly}
         />
       )}
 
@@ -200,6 +209,7 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           domaines={domaines}
           serres={serres}
           currentUser={currentUser}
+          isReadOnly={isReadOnly}
         />
       )}
 
@@ -208,6 +218,7 @@ export const ContractuellesModule: React.FC<ContractuellesModuleProps> = ({
           domaines={domaines}
           serres={serres}
           currentUser={currentUser}
+          isReadOnly={isReadOnly}
         />
       )}
     </div>

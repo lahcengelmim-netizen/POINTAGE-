@@ -32,6 +32,8 @@ import {
 } from 'lucide-react';
 import { Company, Ouvrier, Tache, Domaine } from '../types';
 import * as storage from '../services/storage';
+import { syncQueueToSupabase } from '../services/supabaseSync';
+import { useUser } from '../context/UserContext';
 import { ImportOuvriersModal } from './ImportOuvriersModal';
 import { ImportTachesModal } from './ImportTachesModal';
 import { GestionComptesModal } from './GestionComptesModal';
@@ -46,7 +48,7 @@ interface GestionPatronProps {
   taches: Tache[];
   domaines?: Domaine[];
   defaultDomaineId?: string;
-  onSaveDomaine?: (dom: { id?: string; nom: string; ordre?: number }) => Domaine;
+  onSaveDomaine?: (dom: { id?: string; nom: string; ordre?: number }) => Domaine | null;
   onDeleteDomaine?: (id: string) => { success: boolean; error?: string };
   onUpdateDomainesOrder?: (domaines: Domaine[]) => void;
   onSetDefaultDomaineId?: (id: string) => void;
@@ -69,6 +71,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
   selectedDate,
   onSelectDate,
 }) => {
+  const { isReadOnly } = useUser();
   // Sous-onglets de gestion
   const [activeSubTab, setActiveSubTab] = useState<
     'ouvriers' | 'taches' | 'domaines' | 'gazoil' | 'historique' | 'societes'
@@ -291,6 +294,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
 
   const handleSaveOuvrier = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     setOuvrierError(null);
 
     const num = parseInt(ouvrierForm.numero, 10);
@@ -317,6 +321,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
       return;
     }
 
+    syncQueueToSupabase().catch(() => {});
     setOuvrierSuccess(
       editingOuvrier
         ? `Ouvrier #${num} modifié avec succès !`
@@ -327,16 +332,20 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
   };
 
   const handleToggleOuvrier = (ouvrier: Ouvrier) => {
+    if (isReadOnly) return;
     storage.toggleOuvrierActif(ouvrier.id);
+    syncQueueToSupabase().catch(() => {});
   };
 
   const handleDeleteOuvrier = (ouvrier: Ouvrier) => {
+    if (isReadOnly) return;
     if (
       window.confirm(
         `Êtes-vous sûr de vouloir supprimer définitivement l'ouvrier #${ouvrier.numero} (${ouvrier.nom}) ? Pour conserver l'historique, vous pouvez plutôt le désactiver.`
       )
     ) {
       storage.deleteOuvrier(ouvrier.id);
+      syncQueueToSupabase().catch(() => {});
     }
   };
 
@@ -344,6 +353,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
 
   const handleSaveTache = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     setTacheError(null);
 
     const nom = tacheNom.trim().toUpperCase();
@@ -354,7 +364,6 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
 
     const code = tacheCode.trim().toUpperCase() || undefined;
 
-    // Règle : Le code est modifiable dans l'écran Gestion. Il doit être unique : si un code existe déjà, afficher une erreur et ne pas enregistrer.
     if (code) {
       const duplicateCode = taches.find(
         (t) =>
@@ -382,6 +391,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
       return;
     }
 
+    syncQueueToSupabase().catch(() => {});
     setShowTacheForm(false);
     setEditingTache(null);
     setTacheCode('');
@@ -395,8 +405,10 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
   };
 
   const handleDeleteTache = (tache: Tache) => {
+    if (isReadOnly) return;
     if (window.confirm(`Supprimer la tâche "${tache.code ? `${tache.code} - ${tache.nom}` : tache.nom}" ?`)) {
       storage.deleteTache(tache.id);
+      syncQueueToSupabase().catch(() => {});
     }
   };
 
@@ -468,23 +480,27 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
 
   const handleSaveSeuilGazoil = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     const val = parseFloat(seuilGazoilInput.replace(',', '.'));
     if (isNaN(val) || val < 0) {
       setGazoilMessage('Veuillez saisir un seuil valide en litres.');
       return;
     }
     storage.setSeuilAlerteGazoil(currentCompany.id, val);
+    syncQueueToSupabase().catch(() => {});
     setGazoilMessage(`✓ Seuil d'alerte gazoil enregistré à ${val} L.`);
     setTimeout(() => setGazoilMessage(null), 3000);
   };
 
   const handleConfirmStockInitialChange = () => {
+    if (isReadOnly) return;
     const val = parseFloat(stockInitialGazoilInput.replace(',', '.'));
     if (isNaN(val) || val < 0) {
       setGazoilMessage('Veuillez saisir un stock initial valide en litres.');
       return;
     }
     storage.setStockInitialGazoil(currentCompany.id, val);
+    syncQueueToSupabase().catch(() => {});
     setShowConfirmStockInitialModal(false);
     setGazoilMessage(`✓ Stock initial gazoil mis à jour à ${val} L.`);
     setTimeout(() => setGazoilMessage(null), 3000);
@@ -723,26 +739,28 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
                 Numéro unique obligatoire par ouvrier.
               </p>
             </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowImportOuvriersModal(true)}
-                className="flex items-center gap-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold px-2.5 py-2 rounded-xl transition active:scale-95"
-                title="Importer des ouvriers depuis un fichier Excel (.xlsx, .xls) ou CSV"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
-                <span>Importer des ouvriers</span>
-              </button>
+            {!isReadOnly && (
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowImportOuvriersModal(true)}
+                  className="flex items-center gap-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold px-2.5 py-2 rounded-xl transition active:scale-95"
+                  title="Importer des ouvriers depuis un fichier Excel (.xlsx, .xls) ou CSV"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Importer des ouvriers</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={handleOpenNewOuvrier}
-                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-2.5 py-2 rounded-xl shadow-xs transition active:scale-95"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Ajouter ouvrier</span>
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={handleOpenNewOuvrier}
+                  className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-2.5 py-2 rounded-xl shadow-xs transition active:scale-95"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Ajouter ouvrier</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {ouvrierSuccess && (
@@ -885,41 +903,43 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1 shrink-0">
-                  {/* Bouton Activer/Désactiver */}
-                  <button
-                    type="button"
-                    onClick={() => handleToggleOuvrier(ouvrier)}
-                    className={`p-1.5 rounded-lg transition ${
-                      ouvrier.actif
-                        ? 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
-                        : 'text-emerald-600 hover:bg-emerald-50'
-                    }`}
-                    title={ouvrier.actif ? 'Désactiver' : 'Réactiver'}
-                  >
-                    <Power className="w-4 h-4" />
-                  </button>
+                {!isReadOnly && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    {/* Bouton Activer/Désactiver */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleOuvrier(ouvrier)}
+                      className={`p-1.5 rounded-lg transition ${
+                        ouvrier.actif
+                          ? 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+                          : 'text-emerald-600 hover:bg-emerald-50'
+                      }`}
+                      title={ouvrier.actif ? 'Désactiver' : 'Réactiver'}
+                    >
+                      <Power className="w-4 h-4" />
+                    </button>
 
-                  {/* Modifier */}
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEditOuvrier(ouvrier)}
-                    className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
-                    title="Modifier"
-                  >
-                    <Edit2 className="w-4 h-4" />
-                  </button>
+                    {/* Modifier */}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditOuvrier(ouvrier)}
+                      className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
+                      title="Modifier"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
 
-                  {/* Supprimer */}
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteOuvrier(ouvrier)}
-                    className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                    title="Supprimer"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
+                    {/* Supprimer */}
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteOuvrier(ouvrier)}
+                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -936,36 +956,38 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
                 Code court unique et nom de poste (ex: R01 - RECOLTE).
               </p>
             </div>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowImportTachesModal(true);
-                  setShowTacheForm(false);
-                }}
-                className="flex items-center gap-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold px-2.5 py-2 rounded-xl transition cursor-pointer"
-                title="Importer des tâches depuis Excel, CSV ou texte collé"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
-                <span>Importer tâches</span>
-              </button>
+            {!isReadOnly && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowImportTachesModal(true);
+                    setShowTacheForm(false);
+                  }}
+                  className="flex items-center gap-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold px-2.5 py-2 rounded-xl transition cursor-pointer"
+                  title="Importer des tâches depuis Excel, CSV ou texte collé"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Importer tâches</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingTache(null);
-                  setTacheCode('');
-                  setTacheNom('');
-                  setTacheCouleur('#16a34a');
-                  setTacheError(null);
-                  setShowTacheForm(true);
-                }}
-                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-2.5 py-2 rounded-xl shadow-xs transition cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Nouvelle</span>
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingTache(null);
+                    setTacheCode('');
+                    setTacheNom('');
+                    setTacheCouleur('#16a34a');
+                    setTacheError(null);
+                    setShowTacheForm(true);
+                  }}
+                  className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-2.5 py-2 rounded-xl shadow-xs transition cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Nouvelle</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {tacheSuccess && (
@@ -1099,31 +1121,33 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingTache(tache);
-                        setTacheCode(tache.code || '');
-                        setTacheNom(tache.nom);
-                        setTacheCouleur(tache.couleur || '#16a34a');
-                        setTacheError(null);
-                        setShowTacheForm(true);
-                      }}
-                      className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
-                      title="Modifier la tâche"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteTache(tache)}
-                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                      title="Supprimer la tâche"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
+                  {!isReadOnly && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingTache(tache);
+                          setTacheCode(tache.code || '');
+                          setTacheNom(tache.nom);
+                          setTacheCouleur(tache.couleur || '#16a34a');
+                          setTacheError(null);
+                          setShowTacheForm(true);
+                        }}
+                        className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
+                        title="Modifier la tâche"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteTache(tache)}
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                        title="Supprimer la tâche"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -1591,35 +1615,37 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
               </div>
             )}
 
-            {/* Créer un nouveau domaine */}
-            <form onSubmit={handleCreateCompany} className="pt-2 border-t border-slate-100 space-y-2">
-              <span className="text-xs font-bold text-slate-700 block">
-                Créer un nouveau domaine agricole isolé :
-              </span>
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="text"
-                  value={newCompanyNom}
-                  onChange={(e) => setNewCompanyNom(e.target.value)}
-                  placeholder="Nom (ex: Domaine Souss)"
-                  className="bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-bold outline-none"
-                  required
-                />
-                <input
-                  type="text"
-                  value={newCompanyVille}
-                  onChange={(e) => setNewCompanyVille(e.target.value)}
-                  placeholder="Région / Ville"
-                  className="bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-medium outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2 rounded-xl transition"
-              >
-                Créer et basculer sur ce domaine
-              </button>
-            </form>
+            {/* Créer un nouveau domaine (masqué en lecture seule) */}
+            {!isReadOnly && (
+              <form onSubmit={handleCreateCompany} className="pt-2 border-t border-slate-100 space-y-2">
+                <span className="text-xs font-bold text-slate-700 block">
+                  Créer un nouveau domaine agricole isolé :
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={newCompanyNom}
+                    onChange={(e) => setNewCompanyNom(e.target.value)}
+                    placeholder="Nom (ex: Domaine Souss)"
+                    className="bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-bold outline-none"
+                    required
+                  />
+                  <input
+                    type="text"
+                    value={newCompanyVille}
+                    onChange={(e) => setNewCompanyVille(e.target.value)}
+                    placeholder="Région / Ville"
+                    className="bg-slate-50 border border-slate-300 rounded-xl p-2 text-xs font-medium outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2 rounded-xl transition"
+                >
+                  Créer et basculer sur ce domaine
+                </button>
+              </form>
+            )}
           </div>
 
           {/* Gestion des Comptes & Caporals */}
@@ -1629,7 +1655,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
                 Comptes & Caporals (Multi-comptes)
               </h3>
               <p className="text-xs text-slate-500">
-                Créer des comptes pour vos caporals et gérer leurs accès au module Récolte.
+                {isReadOnly ? 'Consultation de la liste des comptes.' : 'Créer des comptes pour vos caporals/lecteurs et gérer leurs accès.'}
               </p>
             </div>
             <button
@@ -1638,7 +1664,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
               className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-black text-white text-xs font-black py-2.5 px-3 rounded-xl shadow-xs transition"
             >
               <Users className="w-4 h-4 text-emerald-400" />
-              <span>Gérer les comptes et mots de passe caporals</span>
+              <span>{isReadOnly ? 'Consulter les comptes configurés' : 'Gérer les comptes et mots de passe caporals'}</span>
             </button>
           </div>
 
@@ -1648,22 +1674,8 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
               Sauvegarde & Restauration des Données
             </h3>
             <p className="text-xs text-slate-500">
-              Toutes les données sont conservées hors-ligne dans ce navigateur. Vous pouvez exporter un fichier de sauvegarde à tout moment.
+              Toutes les données sont synchronisées avec Supabase et mises en cache hors-ligne.
             </p>
-
-            {/* Avertissement stockage et recommandation */}
-            <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 space-y-1.5 leading-relaxed">
-              <div className="flex items-center gap-1.5 font-black text-amber-950">
-                <AlertCircle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                <span>Stockage local & Sécurité des données</span>
-              </div>
-              <p>
-                Vos données sont enregistrées en local sur cet appareil (quota navigateur ~5 à 10 Mo).
-              </p>
-              <p className="font-bold text-amber-950">
-                👉 Recommandation essentielle : Exportez régulièrement une sauvegarde JSON et conservez-la sur un ordinateur, une clé USB ou par email.
-              </p>
-            </div>
 
             {backupMessage && (
               <div className="text-xs font-bold text-emerald-800 bg-emerald-50 p-2.5 rounded-xl border border-emerald-200">
@@ -1671,7 +1683,7 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className={`grid grid-cols-1 ${!isReadOnly ? 'sm:grid-cols-2' : ''} gap-2`}>
               <button
                 type="button"
                 onClick={handleExportBackup}
@@ -1681,64 +1693,67 @@ export const GestionPatron: React.FC<GestionPatronProps> = ({
                 <span>Exporter sauvegarde (JSON)</span>
               </button>
 
-              <label
-                htmlFor={importFileId}
-                className="flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-black py-2.5 px-3 rounded-xl transition cursor-pointer"
-              >
-                <Upload className="w-4 h-4 text-blue-700" />
-                <span>Restaurer sauvegarde</span>
-                <input
-                  id={importFileId}
-                  type="file"
-                  accept=".json"
-                  onChange={handleImportBackup}
-                  className="hidden"
-                />
-              </label>
+              {!isReadOnly && (
+                <label
+                  htmlFor={importFileId}
+                  className="flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-black py-2.5 px-3 rounded-xl transition cursor-pointer"
+                >
+                  <Upload className="w-4 h-4 text-blue-700" />
+                  <span>Restaurer sauvegarde</span>
+                  <input
+                    id={importFileId}
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportBackup}
+                    className="hidden"
+                  />
+                </label>
+              )}
             </div>
 
-            {/* Réinitialiser le cache (désinscrit le Service Worker et recharge sans effacer les données) */}
-            <div className="pt-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={handleResetCache}
-                className="w-full flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold py-2.5 px-3 rounded-xl transition"
-                title="Désinscrit le service worker et recharge l'application sans effacer les données"
-              >
-                <RotateCcw className="w-4 h-4 text-slate-600" />
-                <span>Réinitialiser le cache (sans perte de données)</span>
-              </button>
-            </div>
+            {!isReadOnly && (
+              <>
+                <div className="pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={handleResetCache}
+                    className="w-full flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold py-2.5 px-3 rounded-xl transition"
+                    title="Désinscrit le service worker et recharge l'application sans effacer les données"
+                  >
+                    <RotateCcw className="w-4 h-4 text-slate-600" />
+                    <span>Réinitialiser le cache (sans perte de données)</span>
+                  </button>
+                </div>
 
-            {/* Réinitialisation aux données de test */}
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={handleResetDefaults}
-                className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-amber-700 hover:text-amber-800 hover:bg-amber-50 py-2 rounded-xl border border-dashed border-amber-300 transition"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Réinitialiser aux 15 ouvriers de test</span>
-              </button>
-            </div>
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={handleResetDefaults}
+                    className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-amber-700 hover:text-amber-800 hover:bg-amber-50 py-2 rounded-xl border border-dashed border-amber-300 transition"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Réinitialiser aux 15 ouvriers de test</span>
+                  </button>
+                </div>
 
-            {/* "Effacer toutes les données" tout en bas, en rouge, avec double confirmation (taper EFFACER) */}
-            <div className="pt-3 border-t border-red-200">
-              <button
-                type="button"
-                onClick={() => {
-                  setClearConfirmInput('');
-                  setShowClearAllModal(true);
-                }}
-                className="w-full flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 active:scale-[0.99] text-white text-xs font-black py-3 px-3 rounded-xl shadow-xs transition"
-              >
-                <Trash2 className="w-4 h-4 text-white" />
-                <span>Effacer toutes les données</span>
-              </button>
-              <p className="text-[10px] text-red-600 font-semibold text-center mt-1">
-                Zone de danger : suppression définitive et irréversible de toutes les données locales
-              </p>
-            </div>
+                <div className="pt-3 border-t border-red-200">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearConfirmInput('');
+                      setShowClearAllModal(true);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 active:scale-[0.99] text-white text-xs font-black py-3 px-3 rounded-xl shadow-xs transition"
+                  >
+                    <Trash2 className="w-4 h-4 text-white" />
+                    <span>Effacer toutes les données</span>
+                  </button>
+                  <p className="text-[10px] text-red-600 font-semibold text-center mt-1">
+                    Zone de danger : suppression définitive et irréversible de toutes les données locales
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

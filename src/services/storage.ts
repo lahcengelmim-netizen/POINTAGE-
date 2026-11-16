@@ -27,6 +27,7 @@ import {
 } from '../types';
 import { formatTacheLabel } from '../utils/tacheUtils';
 import { hashPassword, generateSalt, verifyPassword } from '../utils/crypto';
+import { supabase } from './supabaseClient';
 
 export const STORAGE_KEYS = {
   COMPANIES: 'agripointage_companies_v1',
@@ -50,7 +51,25 @@ export const STORAGE_KEYS = {
   RECOLTE: 'agripointage_recolte_v1',
   SYNC_QUEUE: 'agripointage_sync_queue_v1',
   POINTAGE_SYNC_QUEUE: 'agripointage_pointage_sync_queue_v1',
+  RECOLTE_SYNC_QUEUE: 'agripointage_recolte_sync_queue_v1',
+  RECOLTE_DELETE_QUEUE: 'agripointage_recolte_delete_queue_v1',
+  LAST_SYNC_AT: 'agripointage_last_sync_at_v1',
 };
+
+function coalesceSyncQueue(
+  queue: any[],
+  table: string,
+  action: 'upsert' | 'delete',
+  data: any
+): any[] {
+  const itemId = data?.id;
+  if (!itemId) {
+    return [...queue, { table, action, data, timestamp: Date.now() }];
+  }
+  const filtered = queue.filter((q) => !(q && q.table === table && q.data?.id === itemId));
+  filtered.push({ table, action, data, timestamp: Date.now() });
+  return filtered;
+}
 
 export function addToPointageSyncQueue(
   table: string,
@@ -60,22 +79,63 @@ export function addToPointageSyncQueue(
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE);
     const queue: any[] = raw ? JSON.parse(raw) : [];
-    queue.push({ table, action, data, timestamp: Date.now() });
-    localStorage.setItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE, JSON.stringify(queue));
+    const next = coalesceSyncQueue(Array.isArray(queue) ? queue : [], table, action, data);
+    localStorage.setItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE, JSON.stringify(next));
   } catch (err) {
     console.error('Erreur addToPointageSyncQueue:', err);
   }
 }
 
-export function addToSyncQueue(table: string, data: any) {
+export function addToSyncQueue(
+  table: string,
+  data: any,
+  action: 'upsert' | 'delete' = 'upsert'
+) {
   if (table === 'pointages' || table === 'affectations') {
-    addToPointageSyncQueue(table, data, 'upsert');
+    addToPointageSyncQueue(table, data, action);
     return;
   }
-  const raw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
-  const queue: any[] = raw ? JSON.parse(raw) : [];
-  queue.push({ table, data, timestamp: Date.now() });
-  localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(queue));
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
+    const queue: any[] = raw ? JSON.parse(raw) : [];
+    const next = coalesceSyncQueue(Array.isArray(queue) ? queue : [], table, action, data);
+    localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(next));
+  } catch (err) {
+    console.error('Erreur addToSyncQueue:', err);
+  }
+}
+
+export function getLastSyncAt(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.LAST_SYNC_AT);
+  } catch {
+    return null;
+  }
+}
+
+export function setLastSyncAt(iso: string = new Date().toISOString()): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.LAST_SYNC_AT, iso);
+  } catch {
+    // ignore
+  }
+}
+
+export function getPendingSyncCount(): number {
+  try {
+    const q1 = JSON.parse(localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE) || '[]');
+    const q2 = JSON.parse(localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE) || '[]');
+    const q3 = JSON.parse(localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE) || '[]');
+    const q4 = JSON.parse(localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE) || '[]');
+    return (
+      (Array.isArray(q1) ? q1.length : 0) +
+      (Array.isArray(q2) ? q2.length : 0) +
+      (Array.isArray(q3) ? q3.length : 0) +
+      (Array.isArray(q4) ? q4.length : 0)
+    );
+  } catch {
+    return 0;
+  }
 }
 
 
@@ -627,6 +687,31 @@ export function initStorage(): void {
     if (!localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE)) {
       safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify([]));
     }
+    if (!localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE)) {
+      safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify([]));
+    }
+    if (!localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE)) {
+      safeSetItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE, JSON.stringify([]));
+    }
+    // Migration douce : séparer les anciennes entrées Récolte brutes (sans .table) hors de SYNC_QUEUE
+    try {
+      const legacyRaw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
+      const legacyArr: any[] = legacyRaw ? JSON.parse(legacyRaw) : [];
+      if (Array.isArray(legacyArr) && legacyArr.some((item) => item && !item.table && item.caisses !== undefined)) {
+        const genericItems = legacyArr.filter((item) => item && item.table);
+        const recolteItems = legacyArr.filter((item) => item && !item.table && item.caisses !== undefined);
+        const recQueueRaw = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
+        const recQueue: any[] = recQueueRaw ? JSON.parse(recQueueRaw) : [];
+        const map = new Map<string, any>(recQueue.map((r) => [r.id, r]));
+        recolteItems.forEach((r) => {
+          if (r.id) map.set(r.id, r);
+        });
+        safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify(Array.from(map.values())));
+        safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(genericItems));
+      }
+    } catch {
+      // ignore
+    }
   } catch (error) {
     console.error('Erreur lors de l\'initialisation du stockage:', error);
   }
@@ -732,6 +817,7 @@ export function saveDomaine(dom: { id?: string; nom: string; ordre?: number }): 
   }
 
   safeSetItem(STORAGE_KEYS.DOMAINES, JSON.stringify(list));
+  addToSyncQueue('domaines', { ...updated, company_id: getActiveCompanyId() }, 'upsert');
   notifyListeners();
   return updated;
 }
@@ -743,6 +829,8 @@ export function updateDomainesOrder(domaines: Domaine[]): void {
     ordre: index + 1,
   }));
   safeSetItem(STORAGE_KEYS.DOMAINES, JSON.stringify(updated));
+  const companyId = getActiveCompanyId();
+  updated.forEach((d) => addToSyncQueue('domaines', { ...d, company_id: companyId }, 'upsert'));
   notifyListeners();
 }
 
@@ -757,6 +845,7 @@ export function deleteDomaine(id: string): { success: boolean; error?: string } 
   }
   list = list.filter((d) => d.id !== id);
   safeSetItem(STORAGE_KEYS.DOMAINES, JSON.stringify(list));
+  addToSyncQueue('domaines', { id }, 'delete');
 
   const defId = localStorage.getItem(STORAGE_KEYS.DEFAULT_DOMAINE);
   if (defId === id && list.length > 0) {
@@ -856,6 +945,7 @@ export function toggleOuvrierActif(id: string): void {
   if (idx >= 0) {
     all[idx].actif = !all[idx].actif;
     safeSetItem(STORAGE_KEYS.OUVRIERS, JSON.stringify(all));
+    addToSyncQueue('ouvriers', all[idx], 'upsert');
     notifyListeners();
   }
 }
@@ -865,6 +955,7 @@ export function deleteOuvrier(id: string): void {
   let all: Ouvrier[] = allRaw ? JSON.parse(allRaw) : [];
   all = all.filter((o) => o.id !== id);
   safeSetItem(STORAGE_KEYS.OUVRIERS, JSON.stringify(all));
+  addToSyncQueue('ouvriers', { id }, 'delete');
   notifyListeners();
 }
 
@@ -880,6 +971,7 @@ export function bulkImportOuvriers(
   let addedCount = 0;
   let updatedCount = 0;
   let deactivatedCount = 0;
+  const touched: Ouvrier[] = [];
 
   const importedNums = new Set(ouvriersAImporter.map((item) => item.numero));
 
@@ -891,6 +983,7 @@ export function bulkImportOuvriers(
           if (o.actif) {
             o.actif = false;
             deactivatedCount++;
+            touched.push(o);
           }
         }
       }
@@ -904,9 +997,10 @@ export function bulkImportOuvriers(
       if (item.telephone) existing.telephone = item.telephone.trim();
       existing.actif = true; // Réactiver s'il était désactivé
       updatedCount++;
+      touched.push(existing);
     } else {
       const id = `ouv_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 6)}`;
-      all.push({
+      const created: Ouvrier = {
         id,
         company_id: companyId,
         numero: item.numero,
@@ -914,12 +1008,15 @@ export function bulkImportOuvriers(
         actif: true,
         telephone: item.telephone?.trim() || undefined,
         createdAt: new Date().toISOString(),
-      });
+      };
+      all.push(created);
       addedCount++;
+      touched.push(created);
     }
   });
 
   safeSetItem(STORAGE_KEYS.OUVRIERS, JSON.stringify(all));
+  touched.forEach((o) => addToSyncQueue('ouvriers', o, 'upsert'));
   notifyListeners();
   return { addedCount, updatedCount, deactivatedCount };
 }
@@ -1024,6 +1121,7 @@ export function deleteTache(id: string): void {
   let all: Tache[] = allRaw ? JSON.parse(allRaw) : [];
   all = all.filter((t) => t.id !== id);
   safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify(all));
+  addToSyncQueue('taches', { id }, 'delete');
   notifyListeners();
 }
 
@@ -1086,6 +1184,7 @@ export function bulkImportTaches(
   let updated = 0;
   let deactivated = 0;
   const errors: string[] = [];
+  const touched: Tache[] = [];
 
   const importedCodes = new Set(parsedItems.map((p) => p.cleanCode).filter(Boolean));
   const importedNoms = new Set(parsedItems.map((p) => p.cleanNom));
@@ -1100,6 +1199,7 @@ export function bulkImportTaches(
           if (t.actif !== false) {
             t.actif = false;
             deactivated++;
+            touched.push(t);
           }
         }
       }
@@ -1119,9 +1219,10 @@ export function bulkImportTaches(
       if (pi.cleanCode) existing.code = pi.cleanCode;
       existing.actif = true; // Réactiver
       updated++;
+      touched.push(existing);
     } else {
       const couleur = PALETTE_COULEURS[(all.length + added) % PALETTE_COULEURS.length];
-      all.push({
+      const created: Tache = {
         id: `tch_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 5)}`,
         company_id: companyId,
         code: pi.cleanCode,
@@ -1130,12 +1231,15 @@ export function bulkImportTaches(
         actif: true,
         ouvriers_autorises: 'tous',
         createdAt: new Date().toISOString(),
-      });
+      };
+      all.push(created);
       added++;
+      touched.push(created);
     }
   });
 
   safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify(all));
+  touched.forEach((t) => addToSyncQueue('taches', t, 'upsert'));
   notifyListeners();
   return {
     added,
@@ -1390,13 +1494,15 @@ export function removeWorkerAffectationsForDate(
 ): number {
   const rawAff = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
   let allAff: AffectationTache[] = rawAff ? JSON.parse(rawAff) : [];
-  const beforeCount = allAff.length;
+  const removed = allAff.filter(
+    (a) => a.company_id === companyId && a.ouvrier_id === ouvrierId && a.date === date
+  );
   allAff = allAff.filter(
     (a) => !(a.company_id === companyId && a.ouvrier_id === ouvrierId && a.date === date)
   );
-  const removedCount = beforeCount - allAff.length;
   safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(allAff));
-  return removedCount;
+  removed.forEach((a) => addToPointageSyncQueue('affectations', { id: a.id }, 'delete'));
+  return removed.length;
 }
 
 export function getWorkerAffectationsCount(
@@ -1424,12 +1530,14 @@ export function passerPointageEnAbsent(
   if (idx >= 0) {
     all[idx].present = false;
     all[idx].tache_id = null;
+    all[idx].timestamp = Date.now();
     safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+    addToPointageSyncQueue('pointages', all[idx], 'upsert');
   } else {
     const ouvriers = getActiveOuvriers(companyId);
     const ouvrier = ouvriers.find((o) => o.id === ouvrierId);
     if (ouvrier) {
-      all.push({
+      const absentPtg: Pointage = {
         id: `ptg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         company_id: companyId,
         ouvrier_id: ouvrierId,
@@ -1443,8 +1551,10 @@ export function passerPointageEnAbsent(
           second: '2-digit',
         }),
         timestamp: Date.now(),
-      });
+      };
+      all.push(absentPtg);
       safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+      addToPointageSyncQueue('pointages', absentPtg, 'upsert');
     }
   }
 
@@ -1476,12 +1586,14 @@ export function passerPointageEnPresent(
     all[idx].present = true;
     all[idx].domaine_id = targetDomId;
     all[idx].tache_id = null; // Remet la présence en Présent, sans tâche
+    all[idx].timestamp = now.getTime();
     safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+    addToPointageSyncQueue('pointages', all[idx], 'upsert');
   } else {
     const ouvriers = getActiveOuvriers(companyId);
     const ouvrier = ouvriers.find((o) => o.id === ouvrierId);
     if (!ouvrier) return { success: false };
-    all.push({
+    const newPtg: Pointage = {
       id: `ptg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       company_id: companyId,
       ouvrier_id: ouvrierId,
@@ -1492,8 +1604,10 @@ export function passerPointageEnPresent(
       domaine_id: targetDomId,
       heure,
       timestamp: now.getTime(),
-    });
+    };
+    all.push(newPtg);
     safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify(all));
+    addToPointageSyncQueue('pointages', newPtg, 'upsert');
   }
   notifyListeners();
   return { success: true };
@@ -1778,6 +1892,7 @@ export function saveTacheSerreConfig(
   }
 
   safeSetItem(STORAGE_KEYS.TACHE_SERRES, JSON.stringify(all));
+  addToSyncQueue('tache_serre_configs', nextConfig, 'upsert');
   return nextConfig;
 }
 
@@ -2360,7 +2475,11 @@ export function getGazoilConfig(companyId: string): GazoilConfig {
   }
 }
 
-export function saveGazoilConfig(companyId: string, partial: Partial<GazoilConfig>): GazoilConfig {
+export function saveGazoilConfig(
+  companyId: string,
+  partial: Partial<GazoilConfig>,
+  skipSync: boolean = false
+): GazoilConfig {
   initStorage();
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.GAZOIL_CONFIG);
@@ -2369,6 +2488,22 @@ export function saveGazoilConfig(companyId: string, partial: Partial<GazoilConfi
     const updated: GazoilConfig = { ...current, ...partial };
     map[companyId] = updated;
     safeSetItem(STORAGE_KEYS.GAZOIL_CONFIG, JSON.stringify(map));
+    if (!skipSync) {
+      addToSyncQueue(
+        'gazoil_configs',
+        {
+          id: companyId,
+          company_id: companyId,
+          stock_initial: updated.stockInitial,
+          initial_set: updated.initialSet,
+          seuil_alerte: updated.seuilAlerte,
+          commande_active: updated.commandeActive,
+          notified_below_threshold: updated.notifiedBelowThreshold ?? false,
+          updated_at: new Date().toISOString(),
+        },
+        'upsert'
+      );
+    }
     notifyListeners();
     return updated;
   } catch (e) {
@@ -2513,6 +2648,7 @@ export function addGazoilMouvement(
 
   all.push(newEntry);
   safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, JSON.stringify(all));
+  addToSyncQueue('gazoil_mouvements', newEntry, 'upsert');
 
   // Règle : Le badge commande disparaît automatiquement quand une entrée de gazoil est enregistrée
   const config = getGazoilConfig(companyId);
@@ -2534,6 +2670,7 @@ export function deleteGazoilMouvement(companyId: string, id: string): void {
   let all: GazoilMouvement[] = raw ? JSON.parse(raw) : [];
   all = all.filter((m) => m.id !== id);
   safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, JSON.stringify(all));
+  addToSyncQueue('gazoil_mouvements', { id }, 'delete');
   notifyListeners();
   checkAndNotifyStockBas(companyId);
 }
@@ -3315,6 +3452,7 @@ export function saveSerre(
   }
 
   safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(all));
+  addToSyncQueue('serres', resultSerre, 'upsert');
   notifyListeners();
   return { success: true, serre: resultSerre };
 }
@@ -3325,6 +3463,7 @@ export function deleteSerre(id: string): { success: boolean; error?: string } {
   let all: Serre[] = raw ? JSON.parse(raw) : [];
   all = all.filter((s) => s.id !== id);
   safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(all));
+  addToSyncQueue('serres', { id }, 'delete');
   notifyListeners();
   return { success: true };
 }
@@ -3337,6 +3476,7 @@ export function toggleSerreActif(id: string): void {
   if (target) {
     target.actif = !target.actif;
     safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(all));
+    addToSyncQueue('serres', target, 'upsert');
     notifyListeners();
   }
 }
@@ -3517,9 +3657,31 @@ export function deleteRecolteEntry(id: string): { success: boolean; error?: stri
   initStorage();
   const raw = localStorage.getItem(STORAGE_KEYS.RECOLTE);
   let all: RecolteEntry[] = raw ? JSON.parse(raw) : [];
+  const target = all.find((r) => r.id === id);
   all = all.filter((r) => r.id !== id);
   safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify(all));
+
+  // Retirer d'une éventuelle file d'envoi en attente et enregistrer la suppression
+  try {
+    const syncRaw = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
+    const syncQ: RecolteEntry[] = syncRaw ? JSON.parse(syncRaw) : [];
+    const nextSyncQ = syncQ.filter((q) => q.id !== id);
+    safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify(nextSyncQ));
+
+    const delRaw = localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE);
+    const delQ: string[] = delRaw ? JSON.parse(delRaw) : [];
+    if (!delQ.includes(id)) {
+      delQ.push(id);
+      safeSetItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE, JSON.stringify(delQ));
+    }
+  } catch {
+    // ignore
+  }
+
   notifyListeners();
+  if (target && typeof navigator !== 'undefined' && navigator.onLine) {
+    syncRecolteWithServer(target.company_id || getActiveCompanyId()).catch(() => {});
+  }
   return { success: true };
 }
 
@@ -3542,21 +3704,333 @@ export function calculateRecolteStats(entries: RecolteEntry[]): RecolteStats {
   };
 }
 
+// ------------------------- RÉCONCILIATION MULTI-APPAREILS (SUPABASE PRIORITAIRE) -------------------------
+
+function getPendingIdsForTable(table: string): { upserts: Set<string>; deletes: Set<string> } {
+  const upserts = new Set<string>();
+  const deletes = new Set<string>();
+  try {
+    const raw1 = JSON.parse(localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE) || '[]');
+    const raw2 = JSON.parse(localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE) || '[]');
+    for (const q of [...(Array.isArray(raw1) ? raw1 : []), ...(Array.isArray(raw2) ? raw2 : [])]) {
+      if (q && q.table === table && q.data?.id) {
+        if (q.action === 'delete') deletes.add(q.data.id);
+        else upserts.add(q.data.id);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { upserts, deletes };
+}
+
+export function reconcileOuvriersFromRemote(companyId: string, remoteOuvriers: any[]): void {
+  if (!Array.isArray(remoteOuvriers)) return;
+  initStorage();
+  const { upserts, deletes } = getPendingIdsForTable('ouvriers');
+  const raw = localStorage.getItem(STORAGE_KEYS.OUVRIERS);
+  const local: Ouvrier[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = local.filter((o) => o.company_id !== companyId);
+  const localSameCompany = local.filter((o) => o.company_id === companyId);
+  const map = new Map<string, Ouvrier>();
+
+  remoteOuvriers.forEach((ro) => {
+    if (!ro?.id || deletes.has(ro.id)) return;
+    map.set(ro.id, {
+      id: ro.id,
+      company_id: ro.company_id || companyId,
+      numero: Number(ro.numero),
+      nom: ro.nom,
+      actif: ro.actif !== false,
+      telephone: ro.telephone || undefined,
+      notes: ro.notes || undefined,
+      createdAt: ro.created_at || ro.createdAt || new Date().toISOString(),
+    });
+  });
+
+  // Préserver uniquement les modifications locales en attente d'envoi
+  localSameCompany.forEach((lo) => {
+    if (upserts.has(lo.id)) {
+      map.set(lo.id, lo);
+    }
+  });
+
+  const next = [...otherCompanies, ...Array.from(map.values())];
+  const nextJson = JSON.stringify(next);
+  if (nextJson !== raw) {
+    safeSetItem(STORAGE_KEYS.OUVRIERS, nextJson);
+    notifyListeners();
+  }
+}
+
+export function reconcileTachesFromRemote(companyId: string, remoteTaches: any[]): void {
+  if (!Array.isArray(remoteTaches)) return;
+  initStorage();
+  const { upserts, deletes } = getPendingIdsForTable('taches');
+  const raw = localStorage.getItem(STORAGE_KEYS.TACHES);
+  const local: Tache[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = local.filter((t) => t.company_id !== companyId);
+  const localSameCompany = local.filter((t) => t.company_id === companyId);
+
+  // Supabase fait autorité pour la société si le serveur retourne au moins une tâche (ou s'il n'y a aucune tâche locale en attente)
+  const map = new Map<string, Tache>();
+  remoteTaches.forEach((rt) => {
+    if (!rt?.id || deletes.has(rt.id)) return;
+    map.set(rt.id, {
+      id: rt.id,
+      company_id: rt.company_id || companyId,
+      code: rt.code || undefined,
+      nom: rt.nom,
+      actif: rt.actif !== false,
+      domaine_id: rt.domaine_id || undefined,
+      description: rt.description || undefined,
+      couleur: rt.couleur || '#16a34a',
+      ouvriers_autorises: rt.ouvriers_autorises || 'tous',
+      createdAt: rt.created_at || rt.createdAt || new Date().toISOString(),
+    });
+  });
+
+  // Préserver uniquement les tâches locales non encore synchronisées vers Supabase
+  localSameCompany.forEach((lt) => {
+    if (upserts.has(lt.id)) {
+      map.set(lt.id, lt);
+    }
+  });
+
+  const next = [...otherCompanies, ...Array.from(map.values())];
+  const nextJson = JSON.stringify(next);
+  if (nextJson !== raw) {
+    safeSetItem(STORAGE_KEYS.TACHES, nextJson);
+    notifyListeners();
+  }
+}
+
+export function reconcilePointagesFromRemote(
+  companyId: string,
+  remotePointages: any[],
+  dateFilter?: string
+): void {
+  if (!Array.isArray(remotePointages)) return;
+  initStorage();
+  const { upserts, deletes } = getPendingIdsForTable('pointages');
+  const raw = localStorage.getItem(STORAGE_KEYS.POINTAGES);
+  const local: Pointage[] = raw ? JSON.parse(raw) : [];
+
+  const keptOtherScope = local.filter((p) => {
+    if (p.company_id !== companyId) return true;
+    if (dateFilter && p.date !== dateFilter) return true;
+    return upserts.has(p.id);
+  });
+
+  const map = new Map<string, Pointage>(keptOtherScope.map((p) => [p.id, p]));
+  remotePointages.forEach((rp) => {
+    if (!rp?.id || deletes.has(rp.id) || upserts.has(rp.id)) return;
+    map.set(rp.id, {
+      id: rp.id,
+      company_id: rp.company_id || companyId,
+      ouvrier_id: rp.ouvrier_id,
+      numero_ouvrier: Number(rp.numero_ouvrier),
+      date: rp.date,
+      present: rp.present !== false,
+      tache_id: rp.tache_id ?? null,
+      domaine_id: rp.domaine_id || undefined,
+      serre_id: rp.serre_id ?? null,
+      serre_nom: rp.serre_nom ?? null,
+      heure: rp.heure || '08:00:00',
+      timestamp: Number(rp.timestamp || Date.now()),
+    });
+  });
+
+  const next = Array.from(map.values());
+  const nextJson = JSON.stringify(next);
+  if (nextJson !== raw) {
+    safeSetItem(STORAGE_KEYS.POINTAGES, nextJson);
+    notifyListeners();
+  }
+}
+
+export function reconcileAffectationsFromRemote(
+  companyId: string,
+  remoteAffectations: any[],
+  dateFilter?: string
+): void {
+  if (!Array.isArray(remoteAffectations)) return;
+  initStorage();
+  const { upserts, deletes } = getPendingIdsForTable('affectations');
+  const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
+  const local: AffectationTache[] = raw ? JSON.parse(raw) : [];
+
+  const keptOtherScope = local.filter((a) => {
+    if (a.company_id !== companyId) return true;
+    if (dateFilter && a.date !== dateFilter) return true;
+    return upserts.has(a.id);
+  });
+
+  const map = new Map<string, AffectationTache>(keptOtherScope.map((a) => [a.id, a]));
+  remoteAffectations.forEach((ra) => {
+    if (!ra?.id || deletes.has(ra.id) || upserts.has(ra.id)) return;
+    map.set(ra.id, {
+      id: ra.id,
+      company_id: ra.company_id || companyId,
+      ouvrier_id: ra.ouvrier_id,
+      numero_ouvrier: Number(ra.numero_ouvrier),
+      tache_id: ra.tache_id,
+      domaine_id: ra.domaine_id || undefined,
+      serre_id: ra.serre_id ?? null,
+      serre_nom: ra.serre_nom ?? null,
+      serres_ids: Array.isArray(ra.serres_ids) ? ra.serres_ids : undefined,
+      serres_noms: Array.isArray(ra.serres_noms) ? ra.serres_noms : undefined,
+      date: ra.date,
+      timestamp: Number(ra.timestamp || Date.now()),
+    });
+  });
+
+  const next = Array.from(map.values());
+  const nextJson = JSON.stringify(next);
+  if (nextJson !== raw) {
+    safeSetItem(STORAGE_KEYS.AFFECTATIONS, nextJson);
+    notifyListeners();
+  }
+}
+
+export function reconcileTacheSerreConfigsFromRemote(
+  companyId: string,
+  remoteConfigs: any[],
+  dateFilter?: string
+): void {
+  if (!Array.isArray(remoteConfigs)) return;
+  initStorage();
+  const { upserts, deletes } = getPendingIdsForTable('tache_serre_configs');
+  const raw = localStorage.getItem(STORAGE_KEYS.TACHE_SERRES);
+  const local: TacheSerreConfig[] = raw ? JSON.parse(raw) : [];
+
+  const keptOtherScope = local.filter((c) => {
+    if (c.company_id !== companyId) return true;
+    if (dateFilter && c.date !== dateFilter) return true;
+    return upserts.has(c.id);
+  });
+
+  const map = new Map<string, TacheSerreConfig>(keptOtherScope.map((c) => [c.id, c]));
+  remoteConfigs.forEach((rc) => {
+    if (!rc?.id || deletes.has(rc.id) || upserts.has(rc.id)) return;
+    map.set(rc.id, {
+      id: rc.id,
+      company_id: rc.company_id || companyId,
+      date: rc.date,
+      tache_id: rc.tache_id,
+      domaine_id: rc.domaine_id,
+      serre_ids: Array.isArray(rc.serre_ids) ? rc.serre_ids : [],
+      serre_noms: Array.isArray(rc.serre_noms) ? rc.serre_noms : [],
+      updated_at: Number(rc.updated_at || Date.now()),
+    });
+  });
+
+  const next = Array.from(map.values());
+  const nextJson = JSON.stringify(next);
+  if (nextJson !== raw) {
+    safeSetItem(STORAGE_KEYS.TACHE_SERRES, nextJson);
+    notifyListeners();
+  }
+}
+
+export function reconcileGazoilFromRemote(
+  companyId: string,
+  remoteConfig: any | null,
+  remoteMouvements: any[]
+): void {
+  initStorage();
+  let changed = false;
+
+  if (remoteConfig) {
+    const { upserts } = getPendingIdsForTable('gazoil_configs');
+    if (!upserts.has(companyId)) {
+      const nextCfg: Partial<GazoilConfig> = {
+        stockInitial: Number(remoteConfig.stock_initial ?? 0),
+        initialSet: Boolean(remoteConfig.initial_set),
+        seuilAlerte: Number(remoteConfig.seuil_alerte ?? 20),
+        commandeActive: remoteConfig.commande_active || null,
+        notifiedBelowThreshold: Boolean(remoteConfig.notified_below_threshold),
+      };
+      saveGazoilConfig(companyId, nextCfg, true);
+      changed = true;
+    }
+  }
+
+  if (Array.isArray(remoteMouvements)) {
+    const { upserts, deletes } = getPendingIdsForTable('gazoil_mouvements');
+    const raw = localStorage.getItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS);
+    const local: GazoilMouvement[] = raw ? JSON.parse(raw) : [];
+    const otherCompanies = local.filter((m) => m.company_id !== companyId);
+    const localSame = local.filter((m) => m.company_id === companyId);
+
+    const map = new Map<string, GazoilMouvement>();
+    remoteMouvements.forEach((rm) => {
+      if (!rm?.id || deletes.has(rm.id)) return;
+      map.set(rm.id, {
+        id: rm.id,
+        company_id: rm.company_id || companyId,
+        type: rm.type,
+        date: rm.date,
+        quantite: Number(rm.quantite),
+        engin_ou_tache: rm.engin_ou_tache || undefined,
+        remarque: rm.remarque || undefined,
+        timestamp: Number(rm.timestamp || Date.now()),
+      });
+    });
+
+    localSame.forEach((lm) => {
+      if (upserts.has(lm.id)) map.set(lm.id, lm);
+    });
+
+    const next = [...otherCompanies, ...Array.from(map.values())];
+    const nextJson = JSON.stringify(next);
+    if (nextJson !== raw) {
+      safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, nextJson);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    notifyListeners();
+  }
+}
+
 // ------------------------- SYNCHRONISATION MULTI-APPAREILS (SERVEUR / PWA) -------------------------
 
 function queuePendingSync(entries: RecolteEntry[]): void {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
+    const raw = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
     const queue: RecolteEntry[] = raw ? JSON.parse(raw) : [];
     for (const e of entries) {
       const idx = queue.findIndex((q) => q.id === e.id);
       if (idx >= 0) queue[idx] = e;
       else queue.push(e);
     }
-    safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(queue));
+    safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify(queue));
   } catch (err) {
     console.error('Erreur queuePendingSync:', err);
   }
+}
+
+async function getClientAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`;
+      return headers;
+    }
+  } catch {
+    // ignore
+  }
+  if (!import.meta.env.VITE_SUPABASE_URL) {
+    const user = getCurrentUser();
+    if (user?.role === 'lecteur') headers['Authorization'] = 'Bearer dev_lecteur_token';
+    else if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
+    else if (user?.role === 'caporal') headers['Authorization'] = 'Bearer dev_caporal_token';
+    else headers['Authorization'] = 'Bearer dev_admin_token';
+  }
+  return headers;
 }
 
 export async function syncRecolteWithServer(companyId: string): Promise<{
@@ -3570,55 +4044,59 @@ export async function syncRecolteWithServer(companyId: string): Promise<{
   }
 
   try {
-    const rawQueue = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
+    const rawQueue = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
     const queue: RecolteEntry[] = rawQueue ? JSON.parse(rawQueue) : [];
+    const rawDelQueue = localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE);
+    const deleteQueue: string[] = rawDelQueue ? JSON.parse(rawDelQueue) : [];
+
+    const headers = await getClientAuthHeaders();
+    const user = getCurrentUser();
+    const isLecteur = user?.role === 'lecteur';
 
     const response = await fetch('/api/recolte/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         companyId,
-        pendingEntries: queue,
-        lastSyncTimestamp: Date.now() - 30 * 24 * 3600 * 1000, // Récupère les données récentes
+        pendingEntries: isLecteur ? [] : queue,
+        deletedIds: isLecteur ? [] : deleteQueue,
+        lastSyncTimestamp: Date.now() - 30 * 24 * 3600 * 1000,
       }),
     });
 
-    if (!response.ok) {
-      // Backend non encore prêt ou injoignable, le mode local continue
-      return { success: false, syncedCount: 0, receivedCount: 0, error: 'Serveur indisponible' };
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        syncedCount: 0,
+        receivedCount: 0,
+        error: result.error || `Erreur serveur HTTP ${response.status}`,
+      };
     }
 
-    const result = await response.json();
-    if (!result.success) {
-      return { success: false, syncedCount: 0, receivedCount: 0, error: result.error };
-    }
+    // Vider les files uniquement après confirmation serveur
+    safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify([]));
+    safeSetItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE, JSON.stringify([]));
 
-    // Vider la file d'attente pour les éléments confirmés
-    safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify([]));
-
-    // Fusionner les données reçues du serveur avec les données locales
+    // Réconcilier : le serveur fait autorité pour companyId
     const rawLocal = localStorage.getItem(STORAGE_KEYS.RECOLTE);
     const localEntries: RecolteEntry[] = rawLocal ? JSON.parse(rawLocal) : [];
-    const serverEntries: RecolteEntry[] = result.allEntries || [];
+    const otherCompanyEntries = localEntries.filter((e) => e.company_id && e.company_id !== companyId);
+    const serverEntries: RecolteEntry[] = Array.isArray(result.allEntries) ? result.allEntries : [];
 
     const map = new Map<string, RecolteEntry>();
-    for (const item of localEntries) {
-      map.set(item.id, { ...item, sync_status: 'synced' });
-    }
     for (const serverItem of serverEntries) {
-      const existing = map.get(serverItem.id);
-      if (!existing || (serverItem.updated_at && (!existing.updated_at || serverItem.updated_at > existing.updated_at))) {
-        map.set(serverItem.id, { ...serverItem, sync_status: 'synced' });
-      }
+      map.set(serverItem.id, { ...serverItem, sync_status: 'synced' });
     }
 
-    const merged = Array.from(map.values());
+    const merged = [...otherCompanyEntries, ...Array.from(map.values())];
     safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify(merged));
+    setLastSyncAt();
     notifyListeners();
 
     return {
       success: true,
-      syncedCount: queue.length,
+      syncedCount: isLecteur ? 0 : queue.length,
       receivedCount: serverEntries.length,
     };
   } catch (err: unknown) {

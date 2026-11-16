@@ -3,17 +3,20 @@
  * Application : LAHCEN POINTEUR
  *
  * Modèle Excel : D002_2026-11-15_BROUILLON (feuille "Pointage", 21 colonnes exactes)
- * Règles :
- * - STANDARD      : 07:00-16:00, pause 1h = 8h effectives × 11,875 DH/h = 95 DH
- * - RÉCOLTE       : PLATEAUX × 1,1875 DH/plateau (quantité réelle, sans minimum de 80)
- * - TRAITEMENT D3 : HEURE × 16 DH/h (heures renseignées/ajustées par l'administrateur)
+ * Règles officielles :
+ * - STANDARD          : 07:00-16:00 (pause 1h => 8h = 95 DH) | 07:00-14:00 (pause 0h => 7h)
+ * - RÉCOLTE RONDE     : PLATEAUX × 1,1875 DH/caisse (quantiteMetrique, sans minimum)
+ * - RÉCOLTE CERISE    : PLATEAUX × 3,8 DH/caisse (quantiteMetrique)
+ * - TTT D3            : HEURE × 16 DH/h (quantiteMetrique vide, unite vide)
+ * - ÉBOURGEONNAGE D5  : FORFAIT 150 DH (unite = 1, tarifExcep = 150)
  */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   FileSpreadsheet,
   Calendar,
   Download,
+  Upload,
   AlertTriangle,
   CheckCircle2,
   RefreshCw,
@@ -43,17 +46,25 @@ import {
 import * as storage from '../services/storage';
 import { supabase } from '../services/supabaseClient';
 import {
+  DEFAULT_ALL_SERRES_LABEL,
+  DEFAULT_RUBAN_LABEL,
+  ParseRemunerationWorkbookResult,
   REMUNERATION_EXCEL_COLUMNS,
   RemunerationCategorie,
   RemunerationDraftRow,
   RemunerationRowOverride,
-  TARIF_RECOLTE_PLATEAU,
+  TARIF_EBOURGEONNAGE_D5_FORFAIT,
+  TARIF_RECOLTE_CERISE,
+  TARIF_RECOLTE_RONDE,
   TARIF_STANDARD_HEURE,
+  TARIF_STANDARD_JOUR_95,
   TARIF_TRAITEMENT_D3_HEURE,
   buildDailyRemunerationRows,
   computeEffectiveHours,
   exportRemunerationExcel,
+  getDureeRepForSchedule,
   getRemunerationExportFilename,
+  importRemunerationExcelFile,
 } from '../utils/remunerationExporter';
 
 const OVERRIDES_STORAGE_PREFIX = 'agripointage_remuneration_overrides_v1';
@@ -134,6 +145,8 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
   const [showFullTableModal, setShowFullTableModal] = useState<boolean>(false);
   const [showWorkerTotals, setShowWorkerTotals] = useState<boolean>(false);
   const [batchD3Hours, setBatchD3Hours] = useState<string>('5');
+  const [importResult, setImportResult] = useState<ParseRemunerationWorkbookResult | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [exportFeedback, setExportFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -373,15 +386,21 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
   const categoryCounts = useMemo(() => {
     let standard = 0;
     let recolte = 0;
+    let cerise = 0;
     let d3 = 0;
+    let ebourgD5 = 0;
+    let unite = 0;
     let incertain = 0;
     preview.rows.forEach((r) => {
       if (r.effectiveCategorie === 'STANDARD') standard++;
       else if (r.effectiveCategorie === 'RECOLTE') recolte++;
+      else if (r.effectiveCategorie === 'RECOLTE_CERISE') cerise++;
       else if (r.effectiveCategorie === 'TRAITEMENT_D3') d3++;
+      else if (r.effectiveCategorie === 'EBOURGEONNAGE_D5') ebourgD5++;
+      else if (r.effectiveCategorie === 'UNITE') unite++;
       else incertain++;
     });
-    return { standard, recolte, d3, incertain };
+    return { standard, recolte, cerise, d3, ebourgD5, unite, incertain };
   }, [preview.rows]);
 
   // Actions d'ajustement admin
@@ -463,6 +482,21 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
     setTimeout(() => setExportFeedback(null), 5500);
   };
 
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const parsed = await importRemunerationExcelFile(file);
+    setImportResult(parsed);
+    setExportFeedback({
+      type: parsed.success ? 'success' : 'error',
+      message: parsed.success
+        ? `Import Excel valide : ${parsed.validRowsCount} ligne(s) conformes (${formatDH(parsed.totalRemunerationDH)} DH).`
+        : `Import Excel : ${parsed.errors.length} erreur(s) détectée(s) sur ${parsed.rows.length} ligne(s).`,
+    });
+    setTimeout(() => setExportFeedback(null), 5500);
+  };
+
   const targetFilename = getRemunerationExportFilename(selectedDate, domaineFilter, mergedDomaines);
 
   const renderCategoryLabel = (cat: RemunerationCategorie) => {
@@ -470,9 +504,15 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
       case 'STANDARD':
         return 'STANDARD (11,875 DH/h)';
       case 'RECOLTE':
-        return 'RÉCOLTE (1,1875 DH/pl.)';
+        return 'RÉCOLTE RONDE (1,1875 DH/pl.)';
+      case 'RECOLTE_CERISE':
+        return 'RÉCOLTE CERISE (3,8 DH/pl.)';
       case 'TRAITEMENT_D3':
-        return 'TRAITEMENT D3 (16 DH/h)';
+        return 'TTT D3 (16 DH/h)';
+      case 'EBOURGEONNAGE_D5':
+        return 'ÉBOURGEONNAGE D5 (150 DH forfait)';
+      case 'UNITE':
+        return "TRAVAIL À L'UNITÉ";
       default:
         return 'À CONFIRMER';
     }
@@ -484,8 +524,14 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
         return 'bg-slate-100 text-slate-800 border-slate-300';
       case 'RECOLTE':
         return 'bg-emerald-50 text-emerald-800 border-emerald-300';
+      case 'RECOLTE_CERISE':
+        return 'bg-rose-50 text-rose-800 border-rose-300';
       case 'TRAITEMENT_D3':
         return 'bg-amber-50 text-amber-900 border-amber-300';
+      case 'EBOURGEONNAGE_D5':
+        return 'bg-indigo-50 text-indigo-900 border-indigo-300';
+      case 'UNITE':
+        return 'bg-sky-50 text-sky-900 border-sky-300';
       default:
         return 'bg-red-50 text-red-700 border-red-300';
     }
@@ -577,32 +623,46 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
           </div>
         </div>
 
-        {/* Rappel concis des 3 barèmes officiels */}
-        <div className="grid grid-cols-3 gap-1.5 text-[10px] pt-1 border-t border-slate-100">
+        {/* Rappel concis des 5 barèmes officiels */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 text-[10px] pt-1 border-t border-slate-100">
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-2">
             <div className="font-black text-slate-800">STANDARD</div>
             <div className="font-mono tabular-nums font-bold text-slate-600 mt-0.5">
               {TARIF_STANDARD_HEURE} DH/h
             </div>
-            <div className="text-[9px] text-slate-500">8h eff. = 95 DH</div>
+            <div className="text-[9px] text-slate-500">07–16h (1h) = {TARIF_STANDARD_JOUR_95} DH</div>
           </div>
           <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-2">
-            <div className="font-black text-emerald-900">RÉCOLTE</div>
+            <div className="font-black text-emerald-900">RÉC. RONDE</div>
             <div className="font-mono tabular-nums font-bold text-emerald-700 mt-0.5">
-              {TARIF_RECOLTE_PLATEAU} DH/pl.
+              {TARIF_RECOLTE_RONDE} DH/pl.
             </div>
-            <div className="text-[9px] text-emerald-700">Sans minimum</div>
+            <div className="text-[9px] text-emerald-700">qteMetrique</div>
+          </div>
+          <div className="bg-rose-50/70 border border-rose-200 rounded-xl p-2">
+            <div className="font-black text-rose-900">RÉC. CERISE</div>
+            <div className="font-mono tabular-nums font-bold text-rose-700 mt-0.5">
+              {TARIF_RECOLTE_CERISE} DH/pl.
+            </div>
+            <div className="text-[9px] text-rose-700">qteMetrique</div>
           </div>
           <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-2">
-            <div className="font-black text-amber-900">TRAIT. D3</div>
+            <div className="font-black text-amber-900">TTT D3</div>
             <div className="font-mono tabular-nums font-bold text-amber-700 mt-0.5">
               {TARIF_TRAITEMENT_D3_HEURE} DH/h
             </div>
-            <div className="text-[9px] text-amber-700">Heures admin</div>
+            <div className="text-[9px] text-amber-700">unite vide</div>
+          </div>
+          <div className="bg-indigo-50/80 border border-indigo-200 rounded-xl p-2 col-span-2 sm:col-span-1">
+            <div className="font-black text-indigo-900">ÉBOURG. D5</div>
+            <div className="font-mono tabular-nums font-bold text-indigo-700 mt-0.5">
+              {TARIF_EBOURGEONNAGE_D5_FORFAIT} DH
+            </div>
+            <div className="text-[9px] text-indigo-700">Forfait • unité=1</div>
           </div>
         </div>
 
-        {/* Bouton principal Export Excel */}
+        {/* Boutons Export & Import/Vérification Excel */}
         <div className="flex items-center gap-2 pt-1">
           <button
             type="button"
@@ -614,6 +674,23 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
             <span>
               EXPORTER EXCEL ({preview.rows.length} ligne{preview.rows.length > 1 ? 's' : ''})
             </span>
+          </button>
+
+          <input
+            ref={importFileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            onChange={handleImportExcel}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => importFileInputRef.current?.click()}
+            className="h-11 px-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 font-bold text-xs rounded-xl flex items-center gap-1.5 transition cursor-pointer shrink-0"
+            title="Importer et contrôler un fichier Tableau de Rémunération (.xlsx)"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Vérifier .xlsx</span>
           </button>
 
           {preview.rows.length > 0 && (
@@ -660,6 +737,49 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
           )}
           <span>{exportFeedback.message}</span>
         </div>
+      )}
+
+      {/* RÉSULTAT D'IMPORT / CONTRÔLE EXCEL */}
+      {importResult && (
+        <section
+          className={`rounded-2xl border p-3 space-y-2 ${
+            importResult.success
+              ? 'bg-emerald-50/70 border-emerald-300'
+              : 'bg-red-50/70 border-red-300'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-black text-slate-900">
+              {importResult.success ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+              )}
+              <span>
+                Contrôle Import Excel ({importResult.sheetName || 'Fichier'}) —{' '}
+                {importResult.validRowsCount}/{importResult.rows.length} valide(s) •{' '}
+                {formatDH(importResult.totalRemunerationDH)} DH
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setImportResult(null)}
+              className="p-1 rounded-lg hover:bg-white/70 text-slate-600 cursor-pointer"
+              title="Fermer le rapport d'import"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          {importResult.errors.length > 0 && (
+            <ul className="space-y-1 max-h-40 overflow-y-auto text-[11px] text-red-800 font-semibold">
+              {importResult.errors.map((errMsg, i) => (
+                <li key={i} className="bg-white/80 rounded-lg px-2 py-1 border border-red-200">
+                  {errMsg}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       )}
 
       {/* INDICATEURS TOTAUX GÉNÉRAUX & PAR DOMAINE */}
@@ -866,8 +986,11 @@ export const ExportRemunerationView: React.FC<ExportRemunerationViewProps> = ({
               >
                 <option value="ALL">Toutes ({preview.rows.length})</option>
                 <option value="STANDARD">Standard ({categoryCounts.standard})</option>
-                <option value="RECOLTE">Récolte ({categoryCounts.recolte})</option>
-                <option value="TRAITEMENT_D3">Trait. D3 ({categoryCounts.d3})</option>
+                <option value="RECOLTE">Réc. Ronde ({categoryCounts.recolte})</option>
+                <option value="RECOLTE_CERISE">Réc. Cerise ({categoryCounts.cerise})</option>
+                <option value="TRAITEMENT_D3">TTT D3 ({categoryCounts.d3})</option>
+                <option value="EBOURGEONNAGE_D5">Ébourg. D5 ({categoryCounts.ebourgD5})</option>
+                <option value="UNITE">À l'unité ({categoryCounts.unite})</option>
                 {categoryCounts.incertain > 0 && (
                   <option value="INCERTAIN">À vérifier ({categoryCounts.incertain})</option>
                 )}
@@ -1010,27 +1133,64 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
   renderCategoryBadgeClass,
 }) => {
   const [qtyDraft, setQtyDraft] = useState<string>(
-    row.quantite !== null && row.quantite !== undefined ? String(row.quantite) : ''
+    row.workValue !== null && row.workValue !== undefined ? String(row.workValue) : ''
+  );
+  const [tarifDraft, setTarifDraft] = useState<string>(
+    row.tarifExcep !== null && row.tarifExcep !== undefined ? String(row.tarifExcep) : ''
   );
 
   useEffect(() => {
-    setQtyDraft(row.quantite !== null && row.quantite !== undefined ? String(row.quantite) : '');
-  }, [row.quantite, row.effectiveCategorie]);
+    setQtyDraft(row.workValue !== null && row.workValue !== undefined ? String(row.workValue) : '');
+    setTarifDraft(row.tarifExcep !== null && row.tarifExcep !== undefined ? String(row.tarifExcep) : '');
+  }, [row.workValue, row.tarifExcep, row.effectiveCategorie]);
 
   const handleQtyChange = (val: string) => {
     setQtyDraft(val);
     const cleaned = val.trim().replace(',', '.');
+    const isUnitBased =
+      row.effectiveCategorie === 'EBOURGEONNAGE_D5' || row.effectiveCategorie === 'UNITE';
     if (cleaned === '') {
-      onChangeOverride({ quantite: null });
+      onChangeOverride(isUnitBased ? { unite: null, quantite: null } : { quantite: null });
       return;
     }
     if (/^\d+(\.\d*)?$/.test(cleaned)) {
       const n = Number(cleaned);
       if (Number.isFinite(n) && n >= 0) {
-        onChangeOverride({ quantite: n });
+        onChangeOverride(isUnitBased ? { unite: n, quantite: n } : { quantite: n });
       }
     }
   };
+
+  const handleTarifChange = (val: string) => {
+    setTarifDraft(val);
+    const cleaned = val.trim().replace(',', '.');
+    if (cleaned === '') {
+      onChangeOverride({ tarifExcep: null });
+      return;
+    }
+    if (/^\d+(\.\d*)?$/.test(cleaned)) {
+      const n = Number(cleaned);
+      if (Number.isFinite(n) && n > 0) {
+        onChangeOverride({ tarifExcep: n });
+      }
+    }
+  };
+
+  const tarifUnitSuffix =
+    row.uniteMetrique === 'PLATEAUX'
+      ? 'pl.'
+      : row.uniteMetrique === 'FORFAIT'
+      ? 'forfait'
+      : row.uniteMetrique === 'UNITE'
+      ? 'unité'
+      : 'h';
+
+  const qtyInputLabel =
+    row.effectiveCategorie === 'RECOLTE' || row.effectiveCategorie === 'RECOLTE_CERISE'
+      ? 'Caisses (qteMetrique) :'
+      : row.effectiveCategorie === 'EBOURGEONNAGE_D5' || row.effectiveCategorie === 'UNITE'
+      ? 'Unité :'
+      : 'Heures eff. :';
 
   return (
     <div className={`p-3 space-y-2 ${row.validationErrors.length > 0 ? 'bg-red-50/40' : ''}`}>
@@ -1045,6 +1205,14 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
             <span className="font-mono text-[10px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded-md border border-slate-200">
               {row.DT}
             </span>
+            <span className="font-mono text-[10px] font-bold text-slate-500 bg-slate-50 px-1.5 py-0.5 rounded-md border border-slate-200">
+              mode: {row.modeRemuneration}
+            </span>
+            {row.unite !== null && (
+              <span className="font-mono text-[10px] font-bold text-indigo-800 bg-indigo-50 px-1.5 py-0.5 rounded-md border border-indigo-200">
+                unité = {row.unite}
+              </span>
+            )}
           </div>
 
           <div className="text-[11px] text-slate-600 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -1052,10 +1220,12 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
               {row.tacheTypeId ? `[${row.tacheTypeId}] ` : ''}
               {row.tache || 'Sans tâche'}
             </span>
-            {row.serreId && (
-              <span className="text-slate-500">• Serres : {row.serreId}</span>
-            )}
-            {row.rubanId && <span className="text-slate-500">• Ruban : {row.rubanId}</span>}
+            <span className="text-slate-500">
+              • Serres : <span className="font-mono">{row.serreId || DEFAULT_ALL_SERRES_LABEL}</span>
+            </span>
+            <span className="text-slate-500">
+              • Ruban : <span>{row.rubanId || DEFAULT_RUBAN_LABEL}</span>
+            </span>
           </div>
         </div>
 
@@ -1068,12 +1238,12 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
             {row.remuneration !== null ? `${formatDH(row.remuneration)} DH` : 'À compléter'}
           </div>
           <div className="text-[10px] font-mono tabular-nums text-slate-500">
-            {row.tarifExcep !== null ? `${row.tarifExcep} DH/${row.uniteMetrique === 'PLATEAUX' ? 'pl.' : 'h'}` : 'Tarif ?'}
+            {row.tarifExcep !== null ? `${row.tarifExcep} DH/${tarifUnitSuffix}` : 'Tarif ?'}
           </div>
         </div>
       </div>
 
-      {/* Ligne 2 : Catégorie + Édition directe quantité / horaires */}
+      {/* Ligne 2 : Catégorie + Édition directe valeur de calcul / tarif unitaire */}
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={row.effectiveCategorie}
@@ -1092,14 +1262,29 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
           )}
           <option value="STANDARD">{renderCategoryLabel('STANDARD')}</option>
           <option value="RECOLTE">{renderCategoryLabel('RECOLTE')}</option>
+          <option value="RECOLTE_CERISE">{renderCategoryLabel('RECOLTE_CERISE')}</option>
           <option value="TRAITEMENT_D3">{renderCategoryLabel('TRAITEMENT_D3')}</option>
+          <option value="EBOURGEONNAGE_D5">{renderCategoryLabel('EBOURGEONNAGE_D5')}</option>
+          <option value="UNITE">{renderCategoryLabel('UNITE')}</option>
         </select>
 
-        {/* Quantité éditable (Heures ou Caisses/Plateaux) */}
+        {row.effectiveCategorie === 'UNITE' && (
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] font-bold text-slate-500">Tarif :</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={tarifDraft}
+              onChange={(e) => handleTarifChange(e.target.value)}
+              placeholder="DH"
+              className="w-16 px-2 py-1 rounded-lg border border-slate-300 bg-white text-xs font-mono tabular-nums font-bold text-right text-slate-900 outline-none"
+            />
+          </div>
+        )}
+
+        {/* Quantité éditable (Heures eff., Caisses/qteMetrique, ou Unité — la colonne Excel `quantite` reste vide) */}
         <div className="flex items-center gap-1 ml-auto">
-          <span className="text-[10px] font-bold text-slate-500">
-            {row.effectiveCategorie === 'RECOLTE' ? 'Plateaux :' : 'Heures eff. :'}
-          </span>
+          <span className="text-[10px] font-bold text-slate-500">{qtyInputLabel}</span>
           <input
             type="text"
             inputMode="decimal"
@@ -1107,7 +1292,7 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
             onChange={(e) => handleQtyChange(e.target.value)}
             placeholder={row.effectiveCategorie === 'TRAITEMENT_D3' ? 'Heures' : 'Qté'}
             className={`w-16 px-2 py-1 rounded-lg border text-xs font-mono tabular-nums font-bold text-right outline-none ${
-              row.quantite === null || row.quantite <= 0
+              row.workValue === null || row.workValue <= 0
                 ? 'border-red-400 bg-red-50 text-red-900'
                 : 'border-slate-300 bg-white text-slate-900'
             }`}
@@ -1115,8 +1300,8 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
         </div>
       </div>
 
-      {/* Horaires Standard ajustables si nécessaire */}
-      {row.effectiveCategorie === 'STANDARD' && (
+      {/* Horaires ajustables + dureeRep automatique (07:00-16:00 => 1h, 07:00-14:00 => 0h) */}
+      {(row.effectiveCategorie === 'STANDARD' || row.effectiveCategorie === 'TRAITEMENT_D3') && (
         <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-600 pt-1">
           <span>Début :</span>
           <input
@@ -1124,8 +1309,13 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
             value={row.heureDeb}
             onChange={(e) => {
               const nextDeb = e.target.value;
-              const eff = computeEffectiveHours(nextDeb, row.heureFin, row.dureeRep);
-              onChangeOverride({ heureDeb: nextDeb, quantite: eff });
+              const nextPause = getDureeRepForSchedule(nextDeb, row.heureFin, row.dureeRep);
+              const eff = computeEffectiveHours(nextDeb, row.heureFin, nextPause);
+              onChangeOverride({
+                heureDeb: nextDeb,
+                dureeRep: nextPause,
+                quantite: eff > 0 ? eff : row.workValue,
+              });
             }}
             className="border border-slate-200 rounded-md px-1.5 py-0.5 font-mono text-[10px] bg-slate-50"
           />
@@ -1135,26 +1325,73 @@ const RemunerationRowEditorCard: React.FC<RemunerationRowEditorCardProps> = ({
             value={row.heureFin}
             onChange={(e) => {
               const nextFin = e.target.value;
-              const eff = computeEffectiveHours(row.heureDeb, nextFin, row.dureeRep);
-              onChangeOverride({ heureFin: nextFin, quantite: eff });
+              const nextPause = getDureeRepForSchedule(row.heureDeb, nextFin, row.dureeRep);
+              const eff = computeEffectiveHours(row.heureDeb, nextFin, nextPause);
+              onChangeOverride({
+                heureFin: nextFin,
+                dureeRep: nextPause,
+                quantite: eff > 0 ? eff : row.workValue,
+              });
             }}
             className="border border-slate-200 rounded-md px-1.5 py-0.5 font-mono text-[10px] bg-slate-50"
           />
           <span>Pause :</span>
-          <span className="font-mono font-bold text-slate-700">{row.dureeRep}h (non rémun.)</span>
+          <span className="font-mono font-bold text-slate-700">{row.dureeRep}h (dureeRep)</span>
+          <div className="flex items-center gap-1 ml-auto">
+            <button
+              type="button"
+              onClick={() =>
+                onChangeOverride({
+                  heureDeb: '07:00',
+                  heureFin: '16:00',
+                  dureeRep: 1,
+                  quantite: 8,
+                })
+              }
+              className={`px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold cursor-pointer ${
+                row.heureDeb === '07:00' && row.heureFin === '16:00' && row.dureeRep === 1
+                  ? 'bg-slate-900 text-white border-slate-900'
+                  : 'bg-white text-slate-700 border-slate-200'
+              }`}
+            >
+              07–16h (1h)
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                onChangeOverride({
+                  heureDeb: '07:00',
+                  heureFin: '14:00',
+                  dureeRep: 0,
+                  quantite: 7,
+                })
+              }
+              className={`px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold cursor-pointer ${
+                row.heureDeb === '07:00' && row.heureFin === '14:00' && row.dureeRep === 0
+                  ? 'bg-slate-900 text-white border-slate-900'
+                  : 'bg-white text-slate-700 border-slate-200'
+              }`}
+            >
+              07–14h (0h)
+            </button>
+          </div>
         </div>
       )}
 
       {/* Indication source Récolte */}
-      {row.effectiveCategorie === 'RECOLTE' && (
+      {(row.effectiveCategorie === 'RECOLTE' || row.effectiveCategorie === 'RECOLTE_CERISE') && (
         <div className="text-[10px] text-emerald-800 flex items-center justify-between">
           <span>
-            Source Récolte :{' '}
+            Source Récolte (qteMetrique) :{' '}
             <strong className="font-mono tabular-nums">
               {row.recolteCaissesSource !== null ? `${row.recolteCaissesSource} caisses` : 'Aucune saisie'}
             </strong>
           </span>
-          <span className="text-slate-500">Aucun minimum de 80 imposé</span>
+          <span className="text-slate-500">
+            {row.effectiveCategorie === 'RECOLTE_CERISE'
+              ? 'Cerise 3,8 DH/caisse • unité vide'
+              : 'Ronde 1,1875 DH/caisse • unité vide'}
+          </span>
         </div>
       )}
 

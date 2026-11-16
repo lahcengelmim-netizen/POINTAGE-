@@ -19,6 +19,7 @@ import {
   Clock,
   ClipboardList,
   FileSpreadsheet,
+  Banknote,
 } from 'lucide-react';
 import { UserRole } from '../types';
 
@@ -30,6 +31,7 @@ export type ActiveScreen =
   | 'contractuelles'
   | 'stock'
   | 'supplementaires'
+  | 'remuneration'
   | 'gazoil'
   | 'recap'
   | 'gestion'
@@ -123,7 +125,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   // Navigation complète pour l'Administrateur
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-lg px-1 py-1.5 pb-safe">
-      <div className="max-w-md mx-auto grid grid-cols-10 gap-0.5">
+      <div className="max-w-md mx-auto grid grid-cols-11 gap-0.5">
         {/* ÉCRAN 1 : POINTAGE */}
         <button
           type="button"
@@ -259,7 +261,26 @@ export const Navigation: React.FC<NavigationProps> = ({
           <span className="text-[7.5px] mt-0.5 tracking-tight truncate">Supplém.</span>
         </button>
 
-        {/* ÉCRAN 6 : GAZOIL */}
+        {/* ÉCRAN 8 : TABLEAU DE RÉMUNÉRATION (ADMIN ONLY) */}
+        <button
+          type="button"
+          onClick={() => onSelectScreen('remuneration')}
+          className={`flex flex-col items-center justify-center py-1 px-0.5 rounded-xl transition active:scale-95 ${
+            activeScreen === 'remuneration'
+              ? 'text-emerald-800 bg-emerald-100 font-black'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+          title="Tableau de Rémunération"
+        >
+          <Banknote
+            className={`w-4 h-4 ${
+              activeScreen === 'remuneration' ? 'text-emerald-700 stroke-[2.5]' : 'text-slate-500'
+            }`}
+          />
+          <span className="text-[7px] sm:text-[7.5px] mt-0.5 tracking-tight truncate">Rémun.</span>
+        </button>
+
+        {/* ÉCRAN 9 : GAZOIL */}
         <button
           type="button"
           onClick={() => onSelectScreen('gazoil')}
