@@ -736,7 +736,7 @@ export const ContractuelCaporalView: React.FC<ContractuelCaporalViewProps> = ({
           <p className="text-xs text-slate-500 max-w-md mx-auto">
             {ouvriers.length === 0
               ? isAdmin
-                ? 'Aucun travailleur dans le système. Rendez-vous dans l’onglet « Travailleurs & Import Excel » pour importer votre tableau (NOM ET PRENOM, SERRES, MONTANT BACH CHAD SERRE, TACHES, DOMAINE).'
+                ? 'Aucun travailleur dans le système. Rendez-vous dans l’onglet « Travailleurs & Import Excel » pour importer votre fichier standard (Nom, Prénom, Montant DH).'
                 : 'Aucun travailleur contractuel disponible. L’administration n’a pas encore importé la liste des travailleurs.'
               : 'Ajustez votre recherche ou réinitialisez les filtres.'}
           </p>
@@ -764,7 +764,7 @@ export const ContractuelCaporalView: React.FC<ContractuelCaporalViewProps> = ({
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   {/* Identification du travailleur */}
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
                       <span className="font-black text-sm text-slate-900 tracking-tight">
                         {ouvrier.nom_complet || `${ouvrier.nom} ${ouvrier.prenom || ''}`}
                       </span>
@@ -773,22 +773,12 @@ export const ContractuelCaporalView: React.FC<ContractuelCaporalViewProps> = ({
                           {ouvrier.matricule}
                         </span>
                       )}
-                      {ouvrier.domaine_id && (
-                        <span className="text-[10px] font-black bg-slate-200/80 text-slate-800 px-1.5 py-0.5 rounded-md uppercase">
-                          {ouvrier.domaine_id.replace('dom_', '')}
-                        </span>
-                      )}
                     </div>
                     <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
                       <span>Montant initial ADMIN :</span>
                       <span className="font-mono font-black text-emerald-800 bg-emerald-100/70 px-1.5 py-0.5 rounded-md text-[11px]">
                         {ouvrier.prix_convenu || 0} DH
                       </span>
-                      {ouvrier.notes && (
-                        <span className="text-[10px] font-semibold bg-blue-50 text-blue-800 border border-blue-200 px-1.5 py-0.5 rounded-md">
-                          {ouvrier.notes}
-                        </span>
-                      )}
                       {saveFeedback && saveFeedback.workerId === ouvrier.id && (
                         <span className="text-[11px] font-black text-emerald-700 animate-pulse ml-1">
                           {saveFeedback.message}

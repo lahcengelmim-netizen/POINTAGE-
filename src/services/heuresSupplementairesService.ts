@@ -85,7 +85,6 @@ export async function syncAndFetchHeuresSupplementairesServer(filters?: {
 export async function createHeureSupplementaireServer(data: {
   ouvrier_id: string;
   numero_ouvrier: number;
-  nom_ouvrier?: string;
   date: string;
   heure_debut?: string | null;
   heure_fin?: string | null;

@@ -6,13 +6,12 @@
 
 import React from 'react';
 import { ShieldAlert } from 'lucide-react';
-import { Ouvrier, Tache, Domaine, Serre, UserAccount } from '../types';
+import { Ouvrier, Domaine, Serre, UserAccount } from '../types';
 import { SupplementairesAdminModule } from './Supplementaires/SupplementairesAdminModule';
 
 interface HeuresSupplementairesViewProps {
   currentUser: UserAccount;
   allOuvriers: Ouvrier[];
-  taches?: Tache[];
   domaines: Domaine[];
   serres: Serre[];
   selectedDate: string;
@@ -23,7 +22,6 @@ interface HeuresSupplementairesViewProps {
 export const HeuresSupplementairesView: React.FC<HeuresSupplementairesViewProps> = ({
   currentUser,
   allOuvriers,
-  taches = [],
   domaines,
   serres,
   selectedDate,
@@ -51,7 +49,7 @@ export const HeuresSupplementairesView: React.FC<HeuresSupplementairesViewProps>
     <SupplementairesAdminModule
       currentUser={currentUser}
       allOuvriers={allOuvriers}
-      taches={taches}
+      taches={[]}
       domaines={domaines}
       serres={serres}
       selectedDate={selectedDate}

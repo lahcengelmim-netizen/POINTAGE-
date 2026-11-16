@@ -53,11 +53,13 @@ interface ContractuelOuvrierManagementProps {
 interface ParsedWorkerRow {
   index: number;
   raw: Record<string, any>;
-  nom_complet: string;
+  nom: string;
+  prenom: string;
   serre_nom: string;
   prix_convenu: number;
-  taches: string;
-  domaine_str: string;
+  mode_remuneration: ModeRemuneration;
+  unite: string;
+  matricule?: string;
   isValid: boolean;
   errors: string[];
 }
@@ -86,12 +88,12 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
   const [rawHeaders, setRawHeaders] = useState<string[]>([]);
   const [rawData, setRawData] = useState<Record<string, any>[]>([]);
 
-  // Correspondance des colonnes (Nom et Prénom, Serres, Montant bach chad serre, Tâches, Domaine)
-  const [colNomPrenom, setColNomPrenom] = useState<string>('');
+  // Correspondance des colonnes
+  const [colNom, setColNom] = useState<string>('');
+  const [colPrenom, setColPrenom] = useState<string>('');
   const [colSerre, setColSerre] = useState<string>('');
   const [colMontant, setColMontant] = useState<string>('');
-  const [colTaches, setColTaches] = useState<string>('');
-  const [colDomaine, setColDomaine] = useState<string>('');
+  const [colMatricule, setColMatricule] = useState<string>('');
   const [dedupMode, setDedupMode] = useState<'update' | 'skip'>('update');
 
   // Lignes parsées
@@ -127,73 +129,23 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
     return { total, actifs, inactifs };
   }, [ouvriers]);
 
-  // Helpers d'extraction des métadonnées stockées dans notes (Serres / Tâches)
-  const parseWorkerNotesMeta = (notes?: string | null) => {
-    const raw = String(notes || '').trim();
-    if (!raw) return { serresText: '', tachesText: '', otherNotes: '' };
-    let serresText = '';
-    let tachesText = '';
-    const extra: string[] = [];
-
-    raw.split('|').forEach((segment) => {
-      const part = segment.trim();
-      if (/^serres?\s*:/i.test(part)) {
-        serresText = part.replace(/^serres?\s*:/i, '').trim();
-      } else if (/^t[aâ]ches?\s*:/i.test(part)) {
-        tachesText = part.replace(/^t[aâ]ches?\s*:/i, '').trim();
-      } else if (part) {
-        extra.push(part);
-      }
-    });
-
-    return {
-      serresText,
-      tachesText: tachesText || extra.join(' | '),
-      otherNotes: extra.join(' | '),
-    };
-  };
-
-  const getDomaineBadge = (domaineId?: string) => {
-    const found = domaines.find((d) => d.id === domaineId);
-    if (found) return found.nom;
-    const raw = String(domaineId || '').toUpperCase();
-    if (raw.includes('D2')) return 'D2';
-    if (raw.includes('D3')) return 'D3';
-    if (raw.includes('D5')) return 'D5';
-    return raw.replace('DOM_', '') || 'D2';
-  };
-
   // Filtrage combiné par recherche, domaine, serre et statut
   const filteredOuvriers = useMemo(() => {
-    const selectedSerreObj =
-      selectedSerreFilter !== 'ALL' ? serres.find((s) => s.id === selectedSerreFilter) : null;
-
     return ouvriers.filter((o) => {
       if (!showInactive && !o.actif) return false;
       if (selectedDomaineFilter !== 'ALL' && o.domaine_id !== selectedDomaineFilter) return false;
-
-      if (selectedSerreFilter !== 'ALL') {
-        const meta = parseWorkerNotesMeta(o.notes);
-        const matchDirect = o.serre_id === selectedSerreFilter;
-        const matchNotes =
-          selectedSerreObj &&
-          meta.serresText &&
-          (meta.serresText.toLowerCase().includes(selectedSerreObj.code.toLowerCase()) ||
-            meta.serresText.toLowerCase().includes(selectedSerreObj.nom.toLowerCase()));
-        if (!matchDirect && !matchNotes) return false;
-      }
+      if (selectedSerreFilter !== 'ALL' && o.serre_id !== selectedSerreFilter) return false;
 
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchNom = o.nom_complet.toLowerCase().includes(q);
         const matchMatricule = o.matricule.toLowerCase().includes(q);
         const matchTel = o.telephone?.toLowerCase().includes(q);
-        const matchNotes = o.notes?.toLowerCase().includes(q);
-        if (!matchNom && !matchMatricule && !matchTel && !matchNotes) return false;
+        if (!matchNom && !matchMatricule && !matchTel) return false;
       }
       return true;
     });
-  }, [ouvriers, serres, showInactive, selectedDomaineFilter, selectedSerreFilter, searchQuery]);
+  }, [ouvriers, showInactive, selectedDomaineFilter, selectedSerreFilter, searchQuery]);
 
   // Ouverture création manuelle
   const handleOpenCreate = () => {
@@ -202,7 +154,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
       prenom: '',
       nom_complet: '',
       matricule: `C-${String(ouvriers.length + 1).padStart(3, '0')}`,
-      domaine_id: domaines[0]?.id || 'dom_d2',
+      domaine_id: domaines[0]?.id || 'dom_d1',
       serre_id: null,
       mode_remuneration: 'JOUR',
       prix_convenu: 120,
@@ -352,88 +304,88 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
         .replace(/[^a-z0-9]/g, '')
         .trim();
 
-    let detectedNom = '';
-    let detectedSerre = '';
-    let detectedMontant = '';
-    let detectedTaches = '';
-    let detectedDomaine = '';
-
     headers.forEach((h) => {
       const norm = normalize(h);
 
-      if (!detectedNom && (norm.includes('nom') || norm.includes('prenom') || norm.includes('ouvrier') || norm.includes('name'))) {
-        detectedNom = h;
+      if (!colNom && (norm === 'nom' || norm === 'nomcomplet' || norm === 'nomouvrier' || norm === 'name' || norm === 'lastname' || norm.includes('contractuel'))) {
+        setColNom(h);
       }
-      if (!detectedMontant && (norm.includes('montant') || norm.includes('chad') || norm.includes('prix') || norm.includes('tarif') || norm === 'dh' || norm.includes('salaire'))) {
-        detectedMontant = h;
+      if (!colPrenom && (norm === 'prenom' || norm === 'firstname')) {
+        setColPrenom(h);
+      }
+      if (!colSerre && (norm === 'serre' || norm.includes('serre') || norm.includes('affectation'))) {
+        setColSerre(h);
       }
       if (
-        !detectedSerre &&
-        (norm.includes('serre') || norm.includes('affectation')) &&
-        !norm.includes('montant') &&
-        !norm.includes('prix') &&
-        !norm.includes('chad') &&
-        !norm.includes('tarif')
+        !colMontant &&
+        (norm.includes('montant') ||
+          norm.includes('montantdh') ||
+          norm.includes('prix') ||
+          norm.includes('tarif') ||
+          norm === 'dh' ||
+          norm.includes('salaire') ||
+          norm.includes('remuneration') ||
+          norm.includes('amount'))
       ) {
-        detectedSerre = h;
+        setColMontant(h);
       }
-      if (!detectedTaches && (norm.includes('tach') || norm.includes('travail') || norm.includes('operation'))) {
-        detectedTaches = h;
-      }
-      if (!detectedDomaine && (norm.includes('domaine') || norm === 'd2' || norm === 'd3' || norm === 'd5')) {
-        detectedDomaine = h;
+      if (!colMatricule && (norm.includes('matricule') || norm.includes('code') || norm === 'id')) {
+        setColMatricule(h);
       }
     });
 
-    if (!detectedNom && headers.length > 0) detectedNom = headers[0];
-    if (!detectedMontant && headers.length > 1) detectedMontant = headers[2] || headers[1];
-
-    setColNomPrenom(detectedNom);
-    setColSerre(detectedSerre);
-    setColMontant(detectedMontant);
-    setColTaches(detectedTaches);
-    setColDomaine(detectedDomaine);
-  };
-
-  const isDomaineInputValid = (rawDom: string): boolean => {
-    const d = rawDom.trim().toUpperCase();
-    if (!d) return true; // Optionnel si non renseigné (repli D2)
-    return d.includes('D2') || d.includes('D3') || d.includes('D5') || d === '2' || d === '3' || d === '5';
+    // Fallback if not matched strictly
+    if (!colNom && headers.length > 0) {
+      const foundNom = headers.find((h) => normalize(h).includes('nom'));
+      if (foundNom) setColNom(foundNom);
+      else setColNom(headers[0]);
+    }
+    if (!colMontant && headers.length > 1) {
+      const foundPrix = headers.find((h) => {
+        const n = normalize(h);
+        return n.includes('mont') || n.includes('prix') || n.includes('tarif') || n.includes('dh');
+      });
+      if (foundPrix) setColMontant(foundPrix);
+      else if (headers.length >= 3) setColMontant(headers[2]);
+    }
+    if (!colPrenom && headers.length >= 2) {
+      const foundPrenom = headers.find((h) => normalize(h).includes('prenom'));
+      if (foundPrenom) setColPrenom(foundPrenom);
+    }
   };
 
   const handleGeneratePreview = () => {
-    if (!colNomPrenom || !colMontant) {
-      alert('Veuillez associer au moins les colonnes "Nom et Prénom" et "Montant".');
+    if (!colNom || !colMontant) {
+      alert('Veuillez associer au moins les colonnes "Nom" et "Montant DH".');
       return;
     }
 
     const rows: ParsedWorkerRow[] = rawData.map((row, idx) => {
-      const nomCompletRaw = String(row[colNomPrenom] || '').trim();
+      const nomRaw = String(row[colNom] || '').trim();
+      const prenomRaw = colPrenom ? String(row[colPrenom] || '').trim() : '';
       const serreRaw = colSerre ? String(row[colSerre] || '').trim() : '';
       const montantVal = row[colMontant];
-      const prixRaw = Number(String(montantVal ?? '').replace(',', '.').replace(/[^0-9.-]/g, ''));
-      const tachesRaw = colTaches ? String(row[colTaches] || '').trim() : '';
-      const domaineRaw = colDomaine ? String(row[colDomaine] || '').trim().toUpperCase() : '';
+      const prixRaw = Number(String(montantVal || '').replace(',', '.').replace(/[^0-9.-]/g, ''));
+      const matriculeRaw = colMatricule ? String(row[colMatricule] || '').trim() : undefined;
 
       const errors: string[] = [];
-      if (!nomCompletRaw) errors.push('Nom et prénom obligatoires');
-      if (String(montantVal ?? '').trim() === '' || isNaN(prixRaw)) {
+      if (!nomRaw) errors.push('Nom obligatoire');
+      if (isNaN(prixRaw)) {
         errors.push('Montant non numérique');
       } else if (prixRaw < 0) {
         errors.push('Montant négatif interdit (≥ 0)');
-      }
-      if (domaineRaw && !isDomaineInputValid(domaineRaw)) {
-        errors.push('Domaine attendu : D2, D3 ou D5');
       }
 
       return {
         index: idx,
         raw: row,
-        nom_complet: nomCompletRaw,
+        nom: nomRaw,
+        prenom: prenomRaw,
         serre_nom: serreRaw,
         prix_convenu: isNaN(prixRaw) || prixRaw < 0 ? 0 : Math.round(prixRaw * 100) / 100,
-        taches: tachesRaw,
-        domaine_str: domaineRaw,
+        mode_remuneration: 'JOUR',
+        unite: 'JOUR',
+        matricule: matriculeRaw,
         isValid: errors.length === 0,
         errors,
       };
@@ -449,14 +401,11 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
         if (r.index !== index) return r;
         const merged = { ...r, ...updates };
         const errors: string[] = [];
-        if (!merged.nom_complet.trim()) errors.push('Nom et prénom obligatoires');
+        if (!merged.nom.trim()) errors.push('Nom obligatoire');
         if (isNaN(merged.prix_convenu)) {
           errors.push('Montant non numérique');
         } else if (merged.prix_convenu < 0) {
           errors.push('Montant négatif interdit');
-        }
-        if (merged.domaine_str.trim() && !isDomaineInputValid(merged.domaine_str)) {
-          errors.push('Domaine attendu : D2, D3 ou D5');
         }
         merged.isValid = errors.length === 0;
         merged.errors = errors;
@@ -472,39 +421,21 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
   const handleConfirmImport = async () => {
     const validRows = parsedRows.filter((r) => r.isValid);
     if (validRows.length === 0) {
-      alert('Aucune ligne valide à importer. Veuillez vérifier les données.');
+      alert('Aucune ligne valide à importer. Veuillez corriger les montants ou les noms.');
       return;
     }
 
     setImporting(true);
     try {
-      const payload = validRows.map((r) => {
-        const parts = r.nom_complet.trim().split(/\s+/);
-        const nom = parts[0] || r.nom_complet.trim();
-        const prenom = parts.slice(1).join(' ') || '';
-
-        let domaine_id = domaines[0]?.id || 'dom_d2';
-        const dNorm = r.domaine_str.toUpperCase();
-        if (dNorm.includes('D2') || dNorm === '2') domaine_id = domaines.find((d) => d.nom.includes('2'))?.id || 'dom_d2';
-        else if (dNorm.includes('D3') || dNorm === '3') domaine_id = domaines.find((d) => d.nom.includes('3'))?.id || 'dom_d3';
-        else if (dNorm.includes('D5') || dNorm === '5') domaine_id = domaines.find((d) => d.nom.includes('5'))?.id || 'dom_d5';
-
-        const noteParts: string[] = [];
-        if (r.serre_nom.trim()) noteParts.push(`Serres: ${r.serre_nom.trim()}`);
-        if (r.taches.trim()) noteParts.push(`Tâches: ${r.taches.trim()}`);
-
-        return {
-          nom,
-          prenom,
-          nom_complet: r.nom_complet.trim(),
-          serre_nom: r.serre_nom.trim(),
-          prix_convenu: r.prix_convenu,
-          mode_remuneration: 'JOUR' as const,
-          unite: 'JOUR',
-          domaine_id,
-          notes: noteParts.length > 0 ? noteParts.join(' | ') : undefined,
-        };
-      });
+      const payload = validRows.map((r) => ({
+        nom: r.nom,
+        prenom: r.prenom,
+        serre_nom: r.serre_nom,
+        prix_convenu: r.prix_convenu,
+        mode_remuneration: r.mode_remuneration,
+        unite: r.unite,
+        matricule: r.matricule,
+      }));
 
       const res = await importContractuelOuvriers(payload, dedupMode);
       if (res.success) {
@@ -528,35 +459,34 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
   };
 
   const handleDownloadTemplate = () => {
-    // Format officiel demandé : NOM ET PRENOM ; SERRES ; MONTANT BACH CHAD SERRE ; TACHES ; DOMAINE (D2, D3, D5)
+    // Format 3 colonnes standard pur demandé par l'utilisateur
     const templateData = [
       {
-        'NOM ET PRENOM': 'EL AMRANI FATIMA',
-        'SERRES': 'S1, S2',
-        'MONTANT BACH CHAD SERRE': 120,
-        'TACHES': 'TAILLAGE / ATTACHAGE',
-        'DOMAINE': 'D2',
+        'NOM': 'EL AMRANI',
+        'PRÉNOM': 'Fatima',
+        'MONTANT (DH)': 100,
       },
       {
-        'NOM ET PRENOM': 'BOUZID KHADIJA',
-        'SERRES': 'S18',
-        'MONTANT BACH CHAD SERRE': 110,
-        'TACHES': 'RÉCOLTE',
-        'DOMAINE': 'D3',
+        'NOM': 'BOUZID',
+        'PRÉNOM': 'Khadija',
+        'MONTANT (DH)': 110,
       },
       {
-        'NOM ET PRENOM': 'AIT ALI SAID',
-        'SERRES': 'S23, S24',
-        'MONTANT BACH CHAD SERRE': 130,
-        'TACHES': 'NETTOYAGE',
-        'DOMAINE': 'D5',
+        'NOM': 'AIT ALI',
+        'PRÉNOM': 'Said',
+        'MONTANT (DH)': 125,
+      },
+      {
+        'NOM': 'BENALI',
+        'PRÉNOM': 'Karim',
+        'MONTANT (DH)': 120,
       },
     ];
 
     const ws = XLSX.utils.json_to_sheet(templateData);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Modele Contractuels');
-    XLSX.writeFile(wb, 'modele_import_contractuels.xlsx');
+    XLSX.utils.book_append_sheet(wb, ws, 'Contractuels');
+    XLSX.writeFile(wb, 'modele_standard_contractuels.xlsx');
   };
 
   return (
@@ -696,11 +626,9 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
             <table className="w-full text-left text-xs border-collapse">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-black text-[11px] uppercase tracking-wider">
                 <tr>
-                  <th className="py-3 px-3.5">Nom et Prénom</th>
-                  <th className="py-3 px-3.5">Domaine</th>
-                  <th className="py-3 px-3.5">Serres</th>
-                  <th className="py-3 px-3.5">Tâches</th>
-                  <th className="py-3 px-3.5 text-right">Montant (DH)</th>
+                  <th className="py-3 px-3.5">Nom</th>
+                  <th className="py-3 px-3.5">Prénom</th>
+                  <th className="py-3 px-3.5 text-right">Montant initial (DH)</th>
                   <th className="py-3 px-3.5 text-center">Statut</th>
                   <th className="py-3 px-3.5 text-right">Actions</th>
                 </tr>
@@ -708,8 +636,8 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
               <tbody className="divide-y divide-slate-100 font-medium">
                 {ouvriers.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-12 px-4 text-center">
-                      <div className="max-w-lg mx-auto space-y-3">
+                    <td colSpan={5} className="py-12 px-4 text-center">
+                      <div className="max-w-md mx-auto space-y-3">
                         <div className="w-14 h-14 bg-emerald-50 text-emerald-700 rounded-2xl flex items-center justify-center mx-auto shadow-2xs border border-emerald-100">
                           <FileSpreadsheet className="w-7 h-7" />
                         </div>
@@ -718,13 +646,13 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                             Catalogue des Contractuels Vide
                           </h4>
                           <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                            Importez votre tableau Excel officiel à 5 colonnes pour démarrer.
+                            Aucun travailleur de démonstration. Importez votre propre liste Excel standard à 3 colonnes pour démarrer.
                           </p>
                         </div>
 
                         {/* Format attendu rappelé */}
                         <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-200 inline-block text-[11px] font-mono text-slate-700 font-bold">
-                          <span className="text-emerald-700 font-black">NOM ET PRENOM</span> | <span className="text-emerald-700 font-black">SERRES</span> | <span className="text-emerald-700 font-black">MONTANT BACH CHAD SERRE</span> | <span className="text-emerald-700 font-black">TACHES</span> | <span className="text-emerald-700 font-black">DOMAINE (D2/D3/D5)</span>
+                          Format standard : <span className="text-emerald-700 font-black">NOM</span> | <span className="text-emerald-700 font-black">PRÉNOM</span> | <span className="text-emerald-700 font-black">MONTANT (DH)</span>
                         </div>
 
                         {/* Boutons d'action prioritaires */}
@@ -758,7 +686,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                             className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-bold hover:underline cursor-pointer"
                           >
                             <Download className="w-3 h-3" />
-                            <span>Télécharger le modèle Excel officiel (5 colonnes)</span>
+                            <span>Télécharger le modèle Excel standard 3 colonnes</span>
                           </button>
                         </div>
                       </div>
@@ -766,7 +694,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                   </tr>
                 ) : filteredOuvriers.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-8 px-4 text-center">
+                    <td colSpan={5} className="py-8 px-4 text-center">
                       <div className="space-y-1.5">
                         <AlertTriangle className="w-6 h-6 text-amber-500 mx-auto" />
                         <p className="text-xs font-black text-slate-800">
@@ -789,128 +717,104 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                   </tr>
                 ) : (
                   filteredOuvriers.map((ouvrier) => {
-                    const meta = parseWorkerNotesMeta(ouvrier.notes);
-                    const serreObj = ouvrier.serre_id ? serres.find((s) => s.id === ouvrier.serre_id) : null;
-                    const serreLabel = meta.serresText || (serreObj ? `${serreObj.code} (${serreObj.nom})` : '');
-                    const domaineLabel = getDomaineBadge(ouvrier.domaine_id);
-
-                    return (
-                      <tr
-                        key={ouvrier.id}
-                        className={`hover:bg-emerald-50/40 transition ${
-                          !ouvrier.actif ? 'bg-slate-50/60 opacity-70' : ''
-                        }`}
-                      >
-                        {/* NOM ET PRÉNOM */}
-                        <td className="py-2.5 px-3.5">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[10px] font-black bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded shrink-0">
-                              {ouvrier.matricule}
-                            </span>
-                            <span className="font-black text-slate-900 uppercase">
-                              {ouvrier.nom_complet || `${ouvrier.nom} ${ouvrier.prenom || ''}`.trim()}
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* DOMAINE */}
-                        <td className="py-2.5 px-3.5">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-black bg-slate-100 text-slate-800">
-                            {domaineLabel}
+                  return (
+                    <tr
+                      key={ouvrier.id}
+                      className={`hover:bg-emerald-50/40 transition ${
+                        !ouvrier.actif ? 'bg-slate-50/60 opacity-70' : ''
+                      }`}
+                    >
+                      {/* NOM */}
+                      <td className="py-2.5 px-3.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] font-black bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">
+                            {ouvrier.matricule}
                           </span>
-                        </td>
+                          <span className="font-black text-slate-900 uppercase">
+                            {ouvrier.nom}
+                          </span>
+                        </div>
+                      </td>
 
-                        {/* SERRES */}
-                        <td className="py-2.5 px-3.5 text-slate-700 font-bold">
-                          {serreLabel ? (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] bg-blue-50 text-blue-800 border border-blue-200">
-                              {serreLabel}
-                            </span>
+                      {/* PRÉNOM */}
+                      <td className="py-2.5 px-3.5 text-slate-700 font-semibold">
+                        {ouvrier.prenom || <span className="text-slate-400 italic">-</span>}
+                      </td>
+
+                      {/* MONTANT INITIAL (DH) */}
+                      <td className="py-2.5 px-3.5 text-right font-black text-emerald-800 text-sm">
+                        {ouvrier.prix_convenu} <span className="text-[10px] text-slate-500 font-bold">DH</span>
+                      </td>
+
+                      {/* STATUT */}
+                      <td className="py-2.5 px-3.5 text-center">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleActif(ouvrier)}
+                          className={`inline-flex items-center gap-1 text-[11px] font-black px-2.5 py-0.5 rounded-full transition cursor-pointer ${
+                            ouvrier.actif
+                              ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                              : 'bg-rose-100 text-rose-800 hover:bg-rose-200'
+                          }`}
+                          title={ouvrier.actif ? 'Cliquer pour désactiver' : 'Cliquer pour activer'}
+                        >
+                          {ouvrier.actif ? (
+                            <>
+                              <CheckCircle className="w-3 h-3 text-emerald-700" />
+                              <span>Actif</span>
+                            </>
                           ) : (
-                            <span className="text-slate-400 italic">—</span>
+                            <>
+                              <XCircle className="w-3 h-3 text-rose-600" />
+                              <span>Inactif</span>
+                            </>
                           )}
-                        </td>
+                        </button>
+                      </td>
 
-                        {/* TÂCHES */}
-                        <td className="py-2.5 px-3.5 text-slate-700 font-semibold max-w-[200px] truncate" title={meta.tachesText}>
-                          {meta.tachesText || <span className="text-slate-400 italic">—</span>}
-                        </td>
+                      {/* ACTIONS */}
+                      <td className="py-2.5 px-3.5 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(ouvrier)}
+                            className="flex items-center gap-1 bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-900 font-black text-[11px] px-2.5 py-1 rounded-lg transition cursor-pointer"
+                            title="Modifier les informations ou le montant initial"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                            <span>Modifier</span>
+                          </button>
 
-                        {/* MONTANT (DH) */}
-                        <td className="py-2.5 px-3.5 text-right font-black text-emerald-800 text-sm whitespace-nowrap">
-                          {ouvrier.prix_convenu} <span className="text-[10px] text-slate-500 font-bold">DH</span>
-                        </td>
-
-                        {/* STATUT */}
-                        <td className="py-2.5 px-3.5 text-center">
                           <button
                             type="button"
                             onClick={() => handleToggleActif(ouvrier)}
-                            className={`inline-flex items-center gap-1 text-[11px] font-black px-2.5 py-0.5 rounded-full transition cursor-pointer ${
+                            className={`p-1.5 rounded-lg transition cursor-pointer ${
                               ouvrier.actif
-                                ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                                : 'bg-rose-100 text-rose-800 hover:bg-rose-200'
+                                ? 'text-amber-600 hover:bg-amber-50'
+                                : 'text-emerald-600 hover:bg-emerald-50'
                             }`}
-                            title={ouvrier.actif ? 'Cliquer pour désactiver' : 'Cliquer pour activer'}
+                            title={ouvrier.actif ? 'Désactiver' : 'Activer'}
                           >
                             {ouvrier.actif ? (
-                              <>
-                                <CheckCircle className="w-3 h-3 text-emerald-700" />
-                                <span>Actif</span>
-                              </>
+                              <XCircle className="w-4 h-4" />
                             ) : (
-                              <>
-                                <XCircle className="w-3 h-3 text-rose-600" />
-                                <span>Inactif</span>
-                              </>
+                              <CheckCircle className="w-4 h-4" />
                             )}
                           </button>
-                        </td>
 
-                        {/* ACTIONS */}
-                        <td className="py-2.5 px-3.5 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEdit(ouvrier)}
-                              className="flex items-center gap-1 bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-900 font-black text-[11px] px-2.5 py-1 rounded-lg transition cursor-pointer"
-                              title="Modifier les informations ou le montant initial"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                              <span>Modifier</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleToggleActif(ouvrier)}
-                              className={`p-1.5 rounded-lg transition cursor-pointer ${
-                                ouvrier.actif
-                                  ? 'text-amber-600 hover:bg-amber-50'
-                                  : 'text-emerald-600 hover:bg-emerald-50'
-                              }`}
-                              title={ouvrier.actif ? 'Désactiver' : 'Activer'}
-                            >
-                              {ouvrier.actif ? (
-                                <XCircle className="w-4 h-4" />
-                              ) : (
-                                <CheckCircle className="w-4 h-4" />
-                              )}
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleDelete(ouvrier)}
-                              className="p-1.5 text-rose-400 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                              title="Supprimer définitivement"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(ouvrier)}
+                            className="p-1.5 text-rose-400 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                            title="Supprimer définitivement"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                }))}
               </tbody>
             </table>
           </div>
@@ -952,7 +856,7 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                       Cliquez pour sélectionner votre fichier Excel ou CSV
                     </p>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Colonnes attendues : NOM ET PRENOM, SERRES, MONTANT BACH CHAD SERRE, TACHES, DOMAINE (D2/D3/D5)
+                      Colonnes attendues : Nom, Prénom, Serre, Montant DH
                     </p>
                   </div>
                   <input
@@ -993,14 +897,14 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
-                      Nom et Prénom <span className="text-rose-500">*</span>
+                      Nom <span className="text-rose-500">*</span>
                     </label>
                     <select
-                      value={colNomPrenom}
-                      onChange={(e) => setColNomPrenom(e.target.value)}
+                      value={colNom}
+                      onChange={(e) => setColNom(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 font-bold text-slate-900 outline-none"
                     >
-                      <option value="">-- Sélectionner Nom et Prénom --</option>
+                      <option value="">-- Sélectionner colonne Nom --</option>
                       {rawHeaders.map((h) => (
                         <option key={h} value={h}>
                           {h}
@@ -1011,14 +915,32 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
                   <div>
                     <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
-                      Serres
+                      Prénom
+                    </label>
+                    <select
+                      value={colPrenom}
+                      onChange={(e) => setColPrenom(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 font-bold text-slate-900 outline-none"
+                    >
+                      <option value="">-- Sélectionner colonne Prénom --</option>
+                      {rawHeaders.map((h) => (
+                        <option key={h} value={h}>
+                          {h}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
+                      Serre habituelle
                     </label>
                     <select
                       value={colSerre}
                       onChange={(e) => setColSerre(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 font-bold text-slate-900 outline-none"
                     >
-                      <option value="">-- Sélectionner Serres --</option>
+                      <option value="">-- Sélectionner colonne Serre --</option>
                       {rawHeaders.map((h) => (
                         <option key={h} value={h}>
                           {h}
@@ -1029,50 +951,14 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
 
                   <div>
                     <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
-                      Montant bach chad serre <span className="text-rose-500">*</span>
+                      Montant DH <span className="text-rose-500">*</span>
                     </label>
                     <select
                       value={colMontant}
                       onChange={(e) => setColMontant(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 font-bold text-slate-900 outline-none"
                     >
-                      <option value="">-- Sélectionner Montant --</option>
-                      {rawHeaders.map((h) => (
-                        <option key={h} value={h}>
-                          {h}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
-                      Tâches
-                    </label>
-                    <select
-                      value={colTaches}
-                      onChange={(e) => setColTaches(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 font-bold text-slate-900 outline-none"
-                    >
-                      <option value="">-- Sélectionner Tâches --</option>
-                      {rawHeaders.map((h) => (
-                        <option key={h} value={h}>
-                          {h}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
-                      Domaine (D2, D3, D5)
-                    </label>
-                    <select
-                      value={colDomaine}
-                      onChange={(e) => setColDomaine(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 font-bold text-slate-900 outline-none"
-                    >
-                      <option value="">-- Sélectionner Domaine (D2, D3 ou D5) --</option>
+                      <option value="">-- Sélectionner colonne Montant --</option>
                       {rawHeaders.map((h) => (
                         <option key={h} value={h}>
                           {h}
@@ -1161,11 +1047,10 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                   <table className="w-full text-left text-xs">
                     <thead className="bg-slate-100 text-slate-700 font-black text-[10px] uppercase sticky top-0">
                       <tr>
-                        <th className="p-2">Nom et Prénom</th>
-                        <th className="p-2">Serres</th>
-                        <th className="p-2">Montant (DH)</th>
-                        <th className="p-2">Tâches</th>
-                        <th className="p-2">Domaine</th>
+                        <th className="p-2">Nom</th>
+                        <th className="p-2">Prénom</th>
+                        <th className="p-2">Serre</th>
+                        <th className="p-2 w-28">Montant DH</th>
                         <th className="p-2 w-16 text-center">Action</th>
                       </tr>
                     </thead>
@@ -1178,11 +1063,21 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                           <td className="p-1.5">
                             <input
                               type="text"
-                              value={row.nom_complet}
+                              value={row.nom}
                               onChange={(e) =>
-                                handleUpdateParsedRow(row.index, { nom_complet: e.target.value })
+                                handleUpdateParsedRow(row.index, { nom: e.target.value })
                               }
                               className="w-full bg-transparent px-1.5 py-1 text-xs font-bold outline-none rounded border border-transparent hover:border-slate-300 uppercase"
+                            />
+                          </td>
+                          <td className="p-1.5">
+                            <input
+                              type="text"
+                              value={row.prenom}
+                              onChange={(e) =>
+                                handleUpdateParsedRow(row.index, { prenom: e.target.value })
+                              }
+                              className="w-full bg-transparent px-1.5 py-1 text-xs font-semibold outline-none rounded border border-transparent hover:border-slate-300"
                             />
                           </td>
                           <td className="p-1.5">
@@ -1207,26 +1102,6 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                                 })
                               }
                               className="w-full bg-transparent px-1.5 py-1 text-xs font-black text-emerald-800 outline-none rounded border border-transparent hover:border-slate-300 focus:bg-white"
-                            />
-                          </td>
-                          <td className="p-1.5">
-                            <input
-                              type="text"
-                              value={row.taches}
-                              onChange={(e) =>
-                                handleUpdateParsedRow(row.index, { taches: e.target.value })
-                              }
-                              className="w-full bg-transparent px-1.5 py-1 text-xs font-semibold outline-none rounded border border-transparent hover:border-slate-300"
-                            />
-                          </td>
-                          <td className="p-1.5">
-                            <input
-                              type="text"
-                              value={row.domaine_str}
-                              onChange={(e) =>
-                                handleUpdateParsedRow(row.index, { domaine_str: e.target.value })
-                              }
-                              className="w-full bg-transparent px-1.5 py-1 text-xs font-semibold outline-none rounded border border-transparent hover:border-slate-300"
                             />
                             {row.errors.length > 0 && (
                               <span className="text-[9px] text-rose-600 block pl-1 font-semibold">
@@ -1438,19 +1313,6 @@ export const ContractuelOuvrierManagement: React.FC<ContractuelOuvrierManagement
                         </option>
                       ))}
                     </select>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] font-black uppercase text-slate-500 block mb-0.5">
-                      Tâches / Serres (Notes)
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="Ex: Serres: S1, S2 | Tâches: TAILLAGE"
-                      value={editingOuvrier.notes || ''}
-                      onChange={(e) => setEditingOuvrier({ ...editingOuvrier, notes: e.target.value })}
-                      className="w-full bg-white border border-slate-300 rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-800 outline-none"
-                    />
                   </div>
                 </div>
               </details>

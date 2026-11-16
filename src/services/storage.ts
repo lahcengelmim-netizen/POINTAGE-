@@ -570,39 +570,13 @@ export function initStorage(): void {
         let serresUpdated = false;
         const canonicalById = new Map(DEFAULT_SERRES.map((s) => [s.id, s]));
 
-        // 1. Retirer l'enregistrement erroné serre_23 de D3, éliminer les doublons de D2 (serre 1..15) et normaliser domaine_id/ordre
+        // 1. Retirer l'enregistrement erroné serre_23 de D3 et normaliser domaine_id/ordre des serres canoniques
         const cleanedSerres: Serre[] = [];
-        const seenD2Numbers = new Set<number>();
-        const seenIds = new Set<string>();
-
         for (const s of parsedSerres) {
           if (isAnomalousDuplicateSerre23(s)) {
             serresUpdated = true;
             continue;
           }
-          if (seenIds.has(s.id)) {
-            serresUpdated = true;
-            continue;
-          }
-          seenIds.add(s.id);
-
-          const dom = (s.domaine_id || 'dom_d2').trim().toLowerCase();
-          if (dom === 'dom_d2' || dom === 'd2') {
-            const nameNorm = (s.nom || '').trim().toUpperCase();
-            const codeNorm = (s.code || '').trim().toUpperCase();
-            const matchNum = nameNorm.match(/SERRE\s*(\d+)/) || codeNorm.match(/S0*(\d+)/);
-            if (matchNum) {
-              const num = parseInt(matchNum[1], 10);
-              if (num >= 1 && num <= 15) {
-                if (seenD2Numbers.has(num)) {
-                  serresUpdated = true;
-                  continue; // Skip duplicate D2 serre number
-                }
-                seenD2Numbers.add(num);
-              }
-            }
-          }
-
           const canon = canonicalById.get(s.id);
           if (canon) {
             const needsDomaineFix = !s.domaine_id || (canon.domaine_id && s.domaine_id !== canon.domaine_id);

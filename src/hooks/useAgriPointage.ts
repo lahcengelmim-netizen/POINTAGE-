@@ -23,7 +23,6 @@ import {
 import * as storage from '../services/storage';
 import {
   syncPointageQueueToSupabase,
-  syncQueueToSupabase,
   pullReferentielsSerresFromSupabase,
 } from '../services/supabaseSync';
 import { generateWhatsAppRecap } from '../utils/whatsappFormatter';
@@ -65,7 +64,6 @@ export function useAgriPointage() {
   useEffect(() => {
     const syncAll = () => {
       syncPointageQueueToSupabase().catch(() => {});
-      syncQueueToSupabase().catch(() => {});
       pullReferentielsSerresFromSupabase(activeCompanyId).catch(() => {});
     };
     syncAll();
@@ -584,7 +582,6 @@ export function useAgriPointage() {
         const sRes = await createHeureSupplementaireServer({
           ouvrier_id: ouvrierId,
           numero_ouvrier: ouvrier.numero,
-          nom_ouvrier: ouvrier.nom,
           date: targetDate,
           type: data.type,
           tache_id: data.tache_id,

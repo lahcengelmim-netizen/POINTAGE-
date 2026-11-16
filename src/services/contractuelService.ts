@@ -295,14 +295,12 @@ export async function importContractuelOuvriers(
   ouvriers: Array<{
     nom: string;
     prenom?: string;
-    nom_complet?: string;
     serre_nom?: string;
     prix_convenu: number;
     mode_remuneration?: ModeRemuneration;
     unite?: string;
     matricule?: string;
     domaine_id?: string;
-    notes?: string;
   }>,
   modeDedoublonnage: 'update' | 'skip' = 'update'
 ): Promise<{

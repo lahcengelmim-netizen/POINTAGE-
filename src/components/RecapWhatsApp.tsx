@@ -3,7 +3,7 @@
  * Génère le texte dans le format exact demandé, prêt à copier et coller.
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import {
   Copy,
   Share2,
@@ -12,13 +12,11 @@ import {
   MessageSquare,
   Sparkles,
   Banknote,
-  FileSpreadsheet,
-  Download,
 } from 'lucide-react';
 import { CalculFinancierPointageResult } from '../utils/pointageFinancier';
 import { AffectationTache, Domaine, Ouvrier, Pointage, Serre, Tache } from '../types';
+import { formatTacheLabel } from '../utils/tacheUtils';
 import { formatDateJJMM } from '../utils/whatsappFormatter';
-import { exportRecapPointageExcel, RecapExcelRow } from '../utils/excelExporter';
 
 interface RecapAffectationDetail {
   affectation: AffectationTache;
@@ -56,80 +54,6 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
-  const [domaineFilter, setDomaineFilter] = useState<string>('ALL');
-
-  // Construire les lignes normalisées pour le tableau Excel :
-  // DOMAINE | NOM ET PRENOM | CODE OUVRIER | CODE TACHE | NOM TACHES
-  const recapTableRows = useMemo<RecapExcelRow[]>(() => {
-    const rows: RecapExcelRow[] = [];
-
-    pointesDetails.forEach((item) => {
-      const codeOuvrier = item.ouvrier?.numero ?? item.pointage.numero_ouvrier;
-      const nomEtPrenom = item.ouvrier?.nom?.trim() || `Ouvrier #${item.pointage.numero_ouvrier}`;
-      const defaultDomLabel = item.domaine?.nom || 'D2';
-      const affs = item.affectationDetails || [];
-
-      if (affs.length > 0) {
-        affs.forEach(({ affectation, tache, domaine }) => {
-          rows.push({
-            domaine: domaine?.nom || defaultDomLabel,
-            nomEtPrenom,
-            codeOuvrier,
-            codeTache: tache?.code?.trim() || '',
-            nomTaches: tache?.nom?.trim() || affectation.tache_id || '',
-          });
-        });
-      } else {
-        rows.push({
-          domaine: defaultDomLabel,
-          nomEtPrenom,
-          codeOuvrier,
-          codeTache: item.tache?.code?.trim() || '',
-          nomTaches: item.tache?.nom?.trim() || '',
-        });
-      }
-    });
-
-    // Tri par Domaine -> Code Ouvrier (numérique) -> Code Tâche
-    rows.sort((a, b) => {
-      if (a.domaine !== b.domaine) return a.domaine.localeCompare(b.domaine);
-      const numA = Number(a.codeOuvrier) || 0;
-      const numB = Number(b.codeOuvrier) || 0;
-      if (numA !== numB) return numA - numB;
-      return a.codeTache.localeCompare(b.codeTache);
-    });
-
-    return rows;
-  }, [pointesDetails]);
-
-  const availableDomaines = useMemo(() => {
-    const set = new Set<string>();
-    recapTableRows.forEach((r) => {
-      if (r.domaine) set.add(r.domaine);
-    });
-    return Array.from(set).sort();
-  }, [recapTableRows]);
-
-  const filteredRecapRows = useMemo(() => {
-    if (domaineFilter === 'ALL') return recapTableRows;
-    return recapTableRows.filter((r) => r.domaine === domaineFilter);
-  }, [recapTableRows, domaineFilter]);
-
-  const handleExportExcel = () => {
-    if (filteredRecapRows.length === 0) {
-      setShareStatus('Aucune ligne de pointage à exporter pour cette date.');
-      setTimeout(() => setShareStatus(null), 3000);
-      return;
-    }
-
-    const res = exportRecapPointageExcel(filteredRecapRows, selectedDate);
-    if (res.success) {
-      setShareStatus(`Export Excel réussi : ${res.totalLignes} ligne(s) (${res.filename})`);
-    } else {
-      setShareStatus(res.error || 'Erreur lors de l\'export Excel.');
-    }
-    setTimeout(() => setShareStatus(null), 4000);
-  };
 
   // Copier dans le presse-papier
   const handleCopy = async () => {
@@ -179,12 +103,12 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
   return (
     <div className="space-y-3 pb-24">
       {/* Barre d'actions principales à gros boutons */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         {/* Bouton COPIER */}
         <button
           type="button"
           onClick={handleCopy}
-          className={`h-14 rounded-2xl font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98] cursor-pointer ${
+          className={`h-14 rounded-2xl font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98] ${
             copied
               ? 'bg-emerald-600 text-white'
               : 'bg-white hover:bg-slate-50 text-slate-800 border-2 border-slate-300'
@@ -193,7 +117,7 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
           {copied ? (
             <>
               <Check className="w-5 h-5 text-white" />
-              <span>COPIÉ !</span>
+              <span>COPIÉ DANS LE PRESSE-PAPIER !</span>
             </>
           ) : (
             <>
@@ -207,21 +131,10 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
         <button
           type="button"
           onClick={handleShare}
-          className="h-14 bg-[#25D366] hover:bg-[#20ba59] active:scale-[0.98] text-white font-black text-sm rounded-2xl shadow-md flex items-center justify-center gap-2 transition cursor-pointer"
+          className="h-14 bg-[#25D366] hover:bg-[#20ba59] active:scale-[0.98] text-white font-black text-sm rounded-2xl shadow-md flex items-center justify-center gap-2 transition"
         >
           <Share2 className="w-5 h-5" />
           <span>PARTAGER WHATSAPP</span>
-        </button>
-
-        {/* Bouton EXPORTER EXCEL */}
-        <button
-          type="button"
-          onClick={handleExportExcel}
-          disabled={filteredRecapRows.length === 0}
-          className="h-14 bg-emerald-800 hover:bg-emerald-900 disabled:bg-slate-200 disabled:text-slate-400 active:scale-[0.98] text-white font-black text-sm rounded-2xl shadow-md flex items-center justify-center gap-2 transition cursor-pointer disabled:cursor-not-allowed"
-        >
-          <FileSpreadsheet className="w-5 h-5" />
-          <span>EXPORTER EXCEL ({filteredRecapRows.length})</span>
         </button>
       </div>
 
@@ -326,72 +239,72 @@ export const RecapWhatsApp: React.FC<RecapWhatsAppProps> = ({
         </div>
       </div>
 
-      {/* Tableau Excel Récapitulatif du Pointage : DOMAINE | NOM ET PRENOM | CODE OUVRIER | CODE TACHE | NOM TACHES */}
-      {recapTableRows.length > 0 && (
+      {/* Récapitulatif journalier détaillé : Nom ouvrier | Tâche | Serre | Domaine | Date */}
+      {pointesDetails.length > 0 && (
         <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
-          <div className="px-3 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
-              <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
-                Tableau Récapitulatif Excel ({filteredRecapRows.length})
-              </span>
-              <span className="text-[11px] font-bold text-slate-500">
-                • {formatDateJJMM(selectedDate)}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {availableDomaines.length > 1 && (
-                <select
-                  value={domaineFilter}
-                  onChange={(e) => setDomaineFilter(e.target.value)}
-                  className="bg-white border border-slate-300 rounded-xl px-2.5 py-1 text-[11px] font-bold text-slate-800 outline-none"
-                >
-                  <option value="ALL">Tous domaines</option>
-                  {availableDomaines.map((d) => (
-                    <option key={d} value={d}>
-                      Domaine {d}
-                    </option>
-                  ))}
-                </select>
-              )}
-
-              <button
-                type="button"
-                onClick={handleExportExcel}
-                className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-[11px] px-3 py-1.5 rounded-xl shadow-2xs transition active:scale-95 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Exporter Excel (.xlsx)</span>
-              </button>
-            </div>
+          <div className="px-3 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+            <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
+              Récapitulatif détaillé (Tâches &amp; Serres)
+            </span>
+            <span className="text-[11px] font-bold text-slate-500">
+              {formatDateJJMM(selectedDate)}
+            </span>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-[11px]">
               <thead>
-                <tr className="bg-slate-100 text-slate-700 border-b border-slate-200 font-black uppercase tracking-wider">
-                  <th className="py-2.5 px-3">DOMAINE</th>
-                  <th className="py-2.5 px-3">NOM ET PRENOM</th>
-                  <th className="py-2.5 px-3">CODE OUVRIER</th>
-                  <th className="py-2.5 px-3">CODE TACHE</th>
-                  <th className="py-2.5 px-3">NOM TACHES</th>
+                <tr className="bg-slate-100 text-slate-600 border-b border-slate-200 font-black">
+                  <th className="py-2 px-2.5">Nom ouvrier</th>
+                  <th className="py-2 px-2">Tâche</th>
+                  <th className="py-2 px-2">Serre</th>
+                  <th className="py-2 px-2">Domaine</th>
+                  <th className="py-2 px-2.5">Date</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredRecapRows.map((row, idx) => (
-                  <tr key={`${row.codeOuvrier}-${row.codeTache}-${idx}`} className="hover:bg-emerald-50/40 transition">
-                    <td className="py-2 px-3 font-black text-blue-800">{row.domaine}</td>
-                    <td className="py-2 px-3 font-bold text-slate-900 uppercase">{row.nomEtPrenom}</td>
-                    <td className="py-2 px-3 font-mono font-black text-slate-700">{row.codeOuvrier}</td>
-                    <td className="py-2 px-3 font-mono font-bold text-emerald-800">
-                      {row.codeTache || <span className="text-slate-400 font-sans italic">—</span>}
-                    </td>
-                    <td className="py-2 px-3 font-semibold text-slate-800">
-                      {row.nomTaches || <span className="italic text-slate-400">Sans tâche</span>}
-                    </td>
-                  </tr>
-                ))}
+                {[...pointesDetails]
+                  .sort((a, b) => a.pointage.numero_ouvrier - b.pointage.numero_ouvrier)
+                  .flatMap((item) => {
+                    const ouvrierLabel = `#${item.pointage.numero_ouvrier} ${
+                      item.ouvrier?.nom || `Ouvrier #${item.pointage.numero_ouvrier}`
+                    }`;
+                    const dateCell = formatDateJJMM(item.pointage.date || selectedDate);
+                    const defaultDomLabel = item.domaine?.nom || 'D2';
+                    const affs = item.affectationDetails || [];
+
+                    if (affs.length > 0) {
+                      return affs.map(({ affectation, tache, domaine, serre }) => (
+                        <tr key={affectation.id} className="hover:bg-slate-50/70">
+                          <td className="py-2 px-2.5 font-bold text-slate-900">{ouvrierLabel}</td>
+                          <td className="py-2 px-2 font-bold text-slate-800">
+                            {tache ? formatTacheLabel(tache) : affectation.tache_id}
+                          </td>
+                          <td className="py-2 px-2 font-black text-emerald-800">
+                            {serre?.nom || affectation.serre_nom || '—'}
+                          </td>
+                          <td className="py-2 px-2 font-bold text-blue-800">
+                            {domaine?.nom || defaultDomLabel}
+                          </td>
+                          <td className="py-2 px-2.5 text-slate-500 font-mono">{dateCell}</td>
+                        </tr>
+                      ));
+                    }
+
+                    return [
+                      <tr key={item.pointage.id} className="hover:bg-slate-50/70">
+                        <td className="py-2 px-2.5 font-bold text-slate-900">{ouvrierLabel}</td>
+                        <td className="py-2 px-2 font-semibold text-slate-700">
+                          {item.tache ? formatTacheLabel(item.tache) : <span className="italic text-slate-400">Sans tâche</span>}
+                        </td>
+                        <td className="py-2 px-2 text-slate-500">
+                          {item.pointage.serre_nom || '—'}
+                        </td>
+                        <td className="py-2 px-2 font-bold text-blue-800">{defaultDomLabel}</td>
+                        <td className="py-2 px-2.5 text-slate-500 font-mono">{dateCell}</td>
+                      </tr>,
+                    ];
+                  })}
               </tbody>
             </table>
           </div>

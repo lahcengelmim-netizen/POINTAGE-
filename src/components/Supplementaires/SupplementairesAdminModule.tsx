@@ -119,53 +119,6 @@ interface WorkerRecapRow {
   operations: OperationDetail[];
 }
 
-interface PointedTaskSummary {
-  tacheId: string;
-  code: string;
-  nom: string;
-  couleur?: string;
-  domaineId?: string | null;
-  serreId?: string | null;
-  serreNom?: string | null;
-}
-
-interface DayWorkerOption extends Ouvrier {
-  isPresentOnDate: boolean;
-  pointedTasks: PointedTaskSummary[];
-  defaultDomaineId?: string | null;
-  defaultSerreNom?: string | null;
-}
-
-const DEMO_DEFAULT_NAMES_BY_NUM: Record<number, string> = {
-  1: 'Mohammed Amine',
-  2: 'Fatima Zahra',
-  3: 'Youssef El Idrissi',
-  4: 'Hassan Benali',
-  5: 'Khadija Mansouri',
-  6: 'Brahim Oukacha',
-  7: 'Aïcha Tazi',
-  8: 'Omar Naciri',
-  9: 'Salma Daoudi',
-  10: 'Khalid Berrada',
-  11: 'Zineb Alaoui',
-  12: 'Mustapha Chaoui',
-  13: 'Nadia El Fassi',
-  14: 'Rachid Bouzid',
-  15: 'Samira Bennani',
-};
-
-function isProvisionalDemoWorker(w: Partial<Ouvrier>): boolean {
-  if (!w || !w.numero) return false;
-  const expected = DEMO_DEFAULT_NAMES_BY_NUM[Number(w.numero)];
-  return Boolean(expected && w.id === `ouv_${w.numero}` && String(w.nom || '').trim() === expected);
-}
-
-function formatDateFrShort(isoDate: string): string {
-  if (!isoDate || !isoDate.includes('-')) return isoDate;
-  const [y, m, d] = isoDate.split('-');
-  return `${d}/${m}/${y}`;
-}
-
 interface SupplementairesAdminModuleProps {
   currentUser: UserAccount;
   allOuvriers: Ouvrier[];
@@ -227,23 +180,30 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
   const [editNbUnites, setEditNbUnites] = useState<string>('');
 
   // -------------------------------------------------------------------------
-  // FORMULAIRE DE SAISIE COMMUNE & SPÉCIFIQUE + SOURCE POINTAGE MATIN DU JOUR
+  // SOURCE UNIQUE DES OUVRIERS (IDENTIQUE À POINTAGE MATIN)
   // -------------------------------------------------------------------------
   const activeCompanyId = currentUser?.company_id || 'cie_lahcen_pointeur';
-  const [formDate, setFormDate] = useState<string>(selectedDate || new Date().toISOString().split('T')[0]);
-  const [storageTick, setStorageTick] = useState<number>(0);
-  const [workerScope, setWorkerScope] = useState<'presents_jour' | 'catalogue'>('presents_jour');
-  const [loadingPointageDay, setLoadingPointageDay] = useState<boolean>(false);
-  const [remotePointages, setRemotePointages] = useState<any[]>([]);
-  const [remoteAffectations, setRemoteAffectations] = useState<any[]>([]);
-  const [remoteOuvriers, setRemoteOuvriers] = useState<Ouvrier[]>([]);
-  const [remoteTaches, setRemoteTaches] = useState<Tache[]>([]);
+  const pointageWorkers = useMemo(() => {
+    const rawSource =
+      allOuvriers && allOuvriers.length > 0
+        ? allOuvriers
+        : storage.getOuvriers(activeCompanyId);
+    return rawSource
+      .filter(
+        (w) =>
+          w.actif !== false &&
+          (!activeCompanyId || !w.company_id || w.company_id === activeCompanyId)
+      )
+      .sort((a, b) => a.numero - b.numero);
+  }, [allOuvriers, activeCompanyId]);
 
+  // -------------------------------------------------------------------------
+  // FORMULAIRE DE SAISIE COMMUNE & SPÉCIFIQUE
+  // -------------------------------------------------------------------------
+  const [formDate, setFormDate] = useState<string>(selectedDate || new Date().toISOString().split('T')[0]);
   const [workerNumberInput, setWorkerNumberInput] = useState<string>('');
   const [selectedHeureWorkerId, setSelectedHeureWorkerId] = useState<string | null>(null);
-  const [selectedHeureTacheId, setSelectedHeureTacheId] = useState<string>('');
-  const [heureTacheNom, setHeureTacheNom] = useState<string>('HEURES SUPPLÉMENTAIRES');
-  const [selectedDomaineId, setSelectedDomaineId] = useState<string>(domaines[0]?.id || 'dom_d2');
+  const [selectedDomaineId, setSelectedDomaineId] = useState<string>(domaines[0]?.id || 'D1');
   const [serreInput, setSerreInput] = useState<string>('');
   const [observationInput, setObservationInput] = useState<string>('');
 
@@ -278,264 +238,6 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
   const [dateFinFilter, setDateFinFilter] = useState<string>(selectedDate);
   const [useDateRange, setUseDateRange] = useState<boolean>(false);
 
-  // Abonnement temps réel au stockage local Pointage Matin
-  useEffect(() => {
-    const unsub = storage.subscribeToStorage(() => {
-      setStorageTick((t) => t + 1);
-    });
-    return unsub;
-  }, []);
-
-  // Chargement non-bloquant (lecture seule) des pointages, affectations et ouvriers réels depuis Supabase pour la date sélectionnée
-  const loadDayPointageFromSupabase = useCallback(async () => {
-    const targetDate = formDate || selectedDate;
-    if (!activeCompanyId || !targetDate) return;
-    setLoadingPointageDay(true);
-    try {
-      const [ptRes, affRes, ouvRes, tchRes] = await Promise.all([
-        supabase
-          .from('pointages')
-          .select('*')
-          .eq('company_id', activeCompanyId)
-          .eq('date', targetDate),
-        supabase
-          .from('affectations')
-          .select('*')
-          .eq('company_id', activeCompanyId)
-          .eq('date', targetDate),
-        supabase
-          .from('ouvriers')
-          .select('*')
-          .eq('company_id', activeCompanyId)
-          .order('numero', { ascending: true }),
-        supabase
-          .from('taches')
-          .select('*')
-          .eq('company_id', activeCompanyId),
-      ]);
-
-      if (!ptRes.error && Array.isArray(ptRes.data)) setRemotePointages(ptRes.data);
-      if (!affRes.error && Array.isArray(affRes.data)) setRemoteAffectations(affRes.data);
-      if (!ouvRes.error && Array.isArray(ouvRes.data)) setRemoteOuvriers(ouvRes.data as Ouvrier[]);
-      if (!tchRes.error && Array.isArray(tchRes.data)) setRemoteTaches(tchRes.data as Tache[]);
-    } catch {
-      // Silencieux si hors-ligne : les données locales Pointage Matin restent disponibles
-    } finally {
-      setLoadingPointageDay(false);
-    }
-  }, [activeCompanyId, formDate, selectedDate]);
-
-  useEffect(() => {
-    loadDayPointageFromSupabase();
-  }, [loadDayPointageFromSupabase]);
-
-  // Catalogue fusionné des tâches (local + Supabase)
-  const mergedTaches = useMemo(() => {
-    const byId = new Map<string, Tache>();
-    for (const t of [...(taches || []), ...(storage.getTaches(activeCompanyId) || [])]) {
-      if (t && t.id && t.actif !== false) byId.set(t.id, t);
-    }
-    for (const t of remoteTaches) {
-      if (t && t.id && t.actif !== false && !byId.has(t.id)) {
-        byId.set(t.id, t);
-      }
-    }
-    return Array.from(byId.values());
-  }, [taches, remoteTaches, activeCompanyId, storageTick]);
-
-  // Catalogue complet des ouvriers réels (les données Supabase priment sur les ouvriers provisoires par défaut)
-  const catalogWorkers = useMemo<DayWorkerOption[]>(() => {
-    const localRaw =
-      allOuvriers && allOuvriers.length > 0
-        ? allOuvriers
-        : storage.getOuvriers(activeCompanyId);
-
-    const hasNonDemoLocal = localRaw.some((w) => !isProvisionalDemoWorker(w));
-    const hasRemote = remoteOuvriers.length > 0;
-
-    const byNumero = new Map<number, Ouvrier>();
-    const withoutNumero: Ouvrier[] = [];
-
-    // 1. Charger les ouvriers locaux (ignorer les 15 démo provisoires si on a déjà des ouvriers réels Supabase)
-    for (const w of localRaw) {
-      if (!w || w.actif === false) continue;
-      if (activeCompanyId && w.company_id && w.company_id !== activeCompanyId) continue;
-      if (hasRemote && !hasNonDemoLocal && isProvisionalDemoWorker(w)) continue;
-      if (w.numero && Number(w.numero) > 0) {
-        byNumero.set(Number(w.numero), w);
-      } else {
-        withoutNumero.push(w);
-      }
-    }
-
-    // 2. Fusionner les ouvriers Supabase (prioritaires si l'entrée locale était provisoire ou absente)
-    for (const rw of remoteOuvriers) {
-      if (!rw || rw.actif === false) continue;
-      if (rw.numero && Number(rw.numero) > 0) {
-        const existing = byNumero.get(Number(rw.numero));
-        if (!existing || isProvisionalDemoWorker(existing) || hasRemote) {
-          byNumero.set(Number(rw.numero), rw);
-        }
-      } else {
-        withoutNumero.push(rw);
-      }
-    }
-
-    return [...Array.from(byNumero.values()), ...withoutNumero]
-      .sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0))
-      .map((w) => ({
-        ...w,
-        isPresentOnDate: false,
-        pointedTasks: [],
-        defaultDomaineId: null,
-        defaultSerreNom: null,
-      }));
-  }, [allOuvriers, remoteOuvriers, activeCompanyId, storageTick]);
-
-  // Ouvriers effectivement POINTÉS PRÉSENTS à la date formDate (Pointage Matin local + Supabase)
-  const dayPresentWorkers = useMemo<DayWorkerOption[]>(() => {
-    const targetDate = formDate || selectedDate;
-    const localPtgs = storage.getPointages(activeCompanyId, targetDate);
-    const localAffs = storage.getAffectations(activeCompanyId, targetDate);
-
-    // Fusionner pointages locaux + distants pour targetDate (le plus récent prime par ouvrier)
-    const ptgMap = new Map<string, any>();
-    for (const p of [...remotePointages, ...localPtgs]) {
-      if (!p || p.date !== targetDate) continue;
-      const key = p.ouvrier_id
-        ? `id_${p.ouvrier_id}`
-        : `num_${p.numero_ouvrier}`;
-      const prev = ptgMap.get(key);
-      if (!prev || Number(p.timestamp || 0) >= Number(prev.timestamp || 0)) {
-        ptgMap.set(key, p);
-      }
-    }
-
-    // Fusionner affectations locales + distantes pour targetDate
-    const affMap = new Map<string, any>();
-    for (const a of [...remoteAffectations, ...localAffs]) {
-      if (!a || a.date !== targetDate) continue;
-      if (a.id) affMap.set(a.id, a);
-    }
-    const allDayAffs = Array.from(affMap.values());
-
-    // Index rapides des tâches & ouvriers
-    const tacheById = new Map<string, Tache>();
-    mergedTaches.forEach((t) => tacheById.set(t.id, t));
-
-    const workerById = new Map<string, DayWorkerOption>();
-    const workerByNum = new Map<number, DayWorkerOption>();
-    catalogWorkers.forEach((w) => {
-      if (w.id) workerById.set(w.id, w);
-      if (w.numero) workerByNum.set(Number(w.numero), w);
-    });
-
-    const resultByKey = new Map<string, DayWorkerOption>();
-
-    for (const p of ptgMap.values()) {
-      if (p.present === false) continue;
-
-      const resolvedWorker =
-        (p.ouvrier_id ? workerById.get(String(p.ouvrier_id)) : undefined) ||
-        (p.numero_ouvrier ? workerByNum.get(Number(p.numero_ouvrier)) : undefined);
-
-      const numero = Number(resolvedWorker?.numero || p.numero_ouvrier || 0);
-      const workerId = String(resolvedWorker?.id || p.ouvrier_id || `ouv_${numero}`);
-      const workerNom =
-        resolvedWorker?.nom ||
-        p.nom_ouvrier ||
-        (numero > 0 ? `Ouvrier #${numero}` : 'Ouvrier');
-
-      // Rassembler les tâches pointées ce jour pour cet ouvrier (affectations + tache_id du pointage)
-      const workerAffs = allDayAffs.filter(
-        (a) =>
-          (p.ouvrier_id && a.ouvrier_id === p.ouvrier_id) ||
-          a.ouvrier_id === workerId ||
-          (numero > 0 && Number(a.numero_ouvrier) === numero)
-      );
-
-      const tasksMap = new Map<string, PointedTaskSummary>();
-      for (const a of workerAffs) {
-        if (!a.tache_id) continue;
-        const tRef = tacheById.get(a.tache_id);
-        tasksMap.set(a.tache_id, {
-          tacheId: a.tache_id,
-          code: tRef?.code || '',
-          nom: tRef?.nom || String(a.tache_id),
-          couleur: tRef?.couleur,
-          domaineId: a.domaine_id || p.domaine_id || null,
-          serreId: a.serre_id || p.serre_id || null,
-          serreNom: a.serre_nom || p.serre_nom || p.serre_id || null,
-        });
-      }
-
-      if (p.tache_id && !tasksMap.has(p.tache_id)) {
-        const tRef = tacheById.get(p.tache_id);
-        tasksMap.set(p.tache_id, {
-          tacheId: p.tache_id,
-          code: tRef?.code || '',
-          nom: tRef?.nom || String(p.tache_id),
-          couleur: tRef?.couleur,
-          domaineId: p.domaine_id || null,
-          serreId: p.serre_id || null,
-          serreNom: p.serre_nom || p.serre_id || null,
-        });
-      }
-
-      const pointedTasks = Array.from(tasksMap.values());
-      const dedupKey = numero > 0 ? `num_${numero}` : `id_${workerId}`;
-
-      resultByKey.set(dedupKey, {
-        ...(resolvedWorker || {
-          id: workerId,
-          company_id: activeCompanyId,
-          numero,
-          nom: workerNom,
-          actif: true,
-          createdAt: new Date().toISOString(),
-        }),
-        id: workerId,
-        numero,
-        nom: workerNom,
-        isPresentOnDate: true,
-        pointedTasks,
-        defaultDomaineId: p.domaine_id || pointedTasks[0]?.domaineId || null,
-        defaultSerreNom: p.serre_nom || p.serre_id || pointedTasks[0]?.serreNom || null,
-      });
-    }
-
-    return Array.from(resultByKey.values()).sort(
-      (a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0)
-    );
-  }, [
-    formDate,
-    selectedDate,
-    activeCompanyId,
-    remotePointages,
-    remoteAffectations,
-    mergedTaches,
-    catalogWorkers,
-    storageTick,
-  ]);
-
-  // Liste active d'ouvriers selon le filtre choisi (par défaut : UNIQUEMENT les présents du jour)
-  const pointageWorkers = useMemo<DayWorkerOption[]>(() => {
-    if (workerScope === 'presents_jour') {
-      return dayPresentWorkers;
-    }
-    // En mode catalogue complet, enrichir les ouvriers avec leur éventuelle présence/tâches du jour
-    const presentByNum = new Map<number, DayWorkerOption>();
-    const presentById = new Map<string, DayWorkerOption>();
-    dayPresentWorkers.forEach((pw) => {
-      if (pw.numero) presentByNum.set(pw.numero, pw);
-      if (pw.id) presentById.set(pw.id, pw);
-    });
-    return catalogWorkers.map((w) => {
-      const match = (w.id ? presentById.get(w.id) : undefined) || presentByNum.get(w.numero);
-      return match ? { ...w, ...match, isPresentOnDate: true } : w;
-    });
-  }, [workerScope, dayPresentWorkers, catalogWorkers]);
-
   // Synchronisation de formDate lorsque selectedDate change
   useEffect(() => {
     if (selectedDate) {
@@ -547,20 +249,10 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
     }
   }, [selectedDate, useDateRange]);
 
-  // Réinitialiser la sélection ouvrier lors d'un changement de date
-  useEffect(() => {
-    setSelectedHeureWorkerId(null);
-    setWorkerNumberInput('');
-    setSelectedHeureTacheId('');
-    setHeureTacheNom('HEURES SUPPLÉMENTAIRES');
-    setSelectedWorkerIdsForTache([]);
-    setCustomQuantitesByWorker({});
-  }, [formDate]);
-
   // -------------------------------------------------------------------------
-  // RÈGLE : RECHERCHE PAR NUMÉRO OU NOM DANS LA SOURCE ACTIVE (PRÉSENTS DU JOUR PAR DÉFAUT)
+  // RÈGLE : RECHERCHE PAR NUMÉRO OU NOM DANS LE RÉFÉRENTIEL POINTAGE MATIN
   // -------------------------------------------------------------------------
-  const matchedWorker = useMemo<DayWorkerOption | null>(() => {
+  const matchedWorker = useMemo(() => {
     if (selectedHeureWorkerId) {
       const byId = pointageWorkers.find((w) => w.id === selectedHeureWorkerId);
       if (byId) return byId;
@@ -580,40 +272,17 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
     return nameMatches.length === 1 ? nameMatches[0] : null;
   }, [workerNumberInput, selectedHeureWorkerId, pointageWorkers]);
 
-  // Pré-sélectionner ou proposer la liste des tâches quand un ouvrier est trouvé
-  useEffect(() => {
-    if (!matchedWorker) return;
-    if (matchedWorker.defaultDomaineId) {
-      setSelectedDomaineId(matchedWorker.defaultDomaineId);
-    }
-    if (matchedWorker.defaultSerreNom) {
-      setSerreInput(matchedWorker.defaultSerreNom);
-    }
-    if (matchedWorker.pointedTasks.length === 1) {
-      const t = matchedWorker.pointedTasks[0];
-      setSelectedHeureTacheId(t.tacheId);
-      setHeureTacheNom(t.nom);
-      if (t.domaineId) setSelectedDomaineId(t.domaineId);
-      if (t.serreNom) setSerreInput(t.serreNom);
-    } else if (matchedWorker.pointedTasks.length > 1) {
-      // L'ouvrier a fait plusieurs tâches ce jour : laisser l'admin choisir laquelle a eu des heures sup
-      setSelectedHeureTacheId('');
-      setHeureTacheNom('');
-    } else {
-      setSelectedHeureTacheId('');
-      setHeureTacheNom('HEURES SUPPLÉMENTAIRES');
-    }
-  }, [matchedWorker?.id, formDate]);
-
   const heureWorkerSuggestions = useMemo(() => {
     const raw = workerNumberInput.trim().toLowerCase();
-    if (!raw) return pointageWorkers;
-    return pointageWorkers.filter(
-      (w) =>
-        String(w.numero).includes(raw) ||
-        `#${w.numero}`.includes(raw) ||
-        w.nom.toLowerCase().includes(raw)
-    );
+    if (!raw) return [];
+    return pointageWorkers
+      .filter(
+        (w) =>
+          String(w.numero).includes(raw) ||
+          `#${w.numero}`.includes(raw) ||
+          w.nom.toLowerCase().includes(raw)
+      )
+      .slice(0, 8);
   }, [workerNumberInput, pointageWorkers]);
 
   // Filtrage des ouvriers pour la multi-sélection Tâches Supplémentaires
@@ -632,17 +301,6 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
     const idSet = new Set(selectedWorkerIdsForTache);
     return pointageWorkers.filter((w) => idSet.has(w.id));
   }, [pointageWorkers, selectedWorkerIdsForTache]);
-
-  // Tâches pointées aujourd'hui parmi les ouvriers cochés dans Section 2
-  const selectedTacheWorkersPointedTasks = useMemo(() => {
-    const map = new Map<string, PointedTaskSummary>();
-    selectedWorkersForTache.forEach((w) => {
-      w.pointedTasks.forEach((pt) => {
-        if (!map.has(pt.tacheId)) map.set(pt.tacheId, pt);
-      });
-    });
-    return Array.from(map.values());
-  }, [selectedWorkersForTache]);
 
   const toggleWorkerForTache = (workerId: string) => {
     setSelectedWorkerIdsForTache((prev) =>
@@ -839,8 +497,6 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
     const remunCalculated = validTarif !== null ? cleanFloatPrecision(validTarif * nb) : null;
     const durInHours = modeCalcul === 'quart_heure' ? cleanFloatPrecision(nb / 4) : nb;
 
-    const taskNameToSave = (heureTacheNom || '').trim().toUpperCase() || 'HEURES SUPPLÉMENTAIRES';
-
     try {
       setLoading(true);
       const authHeaders = await getAdminAuthHeaders(currentUser?.company_id || 'cie_lahcen_pointeur');
@@ -850,7 +506,6 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
         body: JSON.stringify({
           ouvrier_id: matchedWorker.id,
           numero_ouvrier: matchedWorker.numero,
-          nom_ouvrier: matchedWorker.nom,
           date: formDate,
           mode_calcul: modeCalcul,
           tarif_unitaire: validTarif,
@@ -864,8 +519,7 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
           domaine_id: selectedDomaineId || null,
           serre_id: serreInput.trim() || null,
           observation: observationInput.trim() || null,
-          tache_id: selectedHeureTacheId || null,
-          nom_tache: taskNameToSave,
+          nom_tache: 'HEURES SUPPLÉMENTAIRES',
         }),
       });
 
@@ -876,7 +530,7 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
 
       setFeedback({
         type: 'success',
-        message: `✓ ${modeCalcul === 'quart_heure' ? `${nb} quart(s) (${durInHours} H)` : `${nb} H`} (${taskNameToSave}) enregistré(es) pour #${matchedWorker.numero} (${matchedWorker.nom})${remunCalculated !== null ? ` — Rémunération : ${remunCalculated} DH (${validTarif} DH × ${nb})` : ''}.`,
+        message: `✓ ${modeCalcul === 'quart_heure' ? `${nb} quart(s) (${durInHours} H)` : `${nb} H`} enregistré(es) pour #${matchedWorker.numero} (${matchedWorker.nom})${remunCalculated !== null ? ` — Rémunération : ${remunCalculated} DH (${validTarif} DH × ${nb})` : ''}.`,
       });
 
       // Réinitialiser les champs de saisie tout en gardant l'ouvrier pour une saisie suivante si besoin
@@ -914,7 +568,7 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
     // Nom de la tâche
     let taskName = customTacheNom.trim();
     if (!taskName && selectedTacheId) {
-      const foundTask = mergedTaches.find((t) => t.id === selectedTacheId);
+      const foundTask = taches.find((t) => t.id === selectedTacheId);
       if (foundTask) taskName = foundTask.nom;
     }
 
@@ -948,7 +602,7 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
       }
     }
 
-    const ouvriersPayload: Array<{ id: string; numero: number; nom: string; quantite?: number }> = [];
+    const ouvriersPayload: Array<{ id: string; numero: number; quantite?: number }> = [];
     for (const w of selectedWorkersForTache) {
       if (quantiteMode === 'individuelle') {
         const rawCustom = customQuantitesByWorker[w.id];
@@ -961,9 +615,9 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
           });
           return;
         }
-        ouvriersPayload.push({ id: w.id, numero: w.numero, nom: w.nom, quantite: parsedWorkerQty });
+        ouvriersPayload.push({ id: w.id, numero: w.numero, quantite: parsedWorkerQty });
       } else {
-        ouvriersPayload.push({ id: w.id, numero: w.numero, nom: w.nom });
+        ouvriersPayload.push({ id: w.id, numero: w.numero });
       }
     }
 
@@ -1545,69 +1199,26 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {/* Champ 1 : Sélection de l'ouvrier présent ce jour (Pointage Matin) */}
-                  <div className="sm:col-span-2 bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2.5">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div>
-                        <label className="block text-xs font-black text-slate-800">
-                          1. Ouvrier (Pointage Matin du {formatDateFrShort(formDate)}) <span className="text-red-500">*</span>
-                        </label>
-                        <span className="text-[10px] font-medium text-slate-500">
-                          {workerScope === 'presents_jour'
-                            ? `${dayPresentWorkers.length} ouvrier(s) pointé(s) présent(s) ce jour`
-                            : `Catalogue complet : ${catalogWorkers.length} ouvrier(s)`}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <button
-                          type="button"
-                          onClick={() => setWorkerScope('presents_jour')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition cursor-pointer ${
-                            workerScope === 'presents_jour'
-                              ? 'bg-emerald-600 text-white border-emerald-700 shadow-2xs'
-                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                          }`}
-                        >
-                          Présents du jour ({dayPresentWorkers.length})
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setWorkerScope('catalogue')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition cursor-pointer ${
-                            workerScope === 'catalogue'
-                              ? 'bg-slate-900 text-white border-slate-950 shadow-2xs'
-                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                          }`}
-                        >
-                          Catalogue ({catalogWorkers.length})
-                        </button>
-                        <button
-                          type="button"
-                          onClick={loadDayPointageFromSupabase}
-                          disabled={loadingPointageDay}
-                          title="Actualiser les présences du jour"
-                          className="p-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                        >
-                          <RotateCcw className={`w-3.5 h-3.5 ${loadingPointageDay ? 'animate-spin' : ''}`} />
-                        </button>
-                      </div>
+                  {/* Champ 1 : Recherche Ouvrier (Numéro OU Nom) depuis Pointage Matin */}
+                  <div className="sm:col-span-2">
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-bold text-slate-700">
+                        Ouvrier (recherche par N° ou Nom) <span className="text-red-500">*</span>
+                      </label>
+                      <span className="text-[10px] font-bold text-slate-500">
+                        Source Pointage Matin : {pointageWorkers.length} ouvrier(s)
+                      </span>
                     </div>
-
                     <div className="relative">
                       <input
                         type="text"
-                        placeholder={
-                          workerScope === 'presents_jour'
-                            ? 'Rechercher N° ou Nom parmi les présents du jour...'
-                            : 'Saisir le N° (ex: 1, 4) ou le nom...'
-                        }
+                        placeholder="Saisir le N° (ex: 1, 4) ou le nom (ex: Hassan)..."
                         value={workerNumberInput}
                         onChange={(e) => {
                           setWorkerNumberInput(e.target.value);
                           setSelectedHeureWorkerId(null);
                         }}
-                        className="w-full text-sm font-black px-3.5 py-2.5 pr-16 rounded-xl border border-slate-300 bg-white focus:border-amber-500 focus:ring-2 focus:ring-amber-200 focus:outline-hidden"
+                        className="w-full text-base font-black px-3.5 py-2.5 pr-16 rounded-xl border border-slate-300 focus:border-amber-500 focus:ring-2 focus:ring-amber-200 focus:outline-hidden"
                         required
                       />
                       {workerNumberInput ? (
@@ -1623,224 +1234,64 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                           <X className="w-4 h-4" />
                         </button>
                       ) : null}
-                      <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-3" />
+                      <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-3.5" />
                     </div>
 
-                    {/* Liste interactive des ouvriers disponibles (présents du jour par défaut) */}
-                    {!matchedWorker && (
-                      <>
-                        {pointageWorkers.length === 0 ? (
-                          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 font-bold">
-                              <Info className="w-4 h-4 text-amber-700 shrink-0" />
-                              <span>
-                                Aucun ouvrier pointé présent le {formatDateFrShort(formDate)} dans Pointage Matin.
-                              </span>
-                            </div>
-                            {catalogWorkers.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => setWorkerScope('catalogue')}
-                                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-[11px] shrink-0 cursor-pointer"
-                              >
-                                Voir tout le catalogue ({catalogWorkers.length})
-                              </button>
-                            )}
-                          </div>
-                        ) : heureWorkerSuggestions.length > 0 ? (
-                          <div className="max-h-56 overflow-y-auto border border-amber-200 bg-white rounded-xl divide-y divide-slate-100">
-                            {heureWorkerSuggestions.map((w) => (
-                              <button
-                                key={w.id}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedHeureWorkerId(w.id);
-                                  setWorkerNumberInput(String(w.numero));
-                                }}
-                                className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-amber-50 transition text-xs cursor-pointer"
-                              >
-                                <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                                  <span className="px-2 py-0.5 rounded-md bg-amber-500 text-slate-950 font-black text-[11px] shrink-0">
-                                    #{w.numero}
-                                  </span>
-                                  <span className="font-bold text-slate-900 truncate">{w.nom}</span>
-                                  {w.pointedTasks.map((pt) => (
-                                    <span
-                                      key={pt.tacheId}
-                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-900 border border-blue-200 text-[10px] font-bold"
-                                    >
-                                      {pt.code ? `${pt.code} • ` : ''}
-                                      {pt.nom}
-                                    </span>
-                                  ))}
-                                  {w.defaultSerreNom && (
-                                    <span className="text-[10px] font-semibold text-slate-500">
-                                      ({w.defaultSerreNom})
-                                    </span>
-                                  )}
-                                </div>
-                                <span className="text-[10px] font-black text-amber-800 uppercase shrink-0">
-                                  Choisir
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="p-2.5 bg-red-50 border border-red-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-red-800 text-xs font-bold">
+                    {/* Suggestions interactives quand on recherche par nom ou numéro partiel */}
+                    {!matchedWorker && workerNumberInput.trim() !== '' && heureWorkerSuggestions.length > 0 && (
+                      <div className="mt-2 border border-amber-200 bg-amber-50/40 rounded-xl divide-y divide-amber-100 overflow-hidden">
+                        {heureWorkerSuggestions.map((w) => (
+                          <button
+                            key={w.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedHeureWorkerId(w.id);
+                              setWorkerNumberInput(String(w.numero));
+                            }}
+                            className="w-full px-3 py-2 flex items-center justify-between text-left hover:bg-amber-100/70 transition text-xs"
+                          >
                             <div className="flex items-center gap-2">
-                              <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
-                              <span>
-                                {workerScope === 'presents_jour'
-                                  ? `Aucun ouvrier présent le ${formatDateFrShort(formDate)} ne correspond à « ${workerNumberInput} ».`
-                                  : `Aucun ouvrier existant ne correspond à « ${workerNumberInput} ».`}
+                              <span className="w-6 h-6 rounded-md bg-amber-500 text-slate-950 font-black text-[11px] flex items-center justify-center">
+                                #{w.numero}
                               </span>
+                              <span className="font-bold text-slate-900">{w.nom}</span>
                             </div>
-                            {workerScope === 'presents_jour' && catalogWorkers.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => setWorkerScope('catalogue')}
-                                className="px-2.5 py-1 rounded-lg bg-white border border-red-300 text-red-900 text-[11px] font-black shrink-0 cursor-pointer"
-                              >
-                                Chercher dans tout le catalogue
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </>
+                            <span className="text-[10px] font-black text-amber-800 uppercase">Sélectionner</span>
+                          </button>
+                        ))}
+                      </div>
                     )}
 
-                    {/* Ouvrier sélectionné + Bouton changer */}
-                    {matchedWorker && (
-                      <div className="p-2.5 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <span className="w-7 h-7 rounded-full bg-emerald-600 text-white font-black text-xs flex items-center justify-center shrink-0">
+                    {/* Affichage automatique du nom complet de l'ouvrier trouvé */}
+                    {matchedWorker ? (
+                      <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-6 h-6 rounded-full bg-emerald-600 text-white font-black text-xs flex items-center justify-center">
                             #{matchedWorker.numero}
                           </span>
-                          <div className="min-w-0">
-                            <span className="text-xs font-black text-emerald-950 block truncate">
+                          <div>
+                            <span className="text-xs font-black text-emerald-950 block">
                               {matchedWorker.nom}
                             </span>
-                            <span className="text-[10px] text-emerald-800 font-medium block">
-                              {matchedWorker.isPresentOnDate
-                                ? `Présent le ${formatDateFrShort(formDate)} (${matchedWorker.pointedTasks.length} tâche(s) pointée(s))`
-                                : `Ouvrier du catalogue (ID : ${matchedWorker.id})`}
+                            <span className="text-[10px] text-emerald-700 font-medium">
+                              Ouvrier officiel Pointage Matin (ID : {matchedWorker.id})
                             </span>
                           </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setWorkerNumberInput('');
-                            setSelectedHeureWorkerId(null);
-                          }}
-                          className="text-[11px] font-black bg-white hover:bg-emerald-100 text-emerald-900 border border-emerald-300 px-2.5 py-1 rounded-lg shrink-0 cursor-pointer"
-                        >
-                          Changer
-                        </button>
+                        <span className="text-[10px] font-black uppercase bg-emerald-200/80 text-emerald-900 px-2 py-0.5 rounded-md">
+                          Trouvé
+                        </span>
                       </div>
-                    )}
+                    ) : workerNumberInput.trim() !== '' && heureWorkerSuggestions.length === 0 ? (
+                      <div className="mt-2 p-2.5 bg-red-50 border border-red-300 rounded-xl flex items-center gap-2 text-red-800 text-xs font-bold">
+                        <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+                        <span>
+                          Aucun ouvrier existant ne correspond à « {workerNumberInput} ». La création
+                          automatique d'ouvriers est strictement interdite.
+                        </span>
+                      </div>
+                    ) : null}
                   </div>
-
-                  {/* ÉTAPE 2 : LISTE DES TÂCHES RÉALISÉES PAR L'OUVRIER SÉLECTIONNÉ */}
-                  {matchedWorker && (
-                    <div className="sm:col-span-2 bg-blue-50/60 border border-blue-200 rounded-xl p-3 space-y-2.5">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <label className="block text-xs font-black text-blue-950">
-                          2. Choisir la tâche réalisée par #{matchedWorker.numero} ({matchedWorker.nom}) <span className="text-red-500">*</span>
-                        </label>
-                        {heureTacheNom && (
-                          <span className="text-[11px] font-black bg-blue-600 text-white px-2 py-0.5 rounded-md">
-                            Sélectionnée : {heureTacheNom}
-                          </span>
-                        )}
-                      </div>
-
-                      {matchedWorker.pointedTasks.length > 0 && (
-                        <div>
-                          <span className="block text-[10px] font-black uppercase text-blue-800 mb-1.5">
-                            Tâches pointées aujourd&apos;hui dans Pointage Matin :
-                          </span>
-                          <div className="flex flex-wrap gap-1.5">
-                            {matchedWorker.pointedTasks.map((pt) => {
-                              const active =
-                                selectedHeureTacheId === pt.tacheId ||
-                                heureTacheNom.toUpperCase() === pt.nom.toUpperCase();
-                              return (
-                                <button
-                                  key={pt.tacheId}
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedHeureTacheId(pt.tacheId);
-                                    setHeureTacheNom(pt.nom);
-                                    if (pt.domaineId) setSelectedDomaineId(pt.domaineId);
-                                    if (pt.serreNom) setSerreInput(pt.serreNom);
-                                  }}
-                                  className={`px-3 py-1.5 rounded-lg text-xs font-black border transition cursor-pointer flex items-center gap-1.5 ${
-                                    active
-                                      ? 'bg-blue-600 text-white border-blue-700 shadow-xs'
-                                      : 'bg-white text-blue-950 border-blue-300 hover:bg-blue-100'
-                                  }`}
-                                >
-                                  <span>{pt.code ? `${pt.code} — ${pt.nom}` : pt.nom}</span>
-                                  {pt.serreNom && (
-                                    <span className={`text-[10px] ${active ? 'text-blue-100' : 'text-slate-500'}`}>
-                                      ({pt.serreNom})
-                                    </span>
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                            Liste complète des tâches
-                          </label>
-                          <select
-                            value={selectedHeureTacheId}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSelectedHeureTacheId(val);
-                              if (!val) {
-                                setHeureTacheNom('HEURES SUPPLÉMENTAIRES');
-                              } else {
-                                const found = mergedTaches.find((t) => t.id === val);
-                                if (found) setHeureTacheNom(found.nom);
-                              }
-                            }}
-                            className="w-full text-xs font-bold px-3 py-2 rounded-xl border border-slate-300 bg-white focus:border-blue-500 focus:outline-hidden"
-                          >
-                            <option value="">HEURES SUPPLÉMENTAIRES (Général)</option>
-                            {mergedTaches.map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.code ? `${t.code} — ` : ''}
-                                {t.nom}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                            Nom de la tâche retenue
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="Ex: RECOLTE, EFFEUILLAGE..."
-                            value={heureTacheNom}
-                            onChange={(e) => {
-                              setHeureTacheNom(e.target.value);
-                              setSelectedHeureTacheId('');
-                            }}
-                            className="w-full text-xs font-bold uppercase px-3 py-2 rounded-xl border border-slate-300 bg-white focus:border-blue-500 focus:outline-hidden"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
 
                   {/* Champ 2 : Prix unitaire en DH selon le mode choisi */}
                   <div>
@@ -2049,48 +1500,23 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {/* BLOC 1 : MULTI-SÉLECTION DES OUVRIERS (PRÉSENTS DU JOUR PAR DÉFAUT) */}
+                  {/* BLOC 1 : MULTI-SÉLECTION DES OUVRIERS (SOURCE POINTAGE MATIN) */}
                   <div className="sm:col-span-2 bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-3">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <div>
                         <label className="block text-xs font-black text-slate-800">
-                          Ouvriers concernés ({workerScope === 'presents_jour' ? `Présents le ${formatDateFrShort(formDate)}` : 'Catalogue complet'}) <span className="text-red-500">*</span>
+                          Ouvriers concernés (Pointage Matin) <span className="text-red-500">*</span>
                         </label>
                         <span className="text-[10px] text-slate-500 font-medium">
-                          {workerScope === 'presents_jour'
-                            ? `${dayPresentWorkers.length} ouvrier(s) pointé(s) présent(s) ce jour dans Pointage Matin`
-                            : `${catalogWorkers.length} ouvrier(s) au catalogue`}
+                          Cochez un ou plusieurs ouvriers existants (aucun ouvrier créé automatiquement)
                         </span>
                       </div>
 
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <button
                           type="button"
-                          onClick={() => setWorkerScope('presents_jour')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition cursor-pointer ${
-                            workerScope === 'presents_jour'
-                              ? 'bg-emerald-600 text-white border-emerald-700'
-                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                          }`}
-                        >
-                          Présents du jour ({dayPresentWorkers.length})
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setWorkerScope('catalogue')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition cursor-pointer ${
-                            workerScope === 'catalogue'
-                              ? 'bg-slate-900 text-white border-slate-950'
-                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                          }`}
-                        >
-                          Catalogue ({catalogWorkers.length})
-                        </button>
-                        <button
-                          type="button"
                           onClick={handleSelectAllFilteredWorkers}
-                          disabled={filteredWorkersForTache.length === 0}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[11px] font-black transition cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-black transition cursor-pointer"
                         >
                           <CheckSquare className="w-3.5 h-3.5" />
                           <span>Tout sélectionner</span>
@@ -2111,7 +1537,7 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                     <div className="relative">
                       <input
                         type="text"
-                        placeholder="Rechercher par numéro (ex: 3) ou nom..."
+                        placeholder="Rechercher par numéro (ex: 3) ou nom (ex: Ahmed)..."
                         value={tacheWorkerSearch}
                         onChange={(e) => setTacheWorkerSearch(e.target.value)}
                         className="w-full text-xs font-bold pl-9 pr-8 py-2 rounded-lg border border-slate-300 bg-white focus:border-blue-500 focus:outline-hidden"
@@ -2128,24 +1554,11 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                       )}
                     </div>
 
-                    {/* Liste à cocher des ouvriers du jour */}
+                    {/* Liste à cocher des ouvriers officiels Pointage Matin */}
                     <div className="max-h-56 overflow-y-auto bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
                       {filteredWorkersForTache.length === 0 ? (
-                        <div className="p-4 text-center space-y-2">
-                          <p className="text-xs text-slate-600 font-bold">
-                            {pointageWorkers.length === 0 && workerScope === 'presents_jour'
-                              ? `Aucun ouvrier pointé présent le ${formatDateFrShort(formDate)} dans Pointage Matin.`
-                              : `Aucun ouvrier ne correspond à « ${tacheWorkerSearch} ».`}
-                          </p>
-                          {workerScope === 'presents_jour' && catalogWorkers.length > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => setWorkerScope('catalogue')}
-                              className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[11px] font-black cursor-pointer"
-                            >
-                              Afficher tout le catalogue ({catalogWorkers.length})
-                            </button>
-                          )}
+                        <div className="p-4 text-center text-xs text-slate-500 font-bold">
+                          Aucun ouvrier Pointage Matin ne correspond à « {tacheWorkerSearch} ».
                         </div>
                       ) : (
                         filteredWorkersForTache.map((w) => {
@@ -2158,7 +1571,7 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                                 isChecked ? 'bg-blue-50/90 hover:bg-blue-100/70' : 'hover:bg-slate-50'
                               }`}
                             >
-                              <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                              <div className="flex items-center gap-2.5 min-w-0">
                                 <input
                                   type="checkbox"
                                   checked={isChecked}
@@ -2179,15 +1592,6 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                                   #{w.numero}
                                 </span>
                                 <span className="font-bold text-slate-900 truncate">{w.nom}</span>
-                                {w.pointedTasks.map((pt) => (
-                                  <span
-                                    key={pt.tacheId}
-                                    className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 text-[10px] font-bold"
-                                  >
-                                    {pt.code ? `${pt.code} • ` : ''}
-                                    {pt.nom}
-                                  </span>
-                                ))}
                               </div>
 
                               {isChecked && quantiteMode === 'individuelle' && (
@@ -2263,36 +1667,6 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                     )}
                   </div>
 
-                  {/* Raccourci tâches pointées aujourd'hui pour les ouvriers sélectionnés */}
-                  {selectedTacheWorkersPointedTasks.length > 0 && (
-                    <div className="sm:col-span-2 p-2.5 bg-blue-50/70 border border-blue-200 rounded-xl">
-                      <span className="block text-[10px] font-black uppercase text-blue-900 mb-1.5">
-                        Tâches pointées aujourd&apos;hui pour les ouvriers sélectionnés (clic rapide) :
-                      </span>
-                      <div className="flex flex-wrap gap-1.5">
-                        {selectedTacheWorkersPointedTasks.map((pt) => (
-                          <button
-                            key={pt.tacheId}
-                            type="button"
-                            onClick={() => {
-                              setSelectedTacheId(pt.tacheId);
-                              setCustomTacheNom(pt.nom);
-                              if (pt.domaineId) setSelectedDomaineId(pt.domaineId);
-                              if (pt.serreNom) setSerreInput(pt.serreNom);
-                            }}
-                            className={`px-2.5 py-1 rounded-lg text-xs font-black border transition cursor-pointer ${
-                              selectedTacheId === pt.tacheId
-                                ? 'bg-blue-600 text-white border-blue-700'
-                                : 'bg-white text-blue-950 border-blue-300 hover:bg-blue-100'
-                            }`}
-                          >
-                            {pt.code ? `${pt.code} — ${pt.nom}` : pt.nom}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
                   {/* Champ 2 : Sélection de la tâche ou saisie personnalisée */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
@@ -2302,13 +1676,13 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                       value={selectedTacheId}
                       onChange={(e) => {
                         setSelectedTacheId(e.target.value);
-                        const t = mergedTaches.find((tc) => tc.id === e.target.value);
+                        const t = taches.find((tc) => tc.id === e.target.value);
                         if (t) setCustomTacheNom(t.nom);
                       }}
                       className="w-full text-xs font-bold px-3 py-2.5 rounded-xl border border-slate-300 bg-white focus:border-blue-500 focus:outline-hidden"
                     >
                       <option value="">-- Choisir une tâche du catalogue --</option>
-                      {mergedTaches.map((t) => (
+                      {taches.map((t) => (
                         <option key={t.id} value={t.id}>
                           {t.nom} ({t.code})
                         </option>
@@ -2667,8 +2041,8 @@ export const SupplementairesAdminModule: React.FC<SupplementairesAdminModuleProp
                     onChange={(e) => setFilterOuvrierId(e.target.value)}
                     className="w-full text-xs font-bold px-2.5 py-2 rounded-lg border border-slate-200 bg-white focus:border-amber-500 focus:outline-hidden"
                   >
-                    <option value="ALL">Tous les ouvriers ({catalogWorkers.length})</option>
-                    {catalogWorkers.map((w) => (
+                    <option value="ALL">Tous les ouvriers ({pointageWorkers.length})</option>
+                    {pointageWorkers.map((w) => (
                       <option key={w.id} value={w.id}>
                         #{w.numero} — {w.nom}
                       </option>

@@ -576,13 +576,11 @@ app.get('/api/debug-config', async (req: Request, res: Response) => {
 
     const { data: profile } = await supabaseAdmin
       .from('profiles')
-      .select('role, username')
+      .select('role')
       .eq('id', user.id)
       .single();
 
-    const userEmail = (user.email || '').toLowerCase();
-    const isTariq = userEmail === 'tariq@caporal.com' || String((profile as any)?.username || '').toLowerCase() === 'tariq';
-    if (!profile || isTariq || profile.role !== 'admin') {
+    if (!profile || profile.role !== 'admin') {
       return res.status(403).json({ error: 'Admin requis' });
     }
 
@@ -754,34 +752,6 @@ app.get('/api/serres', async (req: Request, res: Response) => {
 
       list = Array.from(mergedMap.values()).sort((a, b) => (a.ordre || 0) - (b.ordre || 0));
     }
-
-    // Deduplicate D2 serres (Serre 1 to Serre 15) and unique IDs
-    const seenD2Num = new Set<number>();
-    const seenSerreIds = new Set<string>();
-    const dedupedList: any[] = [];
-    for (const s of list) {
-      if (!s || s.id === 'serre_23') continue;
-      if (seenSerreIds.has(s.id)) continue;
-      seenSerreIds.add(s.id);
-
-      const dom = (s.domaine_id || 'dom_d2').trim().toLowerCase();
-      if (dom === 'dom_d2' || dom === 'd2') {
-        const nameNorm = (s.nom || '').trim().toUpperCase();
-        const codeNorm = (s.code || '').trim().toUpperCase();
-        const matchNum = nameNorm.match(/SERRE\s*(\d+)/) || codeNorm.match(/S0*(\d+)/);
-        if (matchNum) {
-          const num = parseInt(matchNum[1], 10);
-          if (num >= 1 && num <= 15) {
-            if (seenD2Num.has(num)) {
-              continue; // Skip duplicate D2 serre number
-            }
-            seenD2Num.add(num);
-          }
-        }
-      }
-      dedupedList.push(s);
-    }
-    list = dedupedList;
 
     if (domaineId) {
       const targetDom = String(domaineId).trim().toLowerCase();
@@ -980,15 +950,6 @@ function createLocalDbClient() {
       },
       delete: () => {
         let filter: (x: any) => boolean = () => true;
-        let returnSelect = false;
-        const executeDelete = () => {
-          const db = readDB();
-          const items = (db[table as keyof ServerDB] as any[]) || [];
-          const removed = items.filter((x: any) => filter(x));
-          (db as any)[table] = items.filter((x: any) => !filter(x));
-          writeDB(db);
-          return returnSelect ? { data: removed, error: null } : { error: null };
-        };
         const builder: any = {
           eq: (col: string, val: any) => {
             const prev = filter;
@@ -1000,12 +961,12 @@ function createLocalDbClient() {
             filter = (x: any) => prev(x) && x[col] !== val;
             return builder;
           },
-          select: (_fields?: string) => {
-            returnSelect = true;
-            return builder;
-          },
           then: (cb: any, rej?: any) => {
-            return Promise.resolve(executeDelete()).then(cb, rej);
+            const db = readDB();
+            const items = (db[table as keyof ServerDB] as any[]) || [];
+            (db as any)[table] = items.filter((x: any) => !filter(x));
+            writeDB(db);
+            return Promise.resolve({ error: null }).then(cb, rej);
           },
         };
         return builder;
@@ -1094,41 +1055,6 @@ async function authenticateAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Mode développement local ou jeton dev_admin_token (ou absence de configuration Supabase)
-  if (token === 'dev_admin_token' || !supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
-    const db = readDB();
-    const companies = db.companies || [];
-    const profileCompanyId = 'cie_lahcen_pointeur';
-    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
-
-    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
-      return {
-        authenticated: false,
-        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
-        statusCode: 400,
-      };
-    }
-
-    const compFound = companies.find((c: any) => c.id === profileCompanyId);
-    if (!compFound) {
-      return {
-        authenticated: false,
-        error: `L'entreprise associée au profil ("${profileCompanyId}") est introuvable dans la table "companies". Accès bloqué.`,
-        statusCode: 400,
-      };
-    }
-
-    return {
-      authenticated: true,
-      admin: {
-        id: 'usr_admin',
-        nom: 'Lahcen (Administrateur)',
-        company_id: profileCompanyId,
-      },
-      supabaseClient: createLocalDbClient(),
-    };
-  }
-
   if (!supabaseUrl || (!supabaseAnonKey && !serviceRoleKey)) {
     return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
   }
@@ -1137,25 +1063,13 @@ async function authenticateAdmin(req: Request): Promise<{
     const client = getSupabaseClientForRequest(token);
     const { data: { user }, error: authError } = await client.auth.getUser(token);
     if (authError || !user) {
-      // Fallback si le jeton est dev_admin_token ou similaire bien que Supabase soit configuré
-      if (token === 'dev_admin_token') {
-        return {
-          authenticated: true,
-          admin: {
-            id: 'usr_admin',
-            nom: 'Lahcen (Administrateur)',
-            company_id: 'cie_lahcen_pointeur',
-          },
-          supabaseClient: client,
-        };
-      }
       return { authenticated: false, error: 'Session invalide ou expirée: ' + (authError?.message || 'Utilisateur non trouvé'), statusCode: 401 };
     }
 
     const dbQueryClient = supabaseAdmin || client;
     const { data: profile, error: profileError } = await dbQueryClient
       .from('profiles')
-      .select('id, company_id, role, actif, nom, username')
+      .select('id, company_id, role, actif, nom')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -1165,12 +1079,6 @@ async function authenticateAdmin(req: Request): Promise<{
 
     if (!profile) {
       return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
-    }
-
-    const userEmail = (user.email || '').toLowerCase();
-    const isTariq = userEmail === 'tariq@caporal.com' || String((profile as any).username || '').toLowerCase() === 'tariq';
-    if (isTariq || profile.role === 'caporal_contractuelles' || user.user_metadata?.module_attribue === 'contractuelles') {
-      return { authenticated: false, error: 'Action interdite : ce compte est strictement réservé au module Contractuelles.', statusCode: 403 };
     }
 
     // Vérification stricte du rôle admin et du statut actif
@@ -1280,7 +1188,7 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
 
     let { data: profile, error: profileError } = await client
       .from('profiles')
-      .select('id, company_id, role, actif, nom, username')
+      .select('id, company_id, role, actif, nom')
       .eq('id', user.id)
       .single();
 
@@ -1303,11 +1211,6 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
       } else {
         return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
       }
-    }
-
-    const isTariq = userEmail === 'tariq@caporal.com' || String((profile as any).username || '').toLowerCase() === 'tariq';
-    if (isTariq || profile.role === 'caporal_contractuelles' || user.user_metadata?.module_attribue === 'contractuelles') {
-      return { authenticated: false, error: 'Action interdite : ce compte est strictement réservé au module Contractuelles.', statusCode: 403 };
     }
 
     const actualRole: 'admin' | 'caporal' = (profile.role === 'admin' || isAdminEmail) ? 'admin' : (profile.role === 'caporal' ? 'caporal' : 'caporal');
@@ -3226,38 +3129,8 @@ async function fetchMergedTachesSupplementaires(
   return Array.from(byId.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 
-const PROVISIONAL_DEMO_WORKERS_BY_NUM: Record<number, string> = {
-  1: 'Mohammed Amine',
-  2: 'Fatima Zahra',
-  3: 'Youssef El Idrissi',
-  4: 'Hassan Benali',
-  5: 'Khadija Mansouri',
-  6: 'Brahim Oukacha',
-  7: 'Aïcha Tazi',
-  8: 'Omar Naciri',
-  9: 'Salma Daoudi',
-  10: 'Khalid Berrada',
-  11: 'Zineb Alaoui',
-  12: 'Mustapha Chaoui',
-  13: 'Nadia El Fassi',
-  14: 'Rachid Bouzid',
-  15: 'Samira Bennani',
-};
-
-function isProvisionalDemoWorkerRow(row: any): boolean {
-  if (!row || !row.numero) return false;
-  const expected = PROVISIONAL_DEMO_WORKERS_BY_NUM[Number(row.numero)];
-  return Boolean(expected && row.id === `ouv_${row.numero}` && String(row.nom || '').trim() === expected);
-}
-
-// Helper pour retrouver un ouvrier légitime dans la base (priorité au nom réel issu de Pointage Matin sur les données démo provisoires)
-async function findRealCompanyWorker(
-  dbClient: any,
-  companyId: string,
-  criteria: { numero?: number; id?: string; nom_hint?: string }
-) {
-  const hintNom = criteria.nom_hint ? String(criteria.nom_hint).trim() : '';
-
+// Helper pour retrouver un ouvrier légitime dans la base (aucun ouvrier ne peut être créé automatiquement)
+async function findRealCompanyWorker(dbClient: any, companyId: string, criteria: { numero?: number; id?: string }) {
   if (criteria.numero !== undefined) {
     const num = Number(criteria.numero);
     if (isNaN(num) || num <= 0) return null;
@@ -3268,27 +3141,9 @@ async function findRealCompanyWorker(
         .eq('company_id', companyId)
         .eq('numero', num)
         .maybeSingle();
-      if (data) {
-        if (hintNom && isProvisionalDemoWorkerRow(data)) {
-          return {
-            ...data,
-            id: criteria.id ? String(criteria.id).trim() : data.id,
-            nom: hintNom,
-          };
-        }
-        return data;
-      }
+      if (data) return data;
     } catch {
       // ignore
-    }
-    if (hintNom) {
-      return {
-        id: criteria.id ? String(criteria.id).trim() : `ouv_${num}`,
-        company_id: companyId,
-        numero: num,
-        nom: hintNom,
-        actif: true,
-      };
     }
     const local = readDB();
     const found = (local.ouvriers || []).find(
@@ -3306,23 +3161,9 @@ async function findRealCompanyWorker(
         .eq('company_id', companyId)
         .eq('id', sId)
         .maybeSingle();
-      if (data) {
-        if (hintNom && isProvisionalDemoWorkerRow(data)) {
-          return { ...data, nom: hintNom };
-        }
-        return data;
-      }
+      if (data) return data;
     } catch {
       // ignore
-    }
-    if (hintNom && criteria.numero !== undefined && !isNaN(Number(criteria.numero))) {
-      return {
-        id: sId,
-        company_id: companyId,
-        numero: Number(criteria.numero),
-        nom: hintNom,
-        actif: true,
-      };
     }
     const local = readDB();
     const found = (local.ouvriers || []).find(
@@ -3400,7 +3241,6 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
     const {
       ouvrier_id,
       numero_ouvrier,
-      nom_ouvrier,
       date,
       heure_debut,
       heure_fin,
@@ -3424,12 +3264,11 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
     const companyId = auth.admin.company_id;
     const dbClient = auth.supabaseClient;
 
-    // Validation du travailleur existant (priorité Supabase ou nom réel issu du Pointage Matin)
+    // Validation stricte du travailleur existant (Interdiction formelle de créer un ouvrier depuis ce module)
     const numOuvrier = numero_ouvrier !== undefined ? parseInt(String(numero_ouvrier), 10) : undefined;
     const realWorker = await findRealCompanyWorker(dbClient, companyId, {
       numero: !isNaN(numOuvrier as number) ? numOuvrier : undefined,
       id: ouvrier_id ? String(ouvrier_id) : undefined,
-      nom_hint: nom_ouvrier ? String(nom_ouvrier).trim() : undefined,
     });
 
     if (!realWorker) {
@@ -3854,7 +3693,6 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       ouvriers,
       ouvrier_id,
       numero_ouvrier,
-      nom_ouvrier,
       date,
       tache_id,
       nom_tache,
@@ -3911,11 +3749,9 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       for (const w of ouvriers) {
         const wNum = w?.numero !== undefined ? Number(w.numero) : undefined;
         const wId = w?.id ? String(w.id) : undefined;
-        const wNomHint = w?.nom ? String(w.nom).trim() : (w?.nom_ouvrier ? String(w.nom_ouvrier).trim() : undefined);
         const found = await findRealCompanyWorker(dbClient, companyId, {
           numero: wNum !== undefined && !isNaN(wNum) ? wNum : undefined,
           id: wId,
-          nom_hint: wNomHint,
         });
 
         if (!found) {
@@ -3956,7 +3792,6 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       const found = await findRealCompanyWorker(dbClient, companyId, {
         numero: !isNaN(num as number) ? num : undefined,
         id: ouvrier_id ? String(ouvrier_id) : undefined,
-        nom_hint: nom_ouvrier ? String(nom_ouvrier).trim() : undefined,
       });
       if (!found) {
         return res.status(400).json({
@@ -4302,15 +4137,16 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
       fetchMergedTachesSupplementaires(dbClient, companyId, filters),
     ]);
 
-    // 3. Charger uniquement les ouvriers réels depuis Supabase (exclure les 15 ouvriers démo provisoires)
-    const allWorkers: any[] = [];
+    // 3. Charger le référentiel des ouvriers pour les noms complets et numéros
+    const local = readDB();
+    const allWorkers: any[] = local.ouvriers || [];
     try {
       const { data: dbWorkers } = await dbClient
         .from('ouvriers')
         .select('id, numero, nom')
         .eq('company_id', companyId);
       if (dbWorkers && dbWorkers.length > 0) {
-        allWorkers.push(...dbWorkers.filter((w: any) => !isProvisionalDemoWorkerRow(w)));
+        allWorkers.push(...dbWorkers);
       }
     } catch {
       // ignore
@@ -4678,13 +4514,13 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
       return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
     }
 
-    const isTariq = userEmail === 'tariq@caporal.com' || String(profile.username || '').toLowerCase() === 'tariq';
+    const isAdmin = profile.role === 'admin' || isAdminEmail;
+    const isTariq = userEmail === 'tariq@caporal.com' || profile.username === 'tariq';
     const isContractuelCaporal =
       profile.role === 'caporal_contractuelles' ||
       profile.module_attribue === 'contractuelles' ||
       authUser.user_metadata?.module_attribue === 'contractuelles' ||
       isTariq;
-    const isAdmin = !isContractuelCaporal && (profile.role === 'admin' || isAdminEmail);
 
     if (!isAdmin && !isContractuelCaporal) {
       return {
@@ -5175,8 +5011,8 @@ app.post('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
     const modeClean = (['JOUR', 'TACHE', 'UNITE', 'HEURE'].includes(mode_remuneration) ? mode_remuneration : 'JOUR') as any;
     const prix = Number(prix_convenu);
 
-    if (!nomClean) {
-      return res.status(400).json({ success: false, error: 'Le nom de l\'ouvrier est obligatoire.' });
+    if (!nomClean || !prenomClean) {
+      return res.status(400).json({ success: false, error: 'Le nom et le prénom de l\'ouvrier sont obligatoires.' });
     }
     if (isNaN(prix) || prix < 0) {
       return res.status(400).json({ success: false, error: 'Le prix convenu doit être un montant positif (>= 0).' });
@@ -5351,15 +5187,11 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
 
-    // Récupérer la liste des serres réelles de la société pour associer par nom/code/domaine
+    // Récupérer la liste des serres réelles de la société pour associer par nom/code
     const { data: realSerres } = await actionClient
       .from('serres')
-      .select('id, nom, code, domaine_id')
+      .select('id, nom, code')
       .eq('company_id', companyId);
-
-    const serresPool = (realSerres && realSerres.length > 0)
-      ? realSerres
-      : (readDB().serres || []);
 
     // Récupérer les ouvriers existants de la société
     const { data: existingOuvriers } = await actionClient
@@ -5375,55 +5207,11 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
     let skippedCount = 0;
     const importedList: any[] = [];
 
-    const normalizeDomaineId = (rawDom?: string): string => {
-      const val = String(rawDom || '').trim().toUpperCase();
-      if (val === 'DOM_D2' || val === 'D2' || val === '2' || val.includes('D2')) return 'dom_d2';
-      if (val === 'DOM_D3' || val === 'D3' || val === '3' || val.includes('D3')) return 'dom_d3';
-      if (val === 'DOM_D5' || val === 'D5' || val === '5' || val.includes('D5')) return 'dom_d5';
-      return val && val.startsWith('DOM_') ? val.toLowerCase() : 'dom_d2';
-    };
-
-    const resolveSerreId = (serreText: string, targetDomaineId: string): string | null => {
-      if (!serreText) return null;
-      const tokens = serreText
-        .split(/[,;/+&]+/)
-        .map((t) => t.trim())
-        .filter(Boolean);
-
-      for (const token of tokens) {
-        const tLower = token.toLowerCase();
-        const tNumMatch = tLower.match(/\d+/);
-        const tNum = tNumMatch ? String(parseInt(tNumMatch[0], 10)) : null;
-
-        const matchFn = (s: any) => {
-          const sNom = String(s.nom || '').toLowerCase().trim();
-          const sCode = String(s.code || '').toLowerCase().trim();
-          if (sNom === tLower || sCode === tLower) return true;
-          if (tNum) {
-            if (sCode === `s${tNum}` || sCode === `d5-s${tNum}` || sNom === `serre ${tNum}`) return true;
-          }
-          return false;
-        };
-
-        // Préférer la serre du domaine cible en premier
-        const inDomain = serresPool.find((s: any) => s.domaine_id === targetDomaineId && matchFn(s));
-        if (inDomain) return inDomain.id;
-
-        const anyDomain = serresPool.find(matchFn);
-        if (anyDomain) return anyDomain.id;
-      }
-      return null;
-    };
-
     for (let i = 0; i < ouvriers.length; i++) {
       const item = ouvriers[i];
       const nomClean = String(item.nom || '').trim().toUpperCase();
       const prenomClean = String(item.prenom || '').trim();
-      const nomCompletClean = item.nom_complet
-        ? String(item.nom_complet).trim().toUpperCase()
-        : (prenomClean ? `${nomClean} ${prenomClean}`.toUpperCase() : nomClean);
-
-      if (!nomClean && !nomCompletClean) {
+      if (!nomClean) {
         skippedCount++;
         continue;
       }
@@ -5435,31 +5223,26 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
       }
 
       const prix = Math.round(prixRaw * 100) / 100;
-      const resolvedDomaineId = normalizeDomaineId(item.domaine_id || item.domaine);
-      const rawSerreText = String(item.serre_nom || item.serre || '').trim();
-      const foundSerreId = resolveSerreId(rawSerreText, resolvedDomaineId);
+      const nomCompletClean = prenomClean ? `${nomClean} ${prenomClean}` : nomClean;
 
-      // Construction propre des notes (Serres + Tâches)
-      let resolvedNotes: string | undefined = item.notes ? String(item.notes).trim() : undefined;
-      if (!resolvedNotes && (rawSerreText || item.taches)) {
-        const parts: string[] = [];
-        if (rawSerreText) parts.push(`Serres: ${rawSerreText}`);
-        if (item.taches) parts.push(`Tâches: ${String(item.taches).trim()}`);
-        resolvedNotes = parts.length > 0 ? parts.join(' | ') : undefined;
+      // Résolution de la serre si transmise
+      let foundSerreId: string | null = null;
+      if (item.serre_nom || item.serre) {
+        const sTarget = String(item.serre_nom || item.serre).trim().toLowerCase();
+        const found = (realSerres || []).find(
+          (s: any) => s.nom.toLowerCase().trim() === sTarget || (s.code && s.code.toLowerCase().trim() === sTarget)
+        );
+        if (found) foundSerreId = found.id;
       }
 
-      // Recherche du doublon par matricule, nom_complet, ou (nom + prenom)
+      // Recherche du doublon par nom + prénom ou par matricule
       const existing = existingList.find((o: any) => {
         if (item.matricule && o.matricule && String(item.matricule).trim().toUpperCase() === String(o.matricule).trim().toUpperCase()) {
           return true;
         }
-        const existingFull = String(o.nom_complet || `${o.nom || ''} ${o.prenom || ''}`).toLowerCase().trim();
-        if (existingFull === nomCompletClean.toLowerCase().trim()) {
-          return true;
-        }
         return (
-          String(o.nom || '').toLowerCase().trim() === nomClean.toLowerCase() &&
-          String(o.prenom || '').toLowerCase().trim() === prenomClean.toLowerCase()
+          o.nom.toLowerCase().trim() === nomClean.toLowerCase() &&
+          (o.prenom || '').toLowerCase().trim() === prenomClean.toLowerCase()
         );
       });
 
@@ -5471,31 +5254,24 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
         // Mise à jour
         const updatedRecord = {
           ...existing,
-          nom: nomClean || existing.nom,
+          nom: nomClean,
           prenom: prenomClean,
           nom_complet: nomCompletClean,
-          domaine_id: item.domaine_id || item.domaine ? resolvedDomaineId : existing.domaine_id,
           prix_convenu: prix,
           serre_id: foundSerreId || existing.serre_id,
-          notes: resolvedNotes !== undefined ? resolvedNotes : existing.notes,
           actif: true,
           updated_at: now,
         };
 
-        const { error: updateErr } = await actionClient
+        await actionClient
           .from('contractuels_ouvriers')
           .update(updatedRecord)
           .eq('id', existing.id)
           .eq('company_id', companyId);
 
-        if (updateErr) {
-          console.warn('Supabase contractuels_ouvriers import update warning:', updateErr.message);
-        }
-
         if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
         const localIdx = db.contractuels_ouvriers.findIndex((o: any) => o.id === existing.id);
         if (localIdx >= 0) db.contractuels_ouvriers[localIdx] = updatedRecord;
-        else db.contractuels_ouvriers.push(updatedRecord);
 
         importedList.push(updatedRecord);
         updatedCount++;
@@ -5507,26 +5283,21 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
         const newRecord = {
           id,
           company_id: companyId,
-          nom: nomClean || nomCompletClean,
+          nom: nomClean,
           prenom: prenomClean,
           nom_complet: nomCompletClean,
           matricule: finalMatricule,
-          domaine_id: resolvedDomaineId,
+          domaine_id: item.domaine_id ? String(item.domaine_id).trim() : 'dom_d2',
           serre_id: foundSerreId,
           mode_remuneration: item.mode_remuneration || 'JOUR',
           prix_convenu: prix,
           unite: item.unite || 'JOUR',
           actif: true,
-          notes: resolvedNotes,
           created_at: now,
           updated_at: now,
         };
 
-        const { error: insertErr } = await actionClient.from('contractuels_ouvriers').insert(newRecord);
-        if (insertErr) {
-          console.warn('Supabase contractuels_ouvriers import insert warning:', insertErr.message);
-        }
-
+        await actionClient.from('contractuels_ouvriers').insert(newRecord);
         if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
         db.contractuels_ouvriers.push(newRecord);
 
