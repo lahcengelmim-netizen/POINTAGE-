@@ -19,6 +19,7 @@ import {
   UserCheck,
   Key,
   Fingerprint,
+  Database,
 } from 'lucide-react';
 import { useUser } from '../context/UserContext';
 import {
@@ -297,7 +298,7 @@ export const LoginPage: React.FC = () => {
           </form>
 
           {/* Bouton d'aide / Explications de liaison de compte */}
-          <div className="pt-3 text-center border-t border-emerald-100">
+          <div className="pt-3 text-center border-t border-emerald-100 space-y-2.5">
             <button
               type="button"
               onClick={() => setShowGuideModal(true)}
@@ -305,6 +306,17 @@ export const LoginPage: React.FC = () => {
             >
               <HelpCircle className="w-3.5 h-3.5 text-orange-500" />
               <span>Comment connecter un compte existant ?</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('lahcen:open-recovery'));
+              }}
+              className="w-full py-2.5 px-3 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-950 font-black text-xs rounded-xl flex items-center justify-center gap-2 transition cursor-pointer"
+            >
+              <Database className="w-4 h-4 text-amber-700 shrink-0" />
+              <span>RÉCUPÉRATION DES DONNÉES — MODE SÉCURISÉ</span>
             </button>
           </div>
         </div>

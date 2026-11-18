@@ -28,6 +28,16 @@ import {
 import { formatTacheLabel } from '../utils/tacheUtils';
 import { hashPassword, generateSalt, verifyPassword } from '../utils/crypto';
 import { supabase } from './supabaseClient';
+import {
+  OUTBOX_KEYS,
+  enqueueOutboxOp,
+  getOutboxOps,
+  dequeueOutboxOpsById,
+  markOutboxOpsFailed,
+  migrateLegacySyncQueue,
+  mergeCollectionWithConflictLog,
+  addDeleteTombstone,
+} from './syncOutbox';
 
 export const STORAGE_KEYS = {
   COMPANIES: 'agripointage_companies_v1',
@@ -51,24 +61,29 @@ export const STORAGE_KEYS = {
   RECOLTE: 'agripointage_recolte_v1',
   SYNC_QUEUE: 'agripointage_sync_queue_v1',
   POINTAGE_SYNC_QUEUE: 'agripointage_pointage_sync_queue_v1',
-  RECOLTE_SYNC_QUEUE: 'agripointage_recolte_sync_queue_v1',
-  RECOLTE_DELETE_QUEUE: 'agripointage_recolte_delete_queue_v1',
-  LAST_SYNC_AT: 'agripointage_last_sync_at_v1',
 };
 
-function coalesceSyncQueue(
-  queue: any[],
-  table: string,
-  action: 'upsert' | 'delete',
-  data: any
-): any[] {
-  const itemId = data?.id;
-  if (!itemId) {
-    return [...queue, { table, action, data, timestamp: Date.now() }];
+function resolveQueueForTable(table: string): string {
+  const lower = String(table || '').toLowerCase();
+  if (lower === 'pointages' || lower === 'affectations' || lower === 'tache_serres') {
+    return OUTBOX_KEYS.POINTAGE;
   }
-  const filtered = queue.filter((q) => !(q && q.table === table && q.data?.id === itemId));
-  filtered.push({ table, action, data, timestamp: Date.now() });
-  return filtered;
+  if (lower.includes('recolte')) return OUTBOX_KEYS.RECOLTE;
+  if (lower.includes('gazoil')) return OUTBOX_KEYS.GAZOIL;
+  if (lower.includes('heure') || lower.includes('tache_supp')) return OUTBOX_KEYS.SUPPLEMENTAIRES;
+  return OUTBOX_KEYS.REFERENTIELS;
+}
+
+function resolveEntityId(table: string, data: any): string {
+  if (!data || typeof data !== 'object') return '';
+  if (data.id) return String(data.id);
+  if (table === 'tache_serres') {
+    return `${data.company_id || ''}__${data.date || ''}__${data.tache_id || ''}`;
+  }
+  if (table === 'gazoil_config' && data.company_id) {
+    return `gz_cfg_${data.company_id}`;
+  }
+  return '';
 }
 
 export function addToPointageSyncQueue(
@@ -77,10 +92,13 @@ export function addToPointageSyncQueue(
   action: 'upsert' | 'delete' = 'upsert'
 ) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE);
-    const queue: any[] = raw ? JSON.parse(raw) : [];
-    const next = coalesceSyncQueue(Array.isArray(queue) ? queue : [], table, action, data);
-    localStorage.setItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE, JSON.stringify(next));
+    enqueueOutboxOp(OUTBOX_KEYS.POINTAGE, {
+      table,
+      entityId: resolveEntityId(table, data),
+      action,
+      data,
+      companyId: data?.company_id,
+    });
   } catch (err) {
     console.error('Erreur addToPointageSyncQueue:', err);
   }
@@ -91,50 +109,17 @@ export function addToSyncQueue(
   data: any,
   action: 'upsert' | 'delete' = 'upsert'
 ) {
-  if (table === 'pointages' || table === 'affectations') {
-    addToPointageSyncQueue(table, data, action);
-    return;
-  }
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
-    const queue: any[] = raw ? JSON.parse(raw) : [];
-    const next = coalesceSyncQueue(Array.isArray(queue) ? queue : [], table, action, data);
-    localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(next));
+    const targetQueue = resolveQueueForTable(table);
+    enqueueOutboxOp(targetQueue, {
+      table,
+      entityId: resolveEntityId(table, data),
+      action,
+      data,
+      companyId: data?.company_id,
+    });
   } catch (err) {
     console.error('Erreur addToSyncQueue:', err);
-  }
-}
-
-export function getLastSyncAt(): string | null {
-  try {
-    return localStorage.getItem(STORAGE_KEYS.LAST_SYNC_AT);
-  } catch {
-    return null;
-  }
-}
-
-export function setLastSyncAt(iso: string = new Date().toISOString()): void {
-  try {
-    localStorage.setItem(STORAGE_KEYS.LAST_SYNC_AT, iso);
-  } catch {
-    // ignore
-  }
-}
-
-export function getPendingSyncCount(): number {
-  try {
-    const q1 = JSON.parse(localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE) || '[]');
-    const q2 = JSON.parse(localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE) || '[]');
-    const q3 = JSON.parse(localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE) || '[]');
-    const q4 = JSON.parse(localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE) || '[]');
-    return (
-      (Array.isArray(q1) ? q1.length : 0) +
-      (Array.isArray(q2) ? q2.length : 0) +
-      (Array.isArray(q3) ? q3.length : 0) +
-      (Array.isArray(q4) ? q4.length : 0)
-    );
-  } catch {
-    return 0;
   }
 }
 
@@ -630,13 +615,39 @@ export function initStorage(): void {
         let serresUpdated = false;
         const canonicalById = new Map(DEFAULT_SERRES.map((s) => [s.id, s]));
 
-        // 1. Retirer l'enregistrement erroné serre_23 de D3 et normaliser domaine_id/ordre des serres canoniques
+        // 1. Retirer l'enregistrement erroné serre_23 de D3, éliminer les doublons de D2 (serre 1..15) et normaliser domaine_id/ordre
         const cleanedSerres: Serre[] = [];
+        const seenD2Numbers = new Set<number>();
+        const seenIds = new Set<string>();
+
         for (const s of parsedSerres) {
           if (isAnomalousDuplicateSerre23(s)) {
             serresUpdated = true;
             continue;
           }
+          if (seenIds.has(s.id)) {
+            serresUpdated = true;
+            continue;
+          }
+          seenIds.add(s.id);
+
+          const dom = (s.domaine_id || 'dom_d2').trim().toLowerCase();
+          if (dom === 'dom_d2' || dom === 'd2') {
+            const nameNorm = (s.nom || '').trim().toUpperCase();
+            const codeNorm = (s.code || '').trim().toUpperCase();
+            const matchNum = nameNorm.match(/SERRE\s*(\d+)/) || codeNorm.match(/S0*(\d+)/);
+            if (matchNum) {
+              const num = parseInt(matchNum[1], 10);
+              if (num >= 1 && num <= 15) {
+                if (seenD2Numbers.has(num)) {
+                  serresUpdated = true;
+                  continue; // Skip duplicate D2 serre number
+                }
+                seenD2Numbers.add(num);
+              }
+            }
+          }
+
           const canon = canonicalById.get(s.id);
           if (canon) {
             const needsDomaineFix = !s.domaine_id || (canon.domaine_id && s.domaine_id !== canon.domaine_id);
@@ -687,31 +698,7 @@ export function initStorage(): void {
     if (!localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE)) {
       safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify([]));
     }
-    if (!localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE)) {
-      safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify([]));
-    }
-    if (!localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE)) {
-      safeSetItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE, JSON.stringify([]));
-    }
-    // Migration douce : séparer les anciennes entrées Récolte brutes (sans .table) hors de SYNC_QUEUE
-    try {
-      const legacyRaw = localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE);
-      const legacyArr: any[] = legacyRaw ? JSON.parse(legacyRaw) : [];
-      if (Array.isArray(legacyArr) && legacyArr.some((item) => item && !item.table && item.caisses !== undefined)) {
-        const genericItems = legacyArr.filter((item) => item && item.table);
-        const recolteItems = legacyArr.filter((item) => item && !item.table && item.caisses !== undefined);
-        const recQueueRaw = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
-        const recQueue: any[] = recQueueRaw ? JSON.parse(recQueueRaw) : [];
-        const map = new Map<string, any>(recQueue.map((r) => [r.id, r]));
-        recolteItems.forEach((r) => {
-          if (r.id) map.set(r.id, r);
-        });
-        safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify(Array.from(map.values())));
-        safeSetItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(genericItems));
-      }
-    } catch {
-      // ignore
-    }
+    migrateLegacySyncQueue();
   } catch (error) {
     console.error('Erreur lors de l\'initialisation du stockage:', error);
   }
@@ -760,6 +747,7 @@ export function saveCompany(company: Partial<Company> & { nom: string }): Compan
   }
 
   safeSetItem(STORAGE_KEYS.COMPANIES, JSON.stringify(list));
+  addToSyncQueue('companies', updated, 'upsert');
   notifyListeners();
   return updated;
 }
@@ -824,12 +812,12 @@ export function saveDomaine(dom: { id?: string; nom: string; ordre?: number }): 
 
 export function updateDomainesOrder(domaines: Domaine[]): void {
   initStorage();
+  const companyId = getActiveCompanyId();
   const updated = domaines.map((d, index) => ({
     ...d,
     ordre: index + 1,
   }));
   safeSetItem(STORAGE_KEYS.DOMAINES, JSON.stringify(updated));
-  const companyId = getActiveCompanyId();
   updated.forEach((d) => addToSyncQueue('domaines', { ...d, company_id: companyId }, 'upsert'));
   notifyListeners();
 }
@@ -845,13 +833,13 @@ export function deleteDomaine(id: string): { success: boolean; error?: string } 
   }
   list = list.filter((d) => d.id !== id);
   safeSetItem(STORAGE_KEYS.DOMAINES, JSON.stringify(list));
-  addToSyncQueue('domaines', { id }, 'delete');
 
   const defId = localStorage.getItem(STORAGE_KEYS.DEFAULT_DOMAINE);
   if (defId === id && list.length > 0) {
     safeSetItem(STORAGE_KEYS.DEFAULT_DOMAINE, list[0].id);
   }
 
+  addToSyncQueue('domaines', { id, company_id: getActiveCompanyId() }, 'delete');
   notifyListeners();
   return { success: true };
 }
@@ -953,9 +941,10 @@ export function toggleOuvrierActif(id: string): void {
 export function deleteOuvrier(id: string): void {
   const allRaw = localStorage.getItem(STORAGE_KEYS.OUVRIERS);
   let all: Ouvrier[] = allRaw ? JSON.parse(allRaw) : [];
+  const target = all.find((o) => o.id === id);
   all = all.filter((o) => o.id !== id);
   safeSetItem(STORAGE_KEYS.OUVRIERS, JSON.stringify(all));
-  addToSyncQueue('ouvriers', { id }, 'delete');
+  addToSyncQueue('ouvriers', { id, company_id: target?.company_id || getActiveCompanyId() }, 'delete');
   notifyListeners();
 }
 
@@ -1010,8 +999,8 @@ export function bulkImportOuvriers(
         createdAt: new Date().toISOString(),
       };
       all.push(created);
-      addedCount++;
       touched.push(created);
+      addedCount++;
     }
   });
 
@@ -1119,9 +1108,10 @@ export function saveTache(
 export function deleteTache(id: string): void {
   const allRaw = localStorage.getItem(STORAGE_KEYS.TACHES);
   let all: Tache[] = allRaw ? JSON.parse(allRaw) : [];
+  const target = all.find((t) => t.id === id);
   all = all.filter((t) => t.id !== id);
   safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify(all));
-  addToSyncQueue('taches', { id }, 'delete');
+  addToSyncQueue('taches', { id, company_id: target?.company_id || getActiveCompanyId() }, 'delete');
   notifyListeners();
 }
 
@@ -1184,11 +1174,11 @@ export function bulkImportTaches(
   let updated = 0;
   let deactivated = 0;
   const errors: string[] = [];
-  const touched: Tache[] = [];
 
   const importedCodes = new Set(parsedItems.map((p) => p.cleanCode).filter(Boolean));
   const importedNoms = new Set(parsedItems.map((p) => p.cleanNom));
 
+  const touchedTaches: Tache[] = [];
   if (replaceAll) {
     // Mode remplacement : Désactiver les tâches existantes absentes du nouveau fichier
     all.forEach((t) => {
@@ -1199,7 +1189,7 @@ export function bulkImportTaches(
           if (t.actif !== false) {
             t.actif = false;
             deactivated++;
-            touched.push(t);
+            touchedTaches.push(t);
           }
         }
       }
@@ -1219,7 +1209,7 @@ export function bulkImportTaches(
       if (pi.cleanCode) existing.code = pi.cleanCode;
       existing.actif = true; // Réactiver
       updated++;
-      touched.push(existing);
+      touchedTaches.push(existing);
     } else {
       const couleur = PALETTE_COULEURS[(all.length + added) % PALETTE_COULEURS.length];
       const created: Tache = {
@@ -1233,13 +1223,13 @@ export function bulkImportTaches(
         createdAt: new Date().toISOString(),
       };
       all.push(created);
+      touchedTaches.push(created);
       added++;
-      touched.push(created);
     }
   });
 
   safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify(all));
-  touched.forEach((t) => addToSyncQueue('taches', t, 'upsert'));
+  touchedTaches.forEach((t) => addToSyncQueue('taches', t, 'upsert'));
   notifyListeners();
   return {
     added,
@@ -1501,7 +1491,7 @@ export function removeWorkerAffectationsForDate(
     (a) => !(a.company_id === companyId && a.ouvrier_id === ouvrierId && a.date === date)
   );
   safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify(allAff));
-  removed.forEach((a) => addToPointageSyncQueue('affectations', { id: a.id }, 'delete'));
+  removed.forEach((a) => addToPointageSyncQueue('affectations', { id: a.id, company_id: companyId }, 'delete'));
   return removed.length;
 }
 
@@ -1892,7 +1882,7 @@ export function saveTacheSerreConfig(
   }
 
   safeSetItem(STORAGE_KEYS.TACHE_SERRES, JSON.stringify(all));
-  addToSyncQueue('tache_serre_configs', nextConfig, 'upsert');
+  addToPointageSyncQueue('tache_serres', nextConfig, 'upsert');
   return nextConfig;
 }
 
@@ -2118,21 +2108,16 @@ export function mergeHeuresSupplementairesServerData(serverRecords: HeureSupplem
     const raw = localStorage.getItem(STORAGE_KEYS.HEURES_SUPP);
     const localList: HeureSupplementaire[] = raw ? JSON.parse(raw) : [];
 
-    const map = new Map<string, HeureSupplementaire>();
-    for (const item of localList) {
-      if (item.id) map.set(item.id, item);
-    }
-    for (const serverItem of serverRecords) {
-      if (!serverItem.id) continue;
-      const existing = map.get(serverItem.id);
-      if (!existing) {
-        map.set(serverItem.id, serverItem);
-      } else {
-        map.set(serverItem.id, { ...existing, ...serverItem });
-      }
-    }
+    const merged = mergeCollectionWithConflictLog<HeureSupplementaire>({
+      table: 'heures_supplementaires',
+      queueKey: OUTBOX_KEYS.SUPPLEMENTAIRES,
+      localItems: localList,
+      remoteItems: Array.isArray(serverRecords) ? serverRecords : [],
+      getId: (item) => item.id,
+      getCompanyId: (item) => item.company_id,
+      preserveLocalNotInRemote: true,
+    }).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-    const merged = Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(merged));
     notifyListeners();
   } catch (err) {
@@ -2254,11 +2239,24 @@ export function addHeureSupplementaire(
   });
 }
 
-export function deleteHeureSupplementaire(id: string): void {
+export function deleteHeureSupplementaire(
+  id: string,
+  options?: { skipQueue?: boolean }
+): void {
   const allRaw = localStorage.getItem(STORAGE_KEYS.HEURES_SUPP);
   let all: HeureSupplementaire[] = allRaw ? JSON.parse(allRaw) : [];
+  const target = all.find((h) => h.id === id);
   all = all.filter((h) => h.id !== id);
   safeSetItem(STORAGE_KEYS.HEURES_SUPP, JSON.stringify(all));
+  if (!options?.skipQueue) {
+    addToSyncQueue(
+      'heures_supplementaires',
+      { id, company_id: target?.company_id || getActiveCompanyId() },
+      'delete'
+    );
+  } else {
+    addDeleteTombstone('heures_supplementaires', id, target?.company_id || getActiveCompanyId());
+  }
   notifyListeners();
 }
 
@@ -2296,21 +2294,16 @@ export function mergeTachesSupplementairesServerData(serverRecords: TacheSupplem
     const raw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
     const localList: TacheSupplementaire[] = raw ? JSON.parse(raw) : [];
 
-    const map = new Map<string, TacheSupplementaire>();
-    for (const item of localList) {
-      if (item.id) map.set(item.id, item);
-    }
-    for (const serverItem of serverRecords) {
-      if (!serverItem.id) continue;
-      const existing = map.get(serverItem.id);
-      if (!existing) {
-        map.set(serverItem.id, serverItem);
-      } else {
-        map.set(serverItem.id, { ...existing, ...serverItem });
-      }
-    }
+    const merged = mergeCollectionWithConflictLog<TacheSupplementaire>({
+      table: 'taches_supplementaires',
+      queueKey: OUTBOX_KEYS.SUPPLEMENTAIRES,
+      localItems: localList,
+      remoteItems: Array.isArray(serverRecords) ? serverRecords : [],
+      getId: (item) => item.id,
+      getCompanyId: (item) => item.company_id,
+      preserveLocalNotInRemote: true,
+    }).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-    const merged = Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     safeSetItem(STORAGE_KEYS.TACHES_SUPP, JSON.stringify(merged));
     notifyListeners();
   } catch (err) {
@@ -2409,11 +2402,24 @@ export function saveTacheSupplementaire(
   return { success: true, item: newEntry };
 }
 
-export function deleteTacheSupplementaire(id: string): void {
+export function deleteTacheSupplementaire(
+  id: string,
+  options?: { skipQueue?: boolean }
+): void {
   const allRaw = localStorage.getItem(STORAGE_KEYS.TACHES_SUPP);
   let all: TacheSupplementaire[] = allRaw ? JSON.parse(allRaw) : [];
+  const target = all.find((t) => t.id === id);
   all = all.filter((t) => t.id !== id);
   safeSetItem(STORAGE_KEYS.TACHES_SUPP, JSON.stringify(all));
+  if (!options?.skipQueue) {
+    addToSyncQueue(
+      'taches_supplementaires',
+      { id, company_id: target?.company_id || getActiveCompanyId() },
+      'delete'
+    );
+  } else {
+    addDeleteTombstone('taches_supplementaires', id, target?.company_id || getActiveCompanyId());
+  }
   notifyListeners();
 }
 
@@ -2478,7 +2484,7 @@ export function getGazoilConfig(companyId: string): GazoilConfig {
 export function saveGazoilConfig(
   companyId: string,
   partial: Partial<GazoilConfig>,
-  skipSync: boolean = false
+  options?: { skipQueue?: boolean }
 ): GazoilConfig {
   initStorage();
   try {
@@ -2488,21 +2494,8 @@ export function saveGazoilConfig(
     const updated: GazoilConfig = { ...current, ...partial };
     map[companyId] = updated;
     safeSetItem(STORAGE_KEYS.GAZOIL_CONFIG, JSON.stringify(map));
-    if (!skipSync) {
-      addToSyncQueue(
-        'gazoil_configs',
-        {
-          id: companyId,
-          company_id: companyId,
-          stock_initial: updated.stockInitial,
-          initial_set: updated.initialSet,
-          seuil_alerte: updated.seuilAlerte,
-          commande_active: updated.commandeActive,
-          notified_below_threshold: updated.notifiedBelowThreshold ?? false,
-          updated_at: new Date().toISOString(),
-        },
-        'upsert'
-      );
+    if (!options?.skipQueue) {
+      addToSyncQueue('gazoil_config', { id: `gz_cfg_${companyId}`, company_id: companyId, ...updated, updated_at: new Date().toISOString() }, 'upsert');
     }
     notifyListeners();
     return updated;
@@ -2670,7 +2663,7 @@ export function deleteGazoilMouvement(companyId: string, id: string): void {
   let all: GazoilMouvement[] = raw ? JSON.parse(raw) : [];
   all = all.filter((m) => m.id !== id);
   safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, JSON.stringify(all));
-  addToSyncQueue('gazoil_mouvements', { id }, 'delete');
+  addToSyncQueue('gazoil_mouvements', { id, company_id: companyId }, 'delete');
   notifyListeners();
   checkAndNotifyStockBas(companyId);
 }
@@ -3461,9 +3454,10 @@ export function deleteSerre(id: string): { success: boolean; error?: string } {
   initStorage();
   const raw = localStorage.getItem(STORAGE_KEYS.SERRES);
   let all: Serre[] = raw ? JSON.parse(raw) : [];
+  const target = all.find((s) => s.id === id);
   all = all.filter((s) => s.id !== id);
   safeSetItem(STORAGE_KEYS.SERRES, JSON.stringify(all));
-  addToSyncQueue('serres', { id }, 'delete');
+  addToSyncQueue('serres', { id, company_id: target?.company_id || getActiveCompanyId() }, 'delete');
   notifyListeners();
   return { success: true };
 }
@@ -3658,29 +3652,19 @@ export function deleteRecolteEntry(id: string): { success: boolean; error?: stri
   const raw = localStorage.getItem(STORAGE_KEYS.RECOLTE);
   let all: RecolteEntry[] = raw ? JSON.parse(raw) : [];
   const target = all.find((r) => r.id === id);
+  const companyId = target?.company_id || getActiveCompanyId();
   all = all.filter((r) => r.id !== id);
   safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify(all));
-
-  // Retirer d'une éventuelle file d'envoi en attente et enregistrer la suppression
-  try {
-    const syncRaw = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
-    const syncQ: RecolteEntry[] = syncRaw ? JSON.parse(syncRaw) : [];
-    const nextSyncQ = syncQ.filter((q) => q.id !== id);
-    safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify(nextSyncQ));
-
-    const delRaw = localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE);
-    const delQ: string[] = delRaw ? JSON.parse(delRaw) : [];
-    if (!delQ.includes(id)) {
-      delQ.push(id);
-      safeSetItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE, JSON.stringify(delQ));
-    }
-  } catch {
-    // ignore
-  }
-
+  enqueueOutboxOp(OUTBOX_KEYS.RECOLTE, {
+    table: 'recolte_entries',
+    entityId: id,
+    action: 'delete',
+    data: { id, company_id: companyId },
+    companyId,
+  });
   notifyListeners();
-  if (target && typeof navigator !== 'undefined' && navigator.onLine) {
-    syncRecolteWithServer(target.company_id || getActiveCompanyId()).catch(() => {});
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    syncRecolteWithServer(companyId).catch(() => {});
   }
   return { success: true };
 }
@@ -3704,403 +3688,365 @@ export function calculateRecolteStats(entries: RecolteEntry[]): RecolteStats {
   };
 }
 
-// ------------------------- RÉCONCILIATION MULTI-APPAREILS (SUPABASE PRIORITAIRE) -------------------------
+// ------------------------- RÉCONCILIATION MULTI-APPAREILS (TOUS MODULES) -------------------------
 
-function getPendingIdsForTable(table: string): { upserts: Set<string>; deletes: Set<string> } {
-  const upserts = new Set<string>();
-  const deletes = new Set<string>();
-  try {
-    const raw1 = JSON.parse(localStorage.getItem(STORAGE_KEYS.SYNC_QUEUE) || '[]');
-    const raw2 = JSON.parse(localStorage.getItem(STORAGE_KEYS.POINTAGE_SYNC_QUEUE) || '[]');
-    for (const q of [...(Array.isArray(raw1) ? raw1 : []), ...(Array.isArray(raw2) ? raw2 : [])]) {
-      if (q && q.table === table && q.data?.id) {
-        if (q.action === 'delete') deletes.add(q.data.id);
-        else upserts.add(q.data.id);
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return { upserts, deletes };
+const DEFAULT_WORKER_NAME_BY_ID = new Map(DEFAULT_OUVRIERS.map((o) => [o.id, o.nom]));
+
+export function isProvisionalDefaultOuvrier(o: Partial<Ouvrier> | null | undefined): boolean {
+  if (!o || !o.id) return false;
+  const defaultNom = DEFAULT_WORKER_NAME_BY_ID.get(o.id);
+  return Boolean(defaultNom && o.nom === defaultNom);
 }
 
-export function reconcileOuvriersFromRemote(companyId: string, remoteOuvriers: any[]): void {
-  if (!Array.isArray(remoteOuvriers)) return;
+export function reconcileCompaniesFromRemote(remoteCompanies: Company[]): void {
+  if (!Array.isArray(remoteCompanies) || remoteCompanies.length === 0) return;
   initStorage();
-  const { upserts, deletes } = getPendingIdsForTable('ouvriers');
+  const local = getCompanies();
+  const merged = mergeCollectionWithConflictLog<Company>({
+    table: 'companies',
+    queueKey: OUTBOX_KEYS.REFERENTIELS,
+    localItems: local,
+    remoteItems: remoteCompanies,
+    getId: (c) => c.id,
+    preserveLocalNotInRemote: true,
+  });
+  safeSetItem(STORAGE_KEYS.COMPANIES, JSON.stringify(merged));
+  notifyListeners();
+}
+
+export function reconcileOuvriersFromRemote(companyId: string, remoteOuvriers: Ouvrier[]): void {
+  if (!Array.isArray(remoteOuvriers) || remoteOuvriers.length === 0) return;
+  initStorage();
   const raw = localStorage.getItem(STORAGE_KEYS.OUVRIERS);
-  const local: Ouvrier[] = raw ? JSON.parse(raw) : [];
-  const otherCompanies = local.filter((o) => o.company_id !== companyId);
-  const localSameCompany = local.filter((o) => o.company_id === companyId);
-  const map = new Map<string, Ouvrier>();
+  const allLocal: Ouvrier[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((o) => o.company_id !== companyId);
+  const companyLocal = allLocal.filter((o) => o.company_id === companyId);
 
-  remoteOuvriers.forEach((ro) => {
-    if (!ro?.id || deletes.has(ro.id)) return;
-    map.set(ro.id, {
-      id: ro.id,
-      company_id: ro.company_id || companyId,
-      numero: Number(ro.numero),
-      nom: ro.nom,
-      actif: ro.actif !== false,
-      telephone: ro.telephone || undefined,
-      notes: ro.notes || undefined,
-      createdAt: ro.created_at || ro.createdAt || new Date().toISOString(),
-    });
-  });
+  const mergedCompany = mergeCollectionWithConflictLog<Ouvrier>({
+    table: 'ouvriers',
+    queueKey: OUTBOX_KEYS.REFERENTIELS,
+    localItems: companyLocal,
+    remoteItems: remoteOuvriers.filter((o) => !o.company_id || o.company_id === companyId).map((o) => ({ ...o, company_id: o.company_id || companyId })),
+    getId: (o) => o.id,
+    getCompanyId: (o) => o.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
+    isProvisionalLocal: isProvisionalDefaultOuvrier,
+  }).sort((a, b) => a.numero - b.numero);
 
-  // Préserver uniquement les modifications locales en attente d'envoi
-  localSameCompany.forEach((lo) => {
-    if (upserts.has(lo.id)) {
-      map.set(lo.id, lo);
-    }
-  });
-
-  const next = [...otherCompanies, ...Array.from(map.values())];
-  const nextJson = JSON.stringify(next);
-  if (nextJson !== raw) {
-    safeSetItem(STORAGE_KEYS.OUVRIERS, nextJson);
-    notifyListeners();
-  }
+  safeSetItem(STORAGE_KEYS.OUVRIERS, JSON.stringify([...otherCompanies, ...mergedCompany]));
+  notifyListeners();
 }
 
-export function reconcileTachesFromRemote(companyId: string, remoteTaches: any[]): void {
-  if (!Array.isArray(remoteTaches)) return;
+export function reconcileTachesFromRemote(companyId: string, remoteTaches: Tache[]): void {
+  if (!Array.isArray(remoteTaches) || remoteTaches.length === 0) return;
   initStorage();
-  const { upserts, deletes } = getPendingIdsForTable('taches');
   const raw = localStorage.getItem(STORAGE_KEYS.TACHES);
-  const local: Tache[] = raw ? JSON.parse(raw) : [];
-  const otherCompanies = local.filter((t) => t.company_id !== companyId);
-  const localSameCompany = local.filter((t) => t.company_id === companyId);
+  const allLocal: Tache[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((t) => t.company_id !== companyId);
+  const companyLocal = allLocal.filter((t) => t.company_id === companyId);
 
-  // Supabase fait autorité pour la société si le serveur retourne au moins une tâche (ou s'il n'y a aucune tâche locale en attente)
-  const map = new Map<string, Tache>();
-  remoteTaches.forEach((rt) => {
-    if (!rt?.id || deletes.has(rt.id)) return;
-    map.set(rt.id, {
-      id: rt.id,
-      company_id: rt.company_id || companyId,
-      code: rt.code || undefined,
-      nom: rt.nom,
-      actif: rt.actif !== false,
-      domaine_id: rt.domaine_id || undefined,
-      description: rt.description || undefined,
-      couleur: rt.couleur || '#16a34a',
-      ouvriers_autorises: rt.ouvriers_autorises || 'tous',
-      createdAt: rt.created_at || rt.createdAt || new Date().toISOString(),
-    });
+  const mergedCompany = mergeCollectionWithConflictLog<Tache>({
+    table: 'taches',
+    queueKey: OUTBOX_KEYS.REFERENTIELS,
+    localItems: companyLocal,
+    remoteItems: remoteTaches.filter((t) => !t.company_id || t.company_id === companyId).map((t) => ({ ...t, company_id: t.company_id || companyId })),
+    getId: (t) => t.id,
+    getCompanyId: (t) => t.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
   });
 
-  // Préserver uniquement les tâches locales non encore synchronisées vers Supabase
-  localSameCompany.forEach((lt) => {
-    if (upserts.has(lt.id)) {
-      map.set(lt.id, lt);
-    }
-  });
-
-  const next = [...otherCompanies, ...Array.from(map.values())];
-  const nextJson = JSON.stringify(next);
-  if (nextJson !== raw) {
-    safeSetItem(STORAGE_KEYS.TACHES, nextJson);
-    notifyListeners();
-  }
+  safeSetItem(STORAGE_KEYS.TACHES, JSON.stringify([...otherCompanies, ...mergedCompany]));
+  notifyListeners();
 }
 
-export function reconcilePointagesFromRemote(
-  companyId: string,
-  remotePointages: any[],
-  dateFilter?: string
-): void {
-  if (!Array.isArray(remotePointages)) return;
+export function reconcilePointagesFromRemote(companyId: string, remotePointages: Pointage[]): void {
+  if (!Array.isArray(remotePointages) || remotePointages.length === 0) return;
   initStorage();
-  const { upserts, deletes } = getPendingIdsForTable('pointages');
   const raw = localStorage.getItem(STORAGE_KEYS.POINTAGES);
-  const local: Pointage[] = raw ? JSON.parse(raw) : [];
+  const allLocal: Pointage[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((p) => p.company_id !== companyId);
+  const companyLocal = allLocal.filter((p) => p.company_id === companyId);
 
-  const keptOtherScope = local.filter((p) => {
-    if (p.company_id !== companyId) return true;
-    if (dateFilter && p.date !== dateFilter) return true;
-    return upserts.has(p.id);
+  const mergedCompany = mergeCollectionWithConflictLog<Pointage>({
+    table: 'pointages',
+    queueKey: OUTBOX_KEYS.POINTAGE,
+    localItems: companyLocal,
+    remoteItems: remotePointages.filter((p) => !p.company_id || p.company_id === companyId).map((p) => ({ ...p, company_id: p.company_id || companyId })),
+    getId: (p) => p.id,
+    getCompanyId: (p) => p.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
   });
 
-  const map = new Map<string, Pointage>(keptOtherScope.map((p) => [p.id, p]));
-  remotePointages.forEach((rp) => {
-    if (!rp?.id || deletes.has(rp.id) || upserts.has(rp.id)) return;
-    map.set(rp.id, {
-      id: rp.id,
-      company_id: rp.company_id || companyId,
-      ouvrier_id: rp.ouvrier_id,
-      numero_ouvrier: Number(rp.numero_ouvrier),
-      date: rp.date,
-      present: rp.present !== false,
-      tache_id: rp.tache_id ?? null,
-      domaine_id: rp.domaine_id || undefined,
-      serre_id: rp.serre_id ?? null,
-      serre_nom: rp.serre_nom ?? null,
-      heure: rp.heure || '08:00:00',
-      timestamp: Number(rp.timestamp || Date.now()),
-    });
-  });
-
-  const next = Array.from(map.values());
-  const nextJson = JSON.stringify(next);
-  if (nextJson !== raw) {
-    safeSetItem(STORAGE_KEYS.POINTAGES, nextJson);
-    notifyListeners();
-  }
+  safeSetItem(STORAGE_KEYS.POINTAGES, JSON.stringify([...otherCompanies, ...mergedCompany]));
+  notifyListeners();
 }
 
-export function reconcileAffectationsFromRemote(
-  companyId: string,
-  remoteAffectations: any[],
-  dateFilter?: string
-): void {
-  if (!Array.isArray(remoteAffectations)) return;
+export function reconcileAffectationsFromRemote(companyId: string, remoteAffs: AffectationTache[]): void {
+  if (!Array.isArray(remoteAffs) || remoteAffs.length === 0) return;
   initStorage();
-  const { upserts, deletes } = getPendingIdsForTable('affectations');
   const raw = localStorage.getItem(STORAGE_KEYS.AFFECTATIONS);
-  const local: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  const allLocal: AffectationTache[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((a) => a.company_id !== companyId);
+  const companyLocal = allLocal.filter((a) => a.company_id === companyId);
 
-  const keptOtherScope = local.filter((a) => {
-    if (a.company_id !== companyId) return true;
-    if (dateFilter && a.date !== dateFilter) return true;
-    return upserts.has(a.id);
+  const mergedCompany = mergeCollectionWithConflictLog<AffectationTache>({
+    table: 'affectations',
+    queueKey: OUTBOX_KEYS.POINTAGE,
+    localItems: companyLocal,
+    remoteItems: remoteAffs.filter((a) => !a.company_id || a.company_id === companyId).map((a) => ({ ...a, company_id: a.company_id || companyId })),
+    getId: (a) => a.id,
+    getCompanyId: (a) => a.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
   });
 
-  const map = new Map<string, AffectationTache>(keptOtherScope.map((a) => [a.id, a]));
-  remoteAffectations.forEach((ra) => {
-    if (!ra?.id || deletes.has(ra.id) || upserts.has(ra.id)) return;
-    map.set(ra.id, {
-      id: ra.id,
-      company_id: ra.company_id || companyId,
-      ouvrier_id: ra.ouvrier_id,
-      numero_ouvrier: Number(ra.numero_ouvrier),
-      tache_id: ra.tache_id,
-      domaine_id: ra.domaine_id || undefined,
-      serre_id: ra.serre_id ?? null,
-      serre_nom: ra.serre_nom ?? null,
-      serres_ids: Array.isArray(ra.serres_ids) ? ra.serres_ids : undefined,
-      serres_noms: Array.isArray(ra.serres_noms) ? ra.serres_noms : undefined,
-      date: ra.date,
-      timestamp: Number(ra.timestamp || Date.now()),
-    });
-  });
-
-  const next = Array.from(map.values());
-  const nextJson = JSON.stringify(next);
-  if (nextJson !== raw) {
-    safeSetItem(STORAGE_KEYS.AFFECTATIONS, nextJson);
-    notifyListeners();
-  }
+  safeSetItem(STORAGE_KEYS.AFFECTATIONS, JSON.stringify([...otherCompanies, ...mergedCompany]));
+  notifyListeners();
 }
 
-export function reconcileTacheSerreConfigsFromRemote(
-  companyId: string,
-  remoteConfigs: any[],
-  dateFilter?: string
-): void {
-  if (!Array.isArray(remoteConfigs)) return;
+export function reconcileTacheSerresFromRemote(companyId: string, remoteConfigs: TacheSerreConfig[]): void {
+  if (!Array.isArray(remoteConfigs) || remoteConfigs.length === 0) return;
   initStorage();
-  const { upserts, deletes } = getPendingIdsForTable('tache_serre_configs');
   const raw = localStorage.getItem(STORAGE_KEYS.TACHE_SERRES);
-  const local: TacheSerreConfig[] = raw ? JSON.parse(raw) : [];
+  const allLocal: TacheSerreConfig[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((c) => c.company_id !== companyId);
+  const companyLocal = allLocal.filter((c) => c.company_id === companyId);
 
-  const keptOtherScope = local.filter((c) => {
-    if (c.company_id !== companyId) return true;
-    if (dateFilter && c.date !== dateFilter) return true;
-    return upserts.has(c.id);
+  const mergedCompany = mergeCollectionWithConflictLog<TacheSerreConfig>({
+    table: 'tache_serres',
+    queueKey: OUTBOX_KEYS.POINTAGE,
+    localItems: companyLocal,
+    remoteItems: remoteConfigs.map((c) => ({
+      ...c,
+      id: c.id || `ts_${c.company_id || companyId}_${c.date}_${c.tache_id}`,
+      company_id: c.company_id || companyId,
+    })),
+    getId: (c) => c.id,
+    getCompanyId: (c) => c.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
   });
 
-  const map = new Map<string, TacheSerreConfig>(keptOtherScope.map((c) => [c.id, c]));
-  remoteConfigs.forEach((rc) => {
-    if (!rc?.id || deletes.has(rc.id) || upserts.has(rc.id)) return;
-    map.set(rc.id, {
-      id: rc.id,
-      company_id: rc.company_id || companyId,
-      date: rc.date,
-      tache_id: rc.tache_id,
-      domaine_id: rc.domaine_id,
-      serre_ids: Array.isArray(rc.serre_ids) ? rc.serre_ids : [],
-      serre_noms: Array.isArray(rc.serre_noms) ? rc.serre_noms : [],
-      updated_at: Number(rc.updated_at || Date.now()),
-    });
-  });
-
-  const next = Array.from(map.values());
-  const nextJson = JSON.stringify(next);
-  if (nextJson !== raw) {
-    safeSetItem(STORAGE_KEYS.TACHE_SERRES, nextJson);
-    notifyListeners();
-  }
+  safeSetItem(STORAGE_KEYS.TACHE_SERRES, JSON.stringify([...otherCompanies, ...mergedCompany]));
+  notifyListeners();
 }
 
-export function reconcileGazoilFromRemote(
-  companyId: string,
-  remoteConfig: any | null,
-  remoteMouvements: any[]
-): void {
+export function reconcileRecoltesFromRemote(companyId: string, remoteEntries: RecolteEntry[]): void {
+  if (!Array.isArray(remoteEntries) || remoteEntries.length === 0) return;
   initStorage();
-  let changed = false;
+  const raw = localStorage.getItem(STORAGE_KEYS.RECOLTE);
+  const allLocal: RecolteEntry[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((r) => r.company_id !== companyId);
+  const companyLocal = allLocal.filter((r) => r.company_id === companyId);
 
-  if (remoteConfig) {
-    const { upserts } = getPendingIdsForTable('gazoil_configs');
-    if (!upserts.has(companyId)) {
-      const nextCfg: Partial<GazoilConfig> = {
-        stockInitial: Number(remoteConfig.stock_initial ?? 0),
-        initialSet: Boolean(remoteConfig.initial_set),
-        seuilAlerte: Number(remoteConfig.seuil_alerte ?? 20),
-        commandeActive: remoteConfig.commande_active || null,
-        notifiedBelowThreshold: Boolean(remoteConfig.notified_below_threshold),
-      };
-      saveGazoilConfig(companyId, nextCfg, true);
-      changed = true;
-    }
-  }
+  const mergedCompany = mergeCollectionWithConflictLog<RecolteEntry>({
+    table: 'recolte_entries',
+    queueKey: OUTBOX_KEYS.RECOLTE,
+    localItems: companyLocal,
+    remoteItems: remoteEntries
+      .filter((r) => !r.company_id || r.company_id === companyId)
+      .map((r) => ({ ...r, company_id: r.company_id || companyId, sync_status: 'synced' as const })),
+    getId: (r) => r.id,
+    getCompanyId: (r) => r.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
+  });
 
-  if (Array.isArray(remoteMouvements)) {
-    const { upserts, deletes } = getPendingIdsForTable('gazoil_mouvements');
-    const raw = localStorage.getItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS);
-    const local: GazoilMouvement[] = raw ? JSON.parse(raw) : [];
-    const otherCompanies = local.filter((m) => m.company_id !== companyId);
-    const localSame = local.filter((m) => m.company_id === companyId);
+  // Conserver sync_status = 'pending' uniquement pour les entrées encore dans l'outbox RECOLTE
+  const pendingIds = new Set(
+    getOutboxOps(OUTBOX_KEYS.RECOLTE)
+      .filter((o) => o.action === 'upsert')
+      .map((o) => o.entityId)
+  );
+  const finalCompany = mergedCompany.map((r) => ({
+    ...r,
+    sync_status: pendingIds.has(r.id) ? ('pending' as const) : ('synced' as const),
+  }));
 
-    const map = new Map<string, GazoilMouvement>();
-    remoteMouvements.forEach((rm) => {
-      if (!rm?.id || deletes.has(rm.id)) return;
-      map.set(rm.id, {
-        id: rm.id,
-        company_id: rm.company_id || companyId,
-        type: rm.type,
-        date: rm.date,
-        quantite: Number(rm.quantite),
-        engin_ou_tache: rm.engin_ou_tache || undefined,
-        remarque: rm.remarque || undefined,
-        timestamp: Number(rm.timestamp || Date.now()),
-      });
-    });
+  safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify([...otherCompanies, ...finalCompany]));
+  notifyListeners();
+}
 
-    localSame.forEach((lm) => {
-      if (upserts.has(lm.id)) map.set(lm.id, lm);
-    });
+export function reconcileGazoilConfigFromRemote(companyId: string, remoteConfig: any): void {
+  if (!remoteConfig || typeof remoteConfig !== 'object') return;
+  const pending = getOutboxOps(OUTBOX_KEYS.GAZOIL).some(
+    (op) => op.table === 'gazoil_config' && op.companyId === companyId
+  );
+  if (pending) return;
 
-    const next = [...otherCompanies, ...Array.from(map.values())];
-    const nextJson = JSON.stringify(next);
-    if (nextJson !== raw) {
-      safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, nextJson);
-      changed = true;
-    }
-  }
+  const normalized: Partial<GazoilConfig> = {
+    stockInitial:
+      remoteConfig.stockInitial ?? remoteConfig.stock_initial ?? DEFAULT_GAZOIL_CONFIG.stockInitial,
+    initialSet:
+      remoteConfig.initialSet ?? remoteConfig.initial_set ?? DEFAULT_GAZOIL_CONFIG.initialSet,
+    seuilAlerte:
+      remoteConfig.seuilAlerte ?? remoteConfig.seuil_alerte ?? DEFAULT_GAZOIL_CONFIG.seuilAlerte,
+    commandeActive:
+      remoteConfig.commandeActive !== undefined
+        ? remoteConfig.commandeActive
+        : remoteConfig.commande_active ?? null,
+    notifiedBelowThreshold:
+      remoteConfig.notifiedBelowThreshold ?? remoteConfig.notified_below_threshold ?? false,
+  };
+  saveGazoilConfig(companyId, normalized, { skipQueue: true });
+}
 
-  if (changed) {
-    notifyListeners();
-  }
+export function reconcileGazoilMouvementsFromRemote(
+  companyId: string,
+  remoteMouvements: GazoilMouvement[]
+): void {
+  if (!Array.isArray(remoteMouvements) || remoteMouvements.length === 0) return;
+  initStorage();
+  const raw = localStorage.getItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS);
+  const allLocal: GazoilMouvement[] = raw ? JSON.parse(raw) : [];
+  const otherCompanies = allLocal.filter((m) => m.company_id !== companyId);
+  const companyLocal = allLocal.filter((m) => m.company_id === companyId);
+
+  const mergedCompany = mergeCollectionWithConflictLog<GazoilMouvement>({
+    table: 'gazoil_mouvements',
+    queueKey: OUTBOX_KEYS.GAZOIL,
+    localItems: companyLocal,
+    remoteItems: remoteMouvements
+      .filter((m) => !m.company_id || m.company_id === companyId)
+      .map((m) => ({ ...m, company_id: m.company_id || companyId })),
+    getId: (m) => m.id,
+    getCompanyId: (m) => m.company_id,
+    scopedCompanyId: companyId,
+    preserveLocalNotInRemote: true,
+  }).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  safeSetItem(STORAGE_KEYS.GAZOIL_MOUVEMENTS, JSON.stringify([...otherCompanies, ...mergedCompany]));
+  notifyListeners();
 }
 
 // ------------------------- SYNCHRONISATION MULTI-APPAREILS (SERVEUR / PWA) -------------------------
 
 function queuePendingSync(entries: RecolteEntry[]): void {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
-    const queue: RecolteEntry[] = raw ? JSON.parse(raw) : [];
+    migrateLegacySyncQueue();
     for (const e of entries) {
-      const idx = queue.findIndex((q) => q.id === e.id);
-      if (idx >= 0) queue[idx] = e;
-      else queue.push(e);
+      enqueueOutboxOp(OUTBOX_KEYS.RECOLTE, {
+        table: 'recolte_entries',
+        entityId: e.id,
+        action: 'upsert',
+        data: e,
+        companyId: e.company_id,
+      });
     }
-    safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify(queue));
   } catch (err) {
     console.error('Erreur queuePendingSync:', err);
   }
 }
 
-async function getClientAuthHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session?.access_token) {
-      headers['Authorization'] = `Bearer ${session.access_token}`;
-      return headers;
-    }
-  } catch {
-    // ignore
-  }
-  if (!import.meta.env.VITE_SUPABASE_URL) {
-    const user = getCurrentUser();
-    if (user?.role === 'lecteur') headers['Authorization'] = 'Bearer dev_lecteur_token';
-    else if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
-    else if (user?.role === 'caporal') headers['Authorization'] = 'Bearer dev_caporal_token';
-    else headers['Authorization'] = 'Bearer dev_admin_token';
-  }
-  return headers;
-}
-
-export async function syncRecolteWithServer(companyId: string): Promise<{
+export async function syncRecolteWithServer(
+  companyId: string,
+  options?: { accessToken?: string; baseUrl?: string; ignoreNavigatorOnline?: boolean }
+): Promise<{
   success: boolean;
   syncedCount: number;
   receivedCount: number;
   error?: string;
 }> {
-  if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.onLine) {
+  if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && !navigator.onLine) {
     return { success: false, syncedCount: 0, receivedCount: 0, error: 'Hors connexion' };
   }
 
   try {
-    const rawQueue = localStorage.getItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE);
-    const queue: RecolteEntry[] = rawQueue ? JSON.parse(rawQueue) : [];
-    const rawDelQueue = localStorage.getItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE);
-    const deleteQueue: string[] = rawDelQueue ? JSON.parse(rawDelQueue) : [];
+    migrateLegacySyncQueue();
 
-    const headers = await getClientAuthHeaders();
-    const user = getCurrentUser();
-    const isLecteur = user?.role === 'lecteur';
+    let accessToken = options?.accessToken;
+    if (!accessToken) {
+      const { data: { session } } = await supabase.auth.getSession();
+      accessToken = session?.access_token;
+    }
+    if (!accessToken) {
+      return { success: false, syncedCount: 0, receivedCount: 0, error: 'Session authentifiée requise' };
+    }
 
-    const response = await fetch('/api/recolte/sync', {
+    const allOps = getOutboxOps(OUTBOX_KEYS.RECOLTE);
+    const scopedOps = allOps.filter(
+      (op) => op.table === 'recolte_entries' && (!op.companyId || op.companyId === companyId)
+    );
+    const pendingEntries = scopedOps
+      .filter((op) => op.action === 'upsert' && op.data)
+      .map((op) => op.data as RecolteEntry);
+    const deletedIds = scopedOps
+      .filter((op) => op.action === 'delete' && op.entityId)
+      .map((op) => op.entityId);
+
+    const apiPrefix = options?.baseUrl || '';
+    const response = await fetch(`${apiPrefix}/api/recolte/sync`, {
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'x-company-id': companyId,
+      },
       body: JSON.stringify({
         companyId,
-        pendingEntries: isLecteur ? [] : queue,
-        deletedIds: isLecteur ? [] : deleteQueue,
-        lastSyncTimestamp: Date.now() - 30 * 24 * 3600 * 1000,
+        pendingEntries,
+        deletedIds,
+        lastSyncTimestamp: 0, // Récupération complète non destructive pour les changements d'appareil
       }),
     });
 
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok || !result.success) {
-      return {
-        success: false,
-        syncedCount: 0,
-        receivedCount: 0,
-        error: result.error || `Erreur serveur HTTP ${response.status}`,
-      };
+    if (!response.ok) {
+      const errText = await response.text().catch(() => 'Serveur indisponible');
+      markOutboxOpsFailed(
+        OUTBOX_KEYS.RECOLTE,
+        scopedOps.map((o) => o.opId),
+        `HTTP ${response.status}: ${errText}`
+      );
+      return { success: false, syncedCount: 0, receivedCount: 0, error: 'Serveur indisponible' };
     }
 
-    // Vider les files uniquement après confirmation serveur
-    safeSetItem(STORAGE_KEYS.RECOLTE_SYNC_QUEUE, JSON.stringify([]));
-    safeSetItem(STORAGE_KEYS.RECOLTE_DELETE_QUEUE, JSON.stringify([]));
+    const result = await response.json();
+    if (!result.success) {
+      markOutboxOpsFailed(
+        OUTBOX_KEYS.RECOLTE,
+        scopedOps.map((o) => o.opId),
+        result.error || 'Sync refusée'
+      );
+      return { success: false, syncedCount: 0, receivedCount: 0, error: result.error };
+    }
 
-    // Réconcilier : le serveur fait autorité pour companyId
-    const rawLocal = localStorage.getItem(STORAGE_KEYS.RECOLTE);
-    const localEntries: RecolteEntry[] = rawLocal ? JSON.parse(rawLocal) : [];
-    const otherCompanyEntries = localEntries.filter((e) => e.company_id && e.company_id !== companyId);
+    // Défilement atomique uniquement des opérations confirmées par opId (ne perd aucun ajout en cours de vol)
+    dequeueOutboxOpsById(
+      OUTBOX_KEYS.RECOLTE,
+      scopedOps.map((o) => o.opId)
+    );
+
     const serverEntries: RecolteEntry[] = Array.isArray(result.allEntries) ? result.allEntries : [];
-
-    const map = new Map<string, RecolteEntry>();
-    for (const serverItem of serverEntries) {
-      map.set(serverItem.id, { ...serverItem, sync_status: 'synced' });
+    if (serverEntries.length > 0) {
+      reconcileRecoltesFromRemote(companyId, serverEntries);
+    } else {
+      // Mettre simplement à jour le sync_status des entrées locales non en attente
+      const rawLocal = localStorage.getItem(STORAGE_KEYS.RECOLTE);
+      const localEntries: RecolteEntry[] = rawLocal ? JSON.parse(rawLocal) : [];
+      const stillPending = new Set(getOutboxOps(OUTBOX_KEYS.RECOLTE).map((o) => o.entityId));
+      const updatedLocal = localEntries.map((item) =>
+        item.company_id === companyId
+          ? { ...item, sync_status: stillPending.has(item.id) ? ('pending' as const) : ('synced' as const) }
+          : item
+      );
+      safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify(updatedLocal));
+      notifyListeners();
     }
-
-    const merged = [...otherCompanyEntries, ...Array.from(map.values())];
-    safeSetItem(STORAGE_KEYS.RECOLTE, JSON.stringify(merged));
-    setLastSyncAt();
-    notifyListeners();
 
     return {
       success: true,
-      syncedCount: isLecteur ? 0 : queue.length,
+      syncedCount: scopedOps.length,
       receivedCount: serverEntries.length,
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Erreur réseau';
+    const allOps = getOutboxOps(OUTBOX_KEYS.RECOLTE).filter(
+      (op) => op.table === 'recolte_entries' && (!op.companyId || op.companyId === companyId)
+    );
+    markOutboxOpsFailed(OUTBOX_KEYS.RECOLTE, allOps.map((o) => o.opId), msg);
     return { success: false, syncedCount: 0, receivedCount: 0, error: msg };
   }
 }

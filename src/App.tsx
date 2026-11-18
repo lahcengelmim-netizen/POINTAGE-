@@ -26,9 +26,10 @@ import { HeuresSupplementairesView } from './components/HeuresSupplementairesVie
 import { TachesSupplementairesView } from './components/TachesSupplementairesView';
 import { SupplementairesAdminModule } from './components/Supplementaires/SupplementairesAdminModule';
 import { ContractuellesModule } from './components/Contractuelles/ContractuellesModule';
-import { ExportRemunerationView } from './components/ExportRemunerationView';
+import { ExportPaiementView } from './components/ExportPaiementView';
 import { useUser } from './context/UserContext';
-import { HelpCircle, AlertTriangle, ShieldAlert, Eye } from 'lucide-react';
+import { syncBidirectionalAll } from './services/globalSyncService';
+import { HelpCircle, AlertTriangle, ShieldAlert, Database } from 'lucide-react';
 
 export default function App() {
   const {
@@ -94,12 +95,6 @@ export default function App() {
     saveSerre,
     deleteSerre,
     toggleSerreActif,
-    // Synchronisation multi-appareils
-    isOnline,
-    isSyncing,
-    lastSyncAt,
-    pendingSyncCount,
-    forceSyncNow,
     // Récolte
     allRecoltes,
     addRecolte,
@@ -108,10 +103,9 @@ export default function App() {
     syncRecolte,
   } = useAgriPointage();
 
-  const { user, loading, isReadOnly: contextReadOnly } = useUser();
+  const { user, loading } = useUser();
 
   const activeUser = user || currentUser;
-  const isReadOnly = contextReadOnly || activeUser.role === 'lecteur';
 
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>(() => {
     if (
@@ -128,25 +122,58 @@ export default function App() {
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
   const [adminRecolteSubMode, setAdminRecolteSubMode] = useState<'dashboard' | 'saisie'>('dashboard');
 
+  const isCaporalContractuel =
+    activeUser.role === 'caporal_contractuelles' ||
+    activeUser.module_attribue === 'contractuelles' ||
+    activeUser.username === 'tariq';
+  const isCaporal = activeUser.role === 'caporal' && !isCaporalContractuel;
+  const isAnyCaporal = isCaporal || isCaporalContractuel;
+
   // RÈGLE D'AUTORISATION STRICTE :
   // - Le caporal Contractuelles a accès UNIQUEMENT à 'contractuelles'.
   // - Le caporal Récolte a accès aux modules 'recolte', 'heures_supp', et 'taches_supp'.
-  // - Le lecteur a accès en consultation uniquement (pas de saisie terrain).
+  // - S'ils tentent d'accéder à un écran non autorisé, les rediriger vers leur écran respectif.
   useEffect(() => {
-    if (
-      activeUser.role === 'caporal_contractuelles' ||
-      activeUser.module_attribue === 'contractuelles' ||
-      activeUser.username === 'tariq'
-    ) {
+    if (isCaporalContractuel) {
       if (activeScreen !== 'contractuelles') {
         setActiveScreen('contractuelles');
       }
-    } else if (activeUser.role === 'caporal' && !['recolte', 'heures_supp', 'taches_supp'].includes(activeScreen)) {
+    } else if (isCaporal && !['recolte', 'heures_supp', 'taches_supp'].includes(activeScreen)) {
       setActiveScreen('recolte');
-    } else if (isReadOnly && adminRecolteSubMode === 'saisie') {
-      setAdminRecolteSubMode('dashboard');
     }
-  }, [activeUser.role, activeUser.module_attribue, activeUser.username, activeScreen, isReadOnly, adminRecolteSubMode]);
+  }, [isCaporalContractuel, isCaporal, activeScreen]);
+
+  // Synchronisation bidirectionnelle globale (session, reconnexion réseau, retour premier plan, intervalle)
+  // Respecte strictement le cloisonnement company_id et les permissions par rôle (Admin / Caporal / Contractuelles).
+  useEffect(() => {
+    if (!user || !currentCompany?.id) return;
+
+    const triggerGlobalSync = () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      syncBidirectionalAll({
+        companyId: currentCompany.id,
+        user: activeUser,
+        dateIso: selectedDate,
+      }).catch(() => {});
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        triggerGlobalSync();
+      }
+    };
+
+    triggerGlobalSync();
+    window.addEventListener('online', triggerGlobalSync);
+    document.addEventListener('visibilitychange', handleVisibility);
+    const intervalId = window.setInterval(triggerGlobalSync, 5 * 60 * 1000);
+
+    return () => {
+      window.removeEventListener('online', triggerGlobalSync);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.clearInterval(intervalId);
+    };
+  }, [user?.id, currentCompany?.id, activeUser.role, activeUser.module_attribue, activeUser.username, selectedDate]);
 
   // Protection d'écran d'accès obligatoire avant ouverture de l'application
   if (loading) {
@@ -181,14 +208,6 @@ export default function App() {
     return <LoginPage />;
   }
 
-  // Vérification de sécurité pour restreindre les accès selon le rôle
-  const isCaporalContractuel =
-    activeUser.role === 'caporal_contractuelles' ||
-    activeUser.module_attribue === 'contractuelles' ||
-    activeUser.username === 'tariq';
-  const isCaporal = activeUser.role === 'caporal' && !isCaporalContractuel;
-  const isAnyCaporal = isCaporal || isCaporalContractuel;
-
   return (
     <div className="min-h-screen bg-slate-200/80 text-slate-900 flex justify-center selection:bg-emerald-500 selection:text-white">
       {/* Conteneur mobile centré (émule un smartphone sur grand écran et 100% plein écran sur mobile) */}
@@ -200,28 +219,14 @@ export default function App() {
           onSwitchCompany={switchCompany}
           selectedDate={selectedDate}
           onSelectDate={setSelectedDate}
-          onOpenHeuresSupp={!isReadOnly ? () => setShowHeuresSuppModal(true) : undefined}
+          onOpenHeuresSupp={() => setShowHeuresSuppModal(true)}
           heuresSuppCount={heuresSupplementaires.length}
           currentUser={activeUser}
           onOpenLoginModal={() => setShowLoginModal(true)}
-          pendingSyncCount={pendingSyncCount}
-          lastSyncAt={lastSyncAt}
-          isSyncing={isSyncing}
-          onForceSync={() => forceSyncNow()}
         />
 
-        {/* Barre de statistiques : visible uniquement pour l'administrateur et le lecteur */}
+        {/* Barre de statistiques : visible uniquement pour l'administrateur */}
         {!isAnyCaporal && <StatsBar stats={stats} />}
-
-        {/* Bannière Lecture Seule stricte */}
-        {isReadOnly && (
-          <div className="mx-3 mt-2 px-3 py-2 bg-sky-900 text-white rounded-2xl shadow-xs flex items-center gap-2 text-[11px] font-bold border border-sky-700">
-            <Eye className="w-4 h-4 text-sky-300 shrink-0" />
-            <span>
-              Mode Lecture Seule ({activeUser.nom}) — Consultation uniquement, aucune modification autorisée.
-            </span>
-          </div>
-        )}
 
         {/* Alerte Quota Stockage si la mémoire locale du navigateur est saturée */}
         {storageQuotaError && (
@@ -250,6 +255,9 @@ export default function App() {
         <main className="flex-1 p-3 overflow-y-auto">
           {/* ===================== ÉCRAN RÉCOLTE ===================== */}
           {activeScreen === 'recolte' && (
+            isCaporalContractuel ? (
+              <AccessDeniedScreen isContractuel onGoToRecolte={() => setActiveScreen('contractuelles')} />
+            ) : (
             <>
               {isCaporal ? (
                 // Vue Caporal : Saisie rapide et synthèse de ses caisses
@@ -267,36 +275,34 @@ export default function App() {
                   onSync={syncRecolte}
                 />
               ) : (
-                // Vue Administrateur / Lecteur : Supervision / Dashboard (saisie terrain masquée pour Lecteur)
+                // Vue Administrateur : Choix entre Supervision / Dashboard et Saisie de terrain
                 <div className="space-y-3">
-                  {!isReadOnly && (
-                    <div className="bg-white p-1 rounded-2xl border border-slate-200 flex text-xs font-bold shadow-2xs">
-                      <button
-                        type="button"
-                        onClick={() => setAdminRecolteSubMode('dashboard')}
-                        className={`flex-1 py-1.5 rounded-xl transition ${
-                          adminRecolteSubMode === 'dashboard'
-                            ? 'bg-purple-700 text-white shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        📊 Tableau de Bord Récolte
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAdminRecolteSubMode('saisie')}
-                        className={`flex-1 py-1.5 rounded-xl transition ${
-                          adminRecolteSubMode === 'saisie'
-                            ? 'bg-emerald-600 text-white shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        ✍️ Saisie directe (Terrain)
-                      </button>
-                    </div>
-                  )}
+                  <div className="bg-white p-1 rounded-2xl border border-slate-200 flex text-xs font-bold shadow-2xs">
+                    <button
+                      type="button"
+                      onClick={() => setAdminRecolteSubMode('dashboard')}
+                      className={`flex-1 py-1.5 rounded-xl transition ${
+                        adminRecolteSubMode === 'dashboard'
+                          ? 'bg-purple-700 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      📊 Tableau de Bord Récolte
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdminRecolteSubMode('saisie')}
+                      className={`flex-1 py-1.5 rounded-xl transition ${
+                        adminRecolteSubMode === 'saisie'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      ✍️ Saisie directe (Terrain)
+                    </button>
+                  </div>
 
-                  {isReadOnly || adminRecolteSubMode === 'dashboard' ? (
+                  {adminRecolteSubMode === 'dashboard' ? (
                     <RecolteAdminDashboard
                       recoltes={allRecoltes}
                       serres={serres}
@@ -309,7 +315,6 @@ export default function App() {
                       onDeleteSerre={deleteSerre}
                       onToggleSerreActif={toggleSerreActif}
                       onDeleteRecolte={deleteRecolte}
-                      isReadOnly={isReadOnly}
                     />
                   ) : (
                     <RecolteCaporal
@@ -329,6 +334,7 @@ export default function App() {
                 </div>
               )}
             </>
+            )
           )}
 
           {/* ===================== ÉCRAN HEURES SUPPLÉMENTAIRES ===================== */}
@@ -336,6 +342,7 @@ export default function App() {
             <HeuresSupplementairesView
               currentUser={activeUser}
               allOuvriers={allOuvriers}
+              taches={taches}
               domaines={domaines}
               serres={serres}
               selectedDate={selectedDate}
@@ -358,8 +365,8 @@ export default function App() {
 
           {/* ===================== ÉCRANS ADMINISTRATIFS (RÉSERVÉS ADMIN) ===================== */}
           {activeScreen === 'pointage' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <PointageMatin
                 activeOuvriers={activeOuvriers}
@@ -378,7 +385,7 @@ export default function App() {
                 onUpdateTask={updateTask}
                 onRemovePointage={removePointage}
                 selectedDate={selectedDate}
-                onOpenHeuresSupp={!isCaporal && !isReadOnly ? () => setShowHeuresSuppModal(true) : undefined}
+                onOpenHeuresSupp={!isCaporal ? () => setShowHeuresSuppModal(true) : undefined}
                 heuresSuppCount={!isCaporal ? heuresSupplementaires.length : 0}
                 gazoilStatus={gazoilStatus}
                 onNavigateGazoil={() => setActiveScreen('gazoil')}
@@ -389,8 +396,8 @@ export default function App() {
           )}
 
           {activeScreen === 'taches' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <EcranTaches
                 taches={taches}
@@ -411,8 +418,8 @@ export default function App() {
           )}
 
           {activeScreen === 'absences' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <AbsencesView
                 absents={absents}
@@ -447,8 +454,8 @@ export default function App() {
 
           {/* ===================== ÉCRAN STOCK PRO (RÉSERVÉ ADMIN) ===================== */}
           {activeScreen === 'stock' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <StockProDashboard
                 currentUser={activeUser}
@@ -459,8 +466,8 @@ export default function App() {
 
           {/* ===================== ÉCRAN SUPPLÉMENTAIRES (RÉSERVÉ ADMIN) ===================== */}
           {activeScreen === 'supplementaires' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <SupplementairesAdminModule
                 currentUser={activeUser}
@@ -474,12 +481,15 @@ export default function App() {
             )
           )}
 
-          {/* ===================== ÉCRAN TABLEAU DE RÉMUNÉRATION (RÉSERVÉ ADMIN) ===================== */}
-          {activeScreen === 'remuneration' && (
+          {/* ===================== ÉCRAN EXPORT PAIEMENT EXCEL (RÉSERVÉ ADMIN) ===================== */}
+          {activeScreen === 'export_paiement' && (
             isAnyCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+              <AccessDeniedScreen
+                isContractuel={isCaporalContractuel}
+                onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')}
+              />
             ) : (
-              <ExportRemunerationView
+              <ExportPaiementView
                 currentUser={activeUser}
                 currentCompany={currentCompany}
                 selectedDate={selectedDate}
@@ -496,8 +506,8 @@ export default function App() {
           )}
 
           {activeScreen === 'gazoil' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <SuiviGazoil
                 companyName={currentCompany.nom}
@@ -514,8 +524,8 @@ export default function App() {
           )}
 
           {activeScreen === 'recap' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <RecapWhatsApp
                 recapText={recapWhatsAppText}
@@ -530,8 +540,8 @@ export default function App() {
           )}
 
           {activeScreen === 'gestion' && (
-            isCaporal ? (
-              <AccessDeniedScreen onGoToRecolte={() => setActiveScreen('recolte')} />
+            isAnyCaporal ? (
+              <AccessDeniedScreen isContractuel={isCaporalContractuel} onGoToRecolte={() => setActiveScreen(isCaporalContractuel ? 'contractuelles' : 'recolte')} />
             ) : (
               <GestionPatron
                 currentCompany={currentCompany}
@@ -550,6 +560,18 @@ export default function App() {
               />
             )
           )}
+
+          {/* Accès direct sécurisé à l'outil de sauvetage intégral */}
+          <div className="mt-4 pt-3 border-t border-slate-200/80 pb-2">
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent('lahcen:open-recovery'))}
+              className="w-full py-2 px-3 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-950 font-black text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition cursor-pointer"
+            >
+              <Database className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+              <span>RÉCUPÉRATION DES DONNÉES — MODE SÉCURISÉ</span>
+            </button>
+          </div>
         </main>
 
         {/* Bouton Flottant d'Aide & Guide de test (pour Administrateur) */}
@@ -564,8 +586,8 @@ export default function App() {
           </button>
         )}
 
-        {/* Modale Pointage des Heures Supplémentaires (jamais en lecture seule) */}
-        {!isAnyCaporal && !isReadOnly && (
+        {/* Modale Pointage des Heures Supplémentaires */}
+        {!isAnyCaporal && (
           <HeuresSupplementairesModal
             isOpen={showHeuresSuppModal}
             onClose={() => setShowHeuresSuppModal(false)}
@@ -602,8 +624,6 @@ export default function App() {
               setActiveScreen('contractuelles');
             } else if (user.role === 'caporal') {
               setActiveScreen('recolte');
-            } else {
-              setActiveScreen('pointage');
             }
           }}
           onLogout={logout}
@@ -615,7 +635,8 @@ export default function App() {
           onSelectScreen={setActiveScreen}
           absentsCount={stats.restants}
           gazoilAlert={gazoilStatus.isStockBas}
-          currentUserRole={activeUser.role}
+          currentUserRole={isCaporalContractuel ? 'caporal_contractuelles' : activeUser.role}
+          currentUserModule={activeUser.module_attribue}
           onOpenAccountModal={() => setShowLoginModal(true)}
         />
       </div>
@@ -626,7 +647,13 @@ export default function App() {
 /**
  * Écran de blocage d'autorisation si un Caporal tente d'accéder à un écran administratif
  */
-function AccessDeniedScreen({ onGoToRecolte }: { onGoToRecolte: () => void }) {
+function AccessDeniedScreen({
+  onGoToRecolte,
+  isContractuel = false,
+}: {
+  onGoToRecolte: () => void;
+  isContractuel?: boolean;
+}) {
   return (
     <div className="bg-white rounded-3xl p-6 text-center border-2 border-amber-300 shadow-md space-y-3 animate-in fade-in">
       <div className="w-12 h-12 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto">
@@ -634,15 +661,24 @@ function AccessDeniedScreen({ onGoToRecolte }: { onGoToRecolte: () => void }) {
       </div>
       <h3 className="font-black text-slate-900 text-sm">Accès Réservé à l'Administrateur</h3>
       <p className="text-xs text-slate-600 leading-relaxed">
-        Votre compte <strong>Caporal</strong> a un accès strictement dédié à la gestion de la récolte.
-        Les paramètres et le pointage général sont administrés par le patron.
+        {isContractuel ? (
+          <>
+            Votre compte <strong>Caporal Contractuelles</strong> a un accès strictement dédié au module Contractuelles.
+            Les autres modules sont administrés par le patron.
+          </>
+        ) : (
+          <>
+            Votre compte <strong>Caporal</strong> a un accès strictement dédié à la gestion de la récolte.
+            Les paramètres et le pointage général sont administrés par le patron.
+          </>
+        )}
       </p>
       <button
         type="button"
         onClick={onGoToRecolte}
         className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-2.5 rounded-xl text-xs transition shadow-xs"
       >
-        Aller au module Récolte
+        {isContractuel ? 'Aller au module Contractuelles' : 'Aller au module Récolte'}
       </button>
     </div>
   );

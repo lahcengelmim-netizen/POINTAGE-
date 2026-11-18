@@ -2,7 +2,7 @@
  * Hook central pour gérer l'état réactif de l'application AgriPointage
  */
 
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Company,
   Ouvrier,
@@ -22,16 +22,13 @@ import {
 } from '../types';
 import * as storage from '../services/storage';
 import {
-  syncQueueToSupabase,
   syncPointageQueueToSupabase,
-  pullTachesFromSupabase,
-  pullAllCompanyDataFromSupabase,
-  subscribeCompanyRealtime,
+  syncReferentielsQueueToSupabase,
+  syncGazoilQueueToSupabase,
+  syncQueueToSupabase,
+  pullAllCoreModulesFromSupabase,
 } from '../services/supabaseSync';
-import {
-  syncPendingContractuelPointages,
-  getPendingContractuelPointagesCount,
-} from '../services/contractuelService';
+import { getPermittedSyncScope } from '../services/globalSyncService';
 import { generateWhatsAppRecap } from '../utils/whatsappFormatter';
 import {
   calculerPointageFinancierMatin,
@@ -43,7 +40,6 @@ import {
   updateHeureSupplementaireServer,
   deleteHeureSupplementaireServer,
 } from '../services/heuresSupplementairesService';
-import { fetchTachesSupplementairesServer } from '../services/tachesSupplementairesService';
 
 export function getTodayIsoDate(): string {
   const now = new Date();
@@ -57,112 +53,53 @@ export function useAgriPointage() {
   const [selectedDate, setSelectedDate] = useState<string>(getTodayIsoDate);
   const [activeCompanyId, setActiveCompanyIdState] = useState<string>(storage.getActiveCompanyId);
   const [updateTick, setUpdateTick] = useState(0);
-  const [isOnline, setIsOnline] = useState<boolean>(() =>
-    typeof navigator !== 'undefined' ? navigator.onLine : true
-  );
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [lastSyncAt, setLastSyncAt] = useState<string | null>(() => storage.getLastSyncAt());
-  const syncInFlightRef = useRef<boolean>(false);
-
-  const isReadOnlyUser = useCallback(() => {
-    return storage.getCurrentUser()?.role === 'lecteur';
-  }, []);
 
   // S'abonner aux changements de stockage (persistance localStorage + inter-composants)
   useEffect(() => {
     storage.initStorage();
     const unsubscribe = storage.subscribeToStorage(() => {
       setActiveCompanyIdState(storage.getActiveCompanyId());
-      setLastSyncAt(storage.getLastSyncAt());
       setUpdateTick((t) => t + 1);
     });
     return unsubscribe;
   }, []);
 
-  const syncAll = useCallback(async () => {
-    if (syncInFlightRef.current) return;
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      setIsOnline(false);
-      return;
-    }
-    syncInFlightRef.current = true;
-    setIsSyncing(true);
-    try {
-      setIsOnline(true);
-      await syncQueueToSupabase().catch(() => {});
-      await Promise.allSettled([
-        storage.syncRecolteWithServer(activeCompanyId),
-        syncPendingContractuelPointages(),
-        pullAllCompanyDataFromSupabase(activeCompanyId, selectedDate),
-        pullTachesFromSupabase(activeCompanyId),
-        syncAndFetchHeuresSupplementairesServer({ date: selectedDate }),
-        fetchTachesSupplementairesServer({ date: selectedDate }),
-      ]);
-      setLastSyncAt(storage.getLastSyncAt());
-      setUpdateTick((t) => t + 1);
-    } finally {
-      syncInFlightRef.current = false;
-      setIsSyncing(false);
-    }
-  }, [activeCompanyId, selectedDate]);
-
-  // Synchronisation automatique multi-appareils :
-  // - Chargement / changement date / société
-  // - Retour réseau (online), focus fenêtre, onglet visible (visibilitychange)
-  // - Polling léger 20s uniquement sur onglet visible
-  // - Abonnement Supabase Realtime (postgres_changes)
+  // Synchronisation automatique de la file pointage/affectations et des référentiels autorisés
   useEffect(() => {
+    const syncAll = () => {
+      const user = storage.getCurrentUser();
+      if (!user || user.id === 'usr_guest' || !user.company_id) return;
+      const scope = getPermittedSyncScope(user);
+      const allowedPushTables = new Set<string>();
+      if (scope.canSyncPointage) {
+        allowedPushTables.add('pointages');
+        allowedPushTables.add('affectations');
+        allowedPushTables.add('tache_serres');
+      }
+      if (scope.canSyncReferentiels) {
+        allowedPushTables.add('companies');
+        allowedPushTables.add('domaines');
+        allowedPushTables.add('serres');
+        allowedPushTables.add('ouvriers');
+        allowedPushTables.add('taches');
+      }
+      if (scope.canSyncGazoil) {
+        allowedPushTables.add('gazoil_config');
+        allowedPushTables.add('gazoil_mouvements');
+      }
+      if (allowedPushTables.size > 0) {
+        syncQueueToSupabase({ allowedTables: allowedPushTables }).catch(() => {});
+      }
+      if (scope.allowedCoreTables.size > 0) {
+        pullAllCoreModulesFromSupabase(activeCompanyId, {
+          allowedTables: scope.allowedCoreTables,
+        }).catch(() => {});
+      }
+    };
     syncAll();
-
-    const handleOnline = () => {
-      setIsOnline(true);
-      syncAll();
-    };
-    const handleOffline = () => {
-      setIsOnline(false);
-    };
-    const handleFocus = () => {
-      syncAll();
-    };
-    const handleVisibility = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        syncAll();
-      }
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', handleVisibility);
-
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    const unsubscribeRealtime = subscribeCompanyRealtime(activeCompanyId, () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        syncAll();
-      }, 400);
-    });
-
-    const intervalId = setInterval(() => {
-      if (
-        typeof document !== 'undefined' &&
-        document.visibilityState === 'visible' &&
-        (typeof navigator === 'undefined' || navigator.onLine)
-      ) {
-        syncAll();
-      }
-    }, 20000);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      window.removeEventListener('focus', handleFocus);
-      document.removeEventListener('visibilitychange', handleVisibility);
-      unsubscribeRealtime();
-      if (debounceTimer) clearTimeout(debounceTimer);
-      clearInterval(intervalId);
-    };
-  }, [activeCompanyId, selectedDate, syncAll]);
+    window.addEventListener('online', syncAll);
+    return () => window.removeEventListener('online', syncAll);
+  }, [activeCompanyId]);
 
   // Liste des sociétés
   const companies = useMemo(() => {
@@ -226,7 +163,10 @@ export function useAgriPointage() {
     return storage.getAllHeuresSupplementaires(activeCompanyId);
   }, [activeCompanyId, updateTick]);
 
-  // Les heures supplémentaires sont synchronisées via syncAll() ci-dessus
+  // Synchronisation des heures supplémentaires depuis le serveur au chargement et changement de date
+  useEffect(() => {
+    syncAndFetchHeuresSupplementairesServer({ date: selectedDate }).catch(() => {});
+  }, [selectedDate, activeCompanyId]);
 
   // Affectations de tâches pour la société et la date sélectionnée
   const affectations = useMemo(() => {
@@ -393,9 +333,6 @@ export function useAgriPointage() {
       serreId?: string | null,
       serreNom?: string | null
     ): { success: boolean; message?: string; pointage?: Pointage } => {
-      if (isReadOnlyUser()) {
-        return { success: false, message: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const res = storage.addPointage(
         activeCompanyId,
         ouvrierId,
@@ -411,7 +348,7 @@ export function useAgriPointage() {
       }
       return { success: false, message: res.error || 'Erreur lors de l\'enregistrement.' };
     },
-    [activeCompanyId, selectedDate, defaultDomaineId, isReadOnlyUser]
+    [activeCompanyId, selectedDate, defaultDomaineId]
   );
 
   // Affectation des ouvriers et serres multiples aux tâches
@@ -421,23 +358,17 @@ export function useAgriPointage() {
       ouvrierIds: string[],
       options?: { domaineId?: string; serreIds?: string[]; serreNoms?: string[] }
     ) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const res = storage.setTaskWorkers(activeCompanyId, selectedDate, tacheId, ouvrierIds, options);
       if (res.success) {
-        syncQueueToSupabase().catch(() => {});
+        syncPointageQueueToSupabase().catch(() => {});
       }
       return res;
     },
-    [activeCompanyId, selectedDate, isReadOnlyUser]
+    [activeCompanyId, selectedDate]
   );
 
   const saveTaskSerres = useCallback(
     (tacheId: string, domaineId: string, serreIds: string[], serreNoms: string[]) => {
-      if (isReadOnlyUser()) {
-        return { success: false, updatedCount: 0 };
-      }
       const res = storage.updateTacheAffectationsSerres(
         activeCompanyId,
         selectedDate,
@@ -447,20 +378,19 @@ export function useAgriPointage() {
         serreNoms
       );
       if (res.success) {
-        syncQueueToSupabase().catch(() => {});
+        syncPointageQueueToSupabase().catch(() => {});
       }
       return res;
     },
-    [activeCompanyId, selectedDate, isReadOnlyUser]
+    [activeCompanyId, selectedDate]
   );
 
   const removeWorkerFromTask = useCallback(
     (ouvrierId: string, tacheId: string) => {
-      if (isReadOnlyUser()) return;
       storage.removeWorkerFromTask(activeCompanyId, selectedDate, ouvrierId, tacheId);
       syncPointageQueueToSupabase().catch(() => {});
     },
-    [activeCompanyId, selectedDate, isReadOnlyUser]
+    [activeCompanyId, selectedDate]
   );
 
   const assignWorkerToTask = useCallback(
@@ -471,9 +401,6 @@ export function useAgriPointage() {
       serreId?: string | null,
       serreNom?: string | null
     ) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const res = storage.assignWorkerToTask(
         activeCompanyId,
         selectedDate,
@@ -488,7 +415,7 @@ export function useAgriPointage() {
       }
       return res;
     },
-    [activeCompanyId, selectedDate, isReadOnlyUser]
+    [activeCompanyId, selectedDate]
   );
 
   const updateAffectation = useCallback(
@@ -496,23 +423,19 @@ export function useAgriPointage() {
       affectationId: string,
       updates: { tacheId?: string; domaineId?: string; serreId?: string | null; serreNom?: string | null }
     ) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const res = storage.updateAffectationTache(affectationId, updates);
       if (res.success) {
         syncPointageQueueToSupabase().catch(() => {});
       }
       return res;
     },
-    [isReadOnlyUser]
+    []
   );
 
   const removeAffectation = useCallback((affectationId: string) => {
-    if (isReadOnlyUser()) return;
     storage.removeAffectationById(affectationId);
     syncPointageQueueToSupabase().catch(() => {});
-  }, [isReadOnlyUser]);
+  }, []);
 
   // Sauvegarde et nettoyage complet
   const getLastBackupDate = useCallback(() => {
@@ -524,81 +447,69 @@ export function useAgriPointage() {
   }, []);
 
   const clearAllDataPermanently = useCallback(() => {
-    if (isReadOnlyUser()) return;
     storage.clearAllDataPermanently();
-  }, [isReadOnlyUser]);
+  }, []);
 
   // Modifier un pointage existant (tâche et/ou domaine)
   const updatePointage = useCallback(
     (pointageId: string, updates: { tacheId?: string | null; domaineId?: string }) => {
-      if (isReadOnlyUser()) return;
       storage.updatePointage(pointageId, {
         tache_id: updates.tacheId,
         domaine_id: updates.domaineId,
       });
       syncPointageQueueToSupabase().catch(() => {});
     },
-    [isReadOnlyUser]
+    []
   );
 
   // Modifier la tâche d'un pointage existant (rétro-compatibilité)
   const updateTask = useCallback((pointageId: string, tacheId: string | null) => {
-    if (isReadOnlyUser()) return;
     storage.updatePointageTache(pointageId, tacheId);
     syncPointageQueueToSupabase().catch(() => {});
-  }, [isReadOnlyUser]);
+  }, []);
 
   // Gestion des domaines
   const saveDomaine = useCallback((dom: { id?: string; nom: string; ordre?: number }) => {
-    if (isReadOnlyUser()) return null;
     const res = storage.saveDomaine(dom);
-    syncQueueToSupabase().catch(() => {});
+    if (res.success) syncReferentielsQueueToSupabase().catch(() => {});
     return res;
-  }, [isReadOnlyUser]);
+  }, []);
 
   const deleteDomaine = useCallback((id: string) => {
-    if (isReadOnlyUser()) {
-      return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-    }
     const res = storage.deleteDomaine(id);
-    if (res.success) syncQueueToSupabase().catch(() => {});
+    if (res.success) syncReferentielsQueueToSupabase().catch(() => {});
     return res;
-  }, [isReadOnlyUser]);
+  }, []);
 
   const updateDomainesOrder = useCallback((domList: Domaine[]) => {
-    if (isReadOnlyUser()) return;
     storage.updateDomainesOrder(domList);
-    syncQueueToSupabase().catch(() => {});
-  }, [isReadOnlyUser]);
+    syncReferentielsQueueToSupabase().catch(() => {});
+  }, []);
 
   const setDefaultDomaineId = useCallback((id: string) => {
-    if (isReadOnlyUser()) return;
     storage.setDefaultDomaineId(id);
-  }, [isReadOnlyUser]);
+  }, []);
 
   // Annuler / supprimer un pointage (en cas d'erreur de frappe)
   const removePointage = useCallback((pointageId: string) => {
-    if (isReadOnlyUser()) return;
     storage.deletePointage(pointageId);
     syncPointageQueueToSupabase().catch(() => {});
-  }, [isReadOnlyUser]);
+  }, []);
 
   // Passer un ouvrier en Absent (retire ses affectations de tâches du jour)
   const passerEnAbsent = useCallback(
     (ouvrierId: string, date?: string) => {
-      if (isReadOnlyUser()) return { success: false, tasksRemoved: 0 };
       const targetDate = date || selectedDate;
       const res = storage.passerPointageEnAbsent(activeCompanyId, ouvrierId, targetDate);
       if (res.success) syncPointageQueueToSupabase().catch(() => {});
       return res;
     },
-    [activeCompanyId, selectedDate, isReadOnlyUser]
+    [activeCompanyId, selectedDate]
   );
 
   // Passer un ouvrier en Présent (sans tâche, avec domaine du jour)
   const passerEnPresent = useCallback(
     (ouvrierId: string, date?: string, domaineId?: string) => {
-      if (isReadOnlyUser()) return { success: false };
       const targetDate = date || selectedDate;
       const res = storage.passerPointageEnPresent(
         activeCompanyId,
@@ -609,17 +520,16 @@ export function useAgriPointage() {
       if (res.success) syncPointageQueueToSupabase().catch(() => {});
       return res;
     },
-    [activeCompanyId, selectedDate, defaultDomaineId, isReadOnlyUser]
+    [activeCompanyId, selectedDate, defaultDomaineId]
   );
 
   // Changer de domaine pour un pointage
   const changerDomaine = useCallback(
     (pointageId: string, newDomaineId: string) => {
-      if (isReadOnlyUser()) return;
       storage.updatePointageDomaine(pointageId, newDomaineId);
       syncPointageQueueToSupabase().catch(() => {});
     },
-    [isReadOnlyUser]
+    []
   );
 
   // Nombre de tâches affectées à un ouvrier pour une date
@@ -677,9 +587,6 @@ export function useAgriPointage() {
         updated_by_nom?: string | null;
       }
     ): Promise<{ success: boolean; message?: string; item?: HeureSupplementaire; isUpdated?: boolean }> => {
-      if (isReadOnlyUser()) {
-        return { success: false, message: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const targetDate = data.date || selectedDate;
       const ouvrier = activeOuvriers.find((o) => o.id === ouvrierId) || allOuvriers.find((o) => o.id === ouvrierId);
 
@@ -718,6 +625,7 @@ export function useAgriPointage() {
         const sRes = await createHeureSupplementaireServer({
           ouvrier_id: ouvrierId,
           numero_ouvrier: ouvrier.numero,
+          nom_ouvrier: ouvrier.nom,
           date: targetDate,
           type: data.type,
           tache_id: data.tache_id,
@@ -734,6 +642,7 @@ export function useAgriPointage() {
           return { success: false, message: sRes.error || 'Erreur lors de l\'enregistrement sur le serveur.' };
         }
 
+        const itemToSave = sRes.item || data;
         const localRes = storage.saveHeureSupplementaire(activeCompanyId, ouvrierId, targetDate, {
           ...data,
           id: sRes.item?.id,
@@ -747,7 +656,7 @@ export function useAgriPointage() {
         };
       }
     },
-    [activeCompanyId, selectedDate, activeOuvriers, allOuvriers, isReadOnlyUser]
+    [activeCompanyId, selectedDate, activeOuvriers, allOuvriers]
   );
 
   // Enregistrer une entrée en heures supplémentaires (rétro-compatibilité)
@@ -766,16 +675,13 @@ export function useAgriPointage() {
 
   // Supprimer une entrée en heures supplémentaires
   const removeHeureSupp = useCallback(async (id: string): Promise<{ success: boolean; message?: string }> => {
-    if (isReadOnlyUser()) {
-      return { success: false, message: 'Compte Lecture Seule : suppression non autorisée.' };
-    }
     const sRes = await deleteHeureSupplementaireServer(id);
     if (!sRes.success) {
       return { success: false, message: sRes.error || 'Erreur lors de la suppression sur le serveur.' };
     }
     storage.deleteHeureSupplementaire(id);
     return { success: true, message: 'Opération supprimée avec succès.' };
-  }, [isReadOnlyUser]);
+  }, []);
 
   // Changer de société
   const switchCompany = useCallback((companyId: string) => {
@@ -801,22 +707,20 @@ export function useAgriPointage() {
 
   const setStockInitialGazoil = useCallback(
     (stockInitial: number) => {
-      if (isReadOnlyUser()) return storage.getGazoilConfig(activeCompanyId);
       const res = storage.setStockInitialGazoil(activeCompanyId, stockInitial);
-      syncQueueToSupabase().catch(() => {});
+      syncGazoilQueueToSupabase().catch(() => {});
       return res;
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const setSeuilAlerteGazoil = useCallback(
     (seuil: number) => {
-      if (isReadOnlyUser()) return storage.getGazoilConfig(activeCompanyId);
       const res = storage.setSeuilAlerteGazoil(activeCompanyId, seuil);
-      syncQueueToSupabase().catch(() => {});
+      syncGazoilQueueToSupabase().catch(() => {});
       return res;
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const addGazoilMouvement = useCallback(
@@ -827,39 +731,33 @@ export function useAgriPointage() {
       engin_ou_tache?: string;
       remarque?: string;
     }) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const res = storage.addGazoilMouvement(activeCompanyId, mvt);
-      if (res.success) syncQueueToSupabase().catch(() => {});
+      if (res.success) syncGazoilQueueToSupabase().catch(() => {});
       return res;
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const deleteGazoilMouvement = useCallback(
     (id: string) => {
-      if (isReadOnlyUser()) return;
       storage.deleteGazoilMouvement(activeCompanyId, id);
-      syncQueueToSupabase().catch(() => {});
+      syncGazoilQueueToSupabase().catch(() => {});
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const lancerCommandeGazoil = useCallback(
     (quantite: number, dateStr: string, tel?: string) => {
-      if (isReadOnlyUser()) return;
       storage.lancerCommandeGazoil(activeCompanyId, quantite, dateStr, tel);
-      syncQueueToSupabase().catch(() => {});
+      syncGazoilQueueToSupabase().catch(() => {});
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const cloturerCommandeGazoil = useCallback(() => {
-    if (isReadOnlyUser()) return;
     storage.cloturerCommandeGazoil(activeCompanyId);
-    syncQueueToSupabase().catch(() => {});
-  }, [activeCompanyId, isReadOnlyUser]);
+    syncGazoilQueueToSupabase().catch(() => {});
+  }, [activeCompanyId]);
 
   // Multi-comptes & Utilisateur connecté
   const currentUser = useMemo(() => {
@@ -888,30 +786,23 @@ export function useAgriPointage() {
 
   const saveSerre = useCallback(
     (data: { id?: string; code: string; nom: string; actif?: boolean; domaine_id?: string | null }) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       const res = storage.saveSerre(activeCompanyId, data);
-      if (res.success) syncQueueToSupabase().catch(() => {});
+      if (res.success) syncReferentielsQueueToSupabase().catch(() => {});
       return res;
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const deleteSerre = useCallback((id: string) => {
-    if (isReadOnlyUser()) {
-      return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-    }
     const res = storage.deleteSerre(id);
-    if (res.success) syncQueueToSupabase().catch(() => {});
+    if (res.success) syncReferentielsQueueToSupabase().catch(() => {});
     return res;
-  }, [isReadOnlyUser]);
+  }, []);
 
   const toggleSerreActif = useCallback((id: string) => {
-    if (isReadOnlyUser()) return;
     storage.toggleSerreActif(id);
-    syncQueueToSupabase().catch(() => {});
-  }, [isReadOnlyUser]);
+    syncReferentielsQueueToSupabase().catch(() => {});
+  }, []);
 
   // Récolte (Harvest)
   const allRecoltes = useMemo(() => {
@@ -933,12 +824,9 @@ export function useAgriPointage() {
       }>,
       author: { id: string; nom: string }
     ) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : saisie de récolte non autorisée.', count: 0, added: [] };
-      }
       return storage.addRecolteEntries(activeCompanyId, entries, author);
     },
-    [activeCompanyId, isReadOnlyUser]
+    [activeCompanyId]
   );
 
   const updateRecolte = useCallback(
@@ -947,29 +835,18 @@ export function useAgriPointage() {
       partial: { caisses?: number; notes?: string; date?: string; serre_id?: string; serre_nom?: string },
       updatedBy: { id: string; nom: string }
     ) => {
-      if (isReadOnlyUser()) {
-        return { success: false, error: 'Compte Lecture Seule : modification non autorisée.' };
-      }
       return storage.updateRecolteEntry(id, partial, updatedBy);
     },
-    [isReadOnlyUser]
+    []
   );
 
   const deleteRecolte = useCallback((id: string) => {
-    if (isReadOnlyUser()) {
-      return { success: false, error: 'Compte Lecture Seule : suppression non autorisée.' };
-    }
     return storage.deleteRecolteEntry(id);
-  }, [isReadOnlyUser]);
+  }, []);
 
   const syncRecolte = useCallback(async () => {
     return await storage.syncRecolteWithServer(activeCompanyId);
   }, [activeCompanyId]);
-
-  const pendingSyncCount = useMemo(() => {
-    void updateTick;
-    return storage.getPendingSyncCount() + getPendingContractuelPointagesCount();
-  }, [updateTick]);
 
   return {
     selectedDate,
@@ -1033,12 +910,6 @@ export function useAgriPointage() {
     // Stockage & Quota
     storageQuotaError: storage.getStorageQuotaError(),
     clearStorageQuotaError: storage.clearStorageQuotaError,
-    // État synchronisation multi-appareils
-    isOnline,
-    isSyncing,
-    lastSyncAt,
-    pendingSyncCount,
-    forceSyncNow: syncAll,
     // Multi-comptes
     currentUser,
     users,

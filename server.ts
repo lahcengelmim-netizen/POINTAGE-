@@ -7,86 +7,42 @@
  * - Validation stricte des rôles et des données de récolte
  */
 
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
-import {
-  appendHistorique,
-  buildHistoriqueEntry,
-  computeWorkDurationHours,
-  getOfficialPointageMontant,
-  isTarifModifie,
-  normalizeStatutValidation,
-  roundAmount,
-} from './src/utils/contractuelWorkflow';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Strict : ne jamais utiliser la clé anon comme service role
-const isSupabaseConfigured = Boolean(supabaseUrl && (supabaseAnonKey || serviceRoleKey));
-
-function isDevTokenBypassAllowed(): boolean {
-  return !isSupabaseConfigured && process.env.NODE_ENV !== 'production';
-}
-
-type AppUserRole = 'admin' | 'caporal' | 'caporal_contractuelles' | 'lecteur';
-
-function resolveAuthRole(
-  profileRole?: string | null,
-  email?: string | null,
-  username?: string | null,
-  userMetadata?: any
-): AppUserRole {
-  const emailLower = (email || '').toLowerCase();
-  const usernameLower = (username || '').toLowerCase();
-  if (
-    profileRole === 'lecteur' ||
-    userMetadata?.role === 'lecteur' ||
-    emailLower === 'mahdi@lecture.com' ||
-    emailLower.endsWith('@lecture.com') ||
-    usernameLower === 'mahdi'
-  ) {
-    return 'lecteur';
-  }
-  if (profileRole === 'admin' || emailLower === 'lahcengelmim@gmail.com' || emailLower.startsWith('admin')) {
-    return 'admin';
-  }
-  if (
-    profileRole === 'caporal_contractuelles' ||
-    userMetadata?.module_attribue === 'contractuelles' ||
-    emailLower === 'tariq@caporal.com' ||
-    usernameLower === 'tariq'
-  ) {
-    return 'caporal_contractuelles';
-  }
-  return 'caporal';
-}
-
-function requireWritePermission(role: string | undefined, res: Response): boolean {
-  if (role === 'lecteur') {
-    res.status(403).json({
-      success: false,
-      error: 'Action interdite : compte en lecture seule (lecteur).',
-    });
+const cleanEnv = (v?: string) => (v || '').trim().replace(/^["']|["']$/g, '').trim();
+const isValidHttpUrl = (url: string): boolean => {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname);
+  } catch {
     return false;
   }
-  return true;
-}
+};
 
-// Instance admin réservée aux opérations serveur privilégiées (si la clé secrète est configurée dans Cloud Run)
+const rawSupabaseUrl = cleanEnv(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL);
+const supabaseUrl = isValidHttpUrl(rawSupabaseUrl) ? rawSupabaseUrl : '';
+const supabaseAnonKey = cleanEnv(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY);
+const serviceRoleKey = cleanEnv(process.env.SUPABASE_SERVICE_ROLE_KEY); // Strict : ne jamais utiliser la clé anon comme service role
+const isSupabaseConfiguredServer = Boolean(supabaseUrl && (supabaseAnonKey || serviceRoleKey));
+
+// Instance admin réservée aux opérations serveur privilégiées (création utilisateurs Auth, etc.)
 const supabaseAdmin = supabaseUrl && serviceRoleKey ? createClient(supabaseUrl, serviceRoleKey) : null;
 
 // Création d'un client Supabase par requête (authentifié avec le JWT utilisateur pour respecter RLS)
 function getSupabaseClientForRequest(token?: string) {
-  if (supabaseAdmin) {
-    return supabaseAdmin;
-  }
   if (!supabaseUrl || !supabaseAnonKey) {
+    if (supabaseAdmin) {
+      return supabaseAdmin;
+    }
     throw new Error('Supabase n\'est pas configuré sur le serveur (URL ou Clé anonyme manquante).');
   }
   if (token && token.split('.').length === 3) {
@@ -99,11 +55,41 @@ function getSupabaseClientForRequest(token?: string) {
       },
     });
   }
-  return createClient(supabaseUrl, supabaseAnonKey);
+  return createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false } });
+}
+
+function resolveServerPort(): number {
+  const cliPortIdx = process.argv.indexOf('--port');
+  if (cliPortIdx !== -1 && process.argv[cliPortIdx + 1]) {
+    const parsed = parseInt(process.argv[cliPortIdx + 1], 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  if (process.env.DEFAULT_APP_PORT) {
+    const parsed = parseInt(process.env.DEFAULT_APP_PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  if (process.env.NODE_ENV === 'production' && process.env.PORT) {
+    const parsed = parseInt(process.env.PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 3000;
 }
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = resolveServerPort();
+
+const STATIC_ADMIN_DEV_TOKENS = new Set(['dev_admin_token']);
+const STATIC_CAPORAL_DEV_TOKENS = new Set(['dev_caporal_token', 'usr_caporal_brahim']);
+const STATIC_CONTRACTUEL_DEV_TOKENS = new Set(['dev_contractuel_token']);
+
+function isDevTokensEnabled(): boolean {
+  return process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_TOKENS === 'true';
+}
+
+function isThreePartJwt(token: string): boolean {
+  const parts = token.split('.');
+  return parts.length === 3 && parts.every((part) => part.length > 0);
+}
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -122,7 +108,7 @@ interface ServerDB {
     id: string;
     username: string;
     nom: string;
-    role: AppUserRole;
+    role: 'admin' | 'caporal' | 'caporal_contractuelles';
     module_attribue?: 'recolte' | 'contractuelles' | 'all';
     domaines_autorises?: string[];
     serres_autorisees?: string[];
@@ -294,26 +280,6 @@ interface ServerDB {
     serres_ids?: string[];
     serres_noms?: string[];
     serres_texte?: string | null;
-    taches_ids?: string[];
-    taches_noms?: string[];
-    taches_texte?: string | null;
-    heure_debut?: string | null;
-    heure_fin?: string | null;
-    duree_heures?: number | null;
-    tarif_initial?: number;
-    montant_propose?: number;
-    montant_valide?: number | null;
-    tarif_modifie?: boolean;
-    motif_modification?: string | null;
-    statut_validation?: 'BROUILLON' | 'SOUMIS' | 'VALIDE' | 'REFUSE';
-    submitted_by_id?: string | null;
-    submitted_by_nom?: string | null;
-    submitted_at?: string | null;
-    validated_by_id?: string | null;
-    validated_by_nom?: string | null;
-    validated_at?: string | null;
-    motif_refus?: string | null;
-    historique_validations?: any[];
     montant_total_jour: number;
     created_by_id: string;
     created_by_nom: string;
@@ -338,13 +304,6 @@ interface ServerDB {
     serres_ids?: string[];
     serres_noms?: string[];
     serres_texte?: string | null;
-    heure_debut?: string | null;
-    heure_fin?: string | null;
-    duree_heures?: number | null;
-    tarif_initial?: number;
-    montant_propose?: number;
-    montant_valide?: number | null;
-    statut_validation?: 'BROUILLON' | 'SOUMIS' | 'VALIDE' | 'REFUSE';
     mode_remuneration: 'JOUR' | 'TACHE' | 'UNITE' | 'HEURE';
     quantite: number;
     unite: string;
@@ -356,8 +315,6 @@ interface ServerDB {
     created_at: string;
     updated_at?: string;
   }>;
-  contractuels_validation_logs?: Array<any>;
-  taches?: Array<any>;
 }
 
 const DEFAULT_DB: ServerDB = {
@@ -437,8 +394,6 @@ const DEFAULT_DB: ServerDB = {
   contractuels_ouvriers: [],
   contractuels_pointages: [],
   contractuels_activites: [],
-  contractuels_validation_logs: [],
-  taches: [],
   companies: [
     {
       id: 'cie_lahcen_pointeur',
@@ -484,36 +439,42 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', app: 'Lahcen Pointeur', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/debug-supabase', async (_req: Request, res: Response) => {
+app.get('/api/debug-supabase', async (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const auth = await authenticateAdmin(req);
+  if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
   try {
-    const hasAdmin = !!supabaseAdmin;
-    let authUsers: any[] = [];
-    let profiles: any[] = [];
-    let companies: any[] = [];
-    let adminError = null;
+    const hasAdmin = Boolean(supabaseAdmin);
+    let profilesCount = 0;
+    let companiesCount = 0;
 
     if (supabaseAdmin) {
-      const { data: uData, error: uErr } = await supabaseAdmin.auth.admin.listUsers();
-      if (uErr) adminError = uErr.message;
-      else authUsers = uData.users.map((u: any) => ({ id: u.id, email: u.email, role: u.role, metadata: u.user_metadata, created_at: u.created_at }));
+      const { count: pCount } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('company_id', auth.admin.company_id);
+      profilesCount = pCount || 0;
 
-      const { data: pData } = await supabaseAdmin.from('profiles').select('*');
-      profiles = pData || [];
-
-      const { data: cData } = await supabaseAdmin.from('companies').select('*');
-      companies = cData || [];
+      const { count: cCount } = await supabaseAdmin
+        .from('companies')
+        .select('id', { count: 'exact', head: true })
+        .eq('id', auth.admin.company_id);
+      companiesCount = cCount || 0;
     }
 
     res.json({
       hasAdmin,
-      supabaseUrl: process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || null,
-      adminError,
-      authUsersCount: authUsers.length,
-      authUsers,
-      profilesCount: profiles.length,
-      profiles,
-      companiesCount: companies.length,
-      companies,
+      isSupabaseConfigured: isSupabaseConfiguredServer,
+      projectId: supabaseUrl ? new URL(supabaseUrl).hostname.split('.')[0] : 'non-défini',
+      companyId: auth.admin.company_id,
+      profilesCount,
+      companiesCount,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -522,61 +483,35 @@ app.get('/api/debug-supabase', async (_req: Request, res: Response) => {
 
 // Création sécurisée d'utilisateur Caporal
 app.post('/api/create-caporal', async (req: Request, res: Response) => {
+  const auth = await authenticateAdmin(req);
+  if (!auth.authenticated || !auth.admin) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
   if (!supabaseAdmin) {
-    return res.status(500).json({ success: false, error: 'Serveur non configuré pour Supabase.' });
+    return res.status(503).json({ success: false, error: 'Serveur non configuré pour Supabase Admin.' });
   }
-
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ success: false, error: 'Non autorisé.' });
-  }
-
-  const token = authHeader.replace('Bearer ', '');
 
   try {
-    // 1. Vérifier la session admin
-    const { data: { user: adminUser }, error: authError } = await supabaseAdmin.auth.getUser(token);
-    if (authError || !adminUser) {
-      return res.status(401).json({ success: false, error: 'Session invalide.' });
-    }
-
-    // 2. Vérifier que l'utilisateur est admin et actif
-    const { data: adminProfile, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('company_id, role, actif')
-      .eq('id', adminUser.id)
-      .single();
-
-    if (profileError || !adminProfile || adminProfile.role !== 'admin' || !adminProfile.actif) {
-      return res.status(403).json({ success: false, error: 'Action interdite : Admin requis.' });
-    }
-
-    const { username, nom, password, module_attribue, domaines_autorises, serres_autorisees, role } = req.body;
+    const adminProfile = { company_id: auth.admin.company_id };
+    const { username, nom, password, module_attribue, domaines_autorises, serres_autorisees } = req.body;
 
     // Validation simple
     if (!username || !nom || !password) {
       return res.status(400).json({ success: false, error: 'Données incomplètes.' });
     }
 
-    const isLecteurRequest = role === 'lecteur';
-    const assignedModule: 'recolte' | 'contractuelles' | 'all' = isLecteurRequest
-      ? 'all'
-      : (module_attribue === 'contractuelles' ? 'contractuelles' : 'recolte');
-    const assignedRole: AppUserRole = isLecteurRequest
-      ? 'lecteur'
-      : (assignedModule === 'contractuelles' ? 'caporal_contractuelles' : 'caporal');
+    const assignedModule = module_attribue === 'contractuelles' ? 'contractuelles' : 'recolte';
+    const assignedRole = assignedModule === 'contractuelles' ? 'caporal_contractuelles' : 'caporal';
 
     // 3. Création utilisateur Auth (société de l'admin)
-    const rawUser = String(username).trim().toLowerCase();
-    const email = rawUser.includes('@')
-      ? rawUser
-      : `${rawUser}@${isLecteurRequest ? 'lecture.com' : 'agripointage.local'}`;
+    const email = `${username.toLowerCase()}@agripointage.local`;
     const { data: authData, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
       user_metadata: {
-        username: rawUser.split('@')[0] || rawUser,
+        username,
         nom,
         role: assignedRole,
         module_attribue: assignedModule,
@@ -595,7 +530,7 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
     // 4. Création profile dans public
     const profilePayload: any = {
       id: authData.user.id,
-      username: rawUser.split('@')[0] || rawUser,
+      username,
       nom,
       role: assignedRole,
       company_id: adminProfile.company_id,
@@ -616,7 +551,7 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
         .from('profiles')
         .insert({
           id: authData.user.id,
-          username: rawUser.split('@')[0] || rawUser,
+          username,
           nom,
           role: assignedRole,
           company_id: adminProfile.company_id,
@@ -630,7 +565,25 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
       }
     }
 
-    res.json({ success: true, user: authData.user, profile: profilePayload });
+    // Persistance locale
+    const db = readDB();
+    if (!db.users) db.users = [];
+    db.users.push({
+      id: authData.user.id,
+      username,
+      nom,
+      role: assignedRole,
+      module_attribue: assignedModule,
+      domaines_autorises: domaines_autorises || [],
+      serres_autorisees: serres_autorisees || [],
+      passwordHash: '',
+      salt: '',
+      actif: true,
+      createdAt: new Date().toISOString(),
+    });
+    writeDB(db);
+
+    res.json({ success: true, user: authData.user });
   } catch (err: any) {
     console.error('API Error /api/create-caporal (Unexpected):', err);
     res.status(500).json({ success: false, error: 'Erreur interne: ' + err.message });
@@ -639,33 +592,21 @@ app.post('/api/create-caporal', async (req: Request, res: Response) => {
 
 // Diagnostic sécurisé de configuration
 app.get('/api/debug-config', async (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const auth = await authenticateAdmin(req);
+  if (!auth.authenticated || !auth.admin) {
+    return res.status(auth.statusCode || 401).json({ error: auth.error || 'Non autorisé' });
+  }
+
   if (!supabaseAdmin) {
-    return res.status(500).json({ error: 'Non configuré' });
+    return res.status(503).json({ error: 'Supabase Admin non configuré' });
   }
 
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Non autorisé' });
-  }
-
-  const token = authHeader.replace('Bearer ', '');
   try {
-    const { data: { user } } = await supabaseAdmin.auth.getUser(token);
-    if (!user) return res.status(401).json({ error: 'Session invalide' });
-
-    const { data: profile } = await supabaseAdmin
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single();
-
-    if (!profile || profile.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin requis' });
-    }
-
-    const backendUrl = process.env.SUPABASE_URL || '';
-    const projectId = backendUrl ? new URL(backendUrl).hostname.split('.')[0] : 'non-défini';
-
+    const projectId = supabaseUrl ? new URL(supabaseUrl).hostname.split('.')[0] : 'non-défini';
     res.json({ projectId });
   } catch (err) {
     res.status(500).json({ error: 'Erreur diagnostic' });
@@ -673,141 +614,182 @@ app.get('/api/debug-config', async (req: Request, res: Response) => {
 });
 
 
-// Synchronisation multi-appareils Récolte (Caporal <-> Admin <-> Supabase)
+const RECOLTE_OPTIONAL_COLUMNS = ['updated_at', 'updated_by_id', 'type_operation', 'domaine_id'];
+
+async function upsertRecolteEntriesToDb(
+  dbClient: any,
+  companyId: string,
+  rows: any[],
+  authorId?: string
+): Promise<void> {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+
+  const formatted = rows.map((row) => {
+    const clean: any = {
+      id: String(row.id),
+      company_id: companyId,
+      date: String(row.date || '').slice(0, 10),
+      serre_id: String(row.serre_id || ''),
+      serre_nom: String(row.serre_nom || ''),
+      ouvrier_id: String(row.ouvrier_id || ''),
+      numero_ouvrier: Number(row.numero_ouvrier) || 0,
+      nom_ouvrier: String(row.nom_ouvrier || ''),
+      caisses: Number(row.caisses) || 0,
+      notes: row.notes !== undefined ? row.notes : null,
+      created_by_id: isSupabaseConfiguredServer
+        ? resolveValidProfileUuid(row.created_by_id || authorId)
+        : row.created_by_id || authorId || null,
+      created_by_nom: row.created_by_nom || 'Utilisateur',
+      created_at: row.created_at || new Date().toISOString(),
+      updated_at: row.updated_at || row.created_at || new Date().toISOString(),
+    };
+    if (row.type_operation !== undefined) clean.type_operation = row.type_operation;
+    if (row.domaine_id !== undefined) clean.domaine_id = row.domaine_id;
+    if (row.updated_by_id !== undefined) {
+      clean.updated_by_id = isSupabaseConfiguredServer
+        ? resolveValidProfileUuid(row.updated_by_id)
+        : row.updated_by_id;
+    }
+    return clean;
+  });
+
+  const strippedCols = new Set<string>();
+  for (let attempt = 0; attempt <= RECOLTE_OPTIONAL_COLUMNS.length + 1; attempt++) {
+    const payload = formatted.map((r) => {
+      const copy = { ...r };
+      for (const col of strippedCols) {
+        delete copy[col];
+      }
+      return copy;
+    });
+
+    const { error } = await dbClient.from('recolte_entries').upsert(payload, { onConflict: 'id' });
+    if (!error) return;
+
+    const msg = String(error.message || '');
+    const missingMatch =
+      msg.match(/Could not find the '([^']+)' column/i) ||
+      msg.match(/column "([^"]+)" of relation/i);
+    if (missingMatch && missingMatch[1] && RECOLTE_OPTIONAL_COLUMNS.includes(missingMatch[1])) {
+      strippedCols.add(missingMatch[1]);
+      continue;
+    }
+    throw new Error(msg || 'Erreur persistance PostgreSQL recolte_entries.');
+  }
+}
+
+// Synchronisation multi-appareils (Caporal <-> Admin)
 app.post('/api/recolte/sync', async (req: Request, res: Response) => {
   const auth = await authenticateCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+  if (!auth.authenticated || !auth.user) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
   try {
-    const { pendingEntries, deletedIds } = req.body;
+    const { companyId: requestedCompanyId, pendingEntries, deletedIds } = req.body;
     const companyId = auth.user.company_id;
-    const hasWritePayload =
-      (Array.isArray(pendingEntries) && pendingEntries.length > 0) ||
-      (Array.isArray(deletedIds) && deletedIds.length > 0);
 
-    if (hasWritePayload && !requireWritePermission(auth.user.role, res)) {
-      return;
+    if (requestedCompanyId && String(requestedCompanyId).trim() !== companyId) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour une autre entreprise.' });
     }
 
-    if (isSupabaseConfigured) {
-      const actionClient = supabaseAdmin || auth.supabaseClient;
-      let syncedCount = 0;
+    const dbClient = isSupabaseConfiguredServer
+      ? (supabaseAdmin || auth.supabaseClient)
+      : createLocalDbClient();
 
-      if (Array.isArray(pendingEntries) && pendingEntries.length > 0) {
-        const upserts: any[] = [];
-        for (const clientItem of pendingEntries) {
-          if (!clientItem?.id) continue;
-          // Ne jamais écraser un enregistrement serveur plus récent par un cache client ancien
-          const { data: existingRow, error: lookupErr } = await actionClient
-            .from('recolte_entries')
-            .select('id, updated_at, created_at')
-            .eq('id', String(clientItem.id))
-            .eq('company_id', companyId)
-            .maybeSingle();
+    // 1. Lire l'état distant autoritatif sans perte
+    const remoteRows = await fetchAllPaginated(dbClient, 'recolte_entries', companyId);
 
-          if (lookupErr) {
-            throw new Error('Erreur lecture récolte Supabase: ' + lookupErr.message);
-          }
-
-          if (existingRow) {
-            const serverTs = existingRow.updated_at || existingRow.created_at || '';
-            const clientTs = clientItem.updated_at || clientItem.created_at || '';
-            if (serverTs && (!clientTs || serverTs > clientTs)) {
-              continue;
-            }
-          }
-
-          upserts.push({
-            id: String(clientItem.id),
-            company_id: companyId,
-            date: String(clientItem.date).slice(0, 10),
-            serre_id: String(clientItem.serre_id),
-            serre_nom: String(clientItem.serre_nom || ''),
-            ouvrier_id: clientItem.ouvrier_id ? String(clientItem.ouvrier_id) : null,
-            numero_ouvrier: Number(clientItem.numero_ouvrier),
-            nom_ouvrier: String(clientItem.nom_ouvrier || ''),
-            caisses: Number(clientItem.caisses),
-            notes: clientItem.notes ? String(clientItem.notes).trim() : null,
-            type_operation: clientItem.type_operation || 'RECOLTE',
-            domaine_id: clientItem.domaine_id ? String(clientItem.domaine_id) : 'dom_d2',
-            created_by_id: resolveValidProfileUuid(clientItem.created_by_id) || resolveValidProfileUuid(auth.user.id),
-            created_by_nom: String(clientItem.created_by_nom || auth.user.nom || 'Utilisateur'),
-            created_at: clientItem.created_at || new Date().toISOString(),
-            updated_at: clientItem.updated_at || new Date().toISOString(),
-            updated_by_id: resolveValidProfileUuid(clientItem.updated_by_id) || resolveValidProfileUuid(auth.user.id),
-          });
-        }
-
-        if (upserts.length > 0) {
-          const { error: upsertErr } = await actionClient
-            .from('recolte_entries')
-            .upsert(upserts, { onConflict: 'id' });
-          if (upsertErr) {
-            throw new Error('Erreur synchronisation récoltes Supabase: ' + upsertErr.message);
-          }
-          syncedCount = upserts.length;
-        }
-      }
-
-      if (Array.isArray(deletedIds) && deletedIds.length > 0) {
-        const cleanIds = deletedIds.map(String).filter(Boolean);
-        if (cleanIds.length > 0) {
-          const { error: delErr } = await actionClient
-            .from('recolte_entries')
-            .delete()
-            .eq('company_id', companyId)
-            .in('id', cleanIds);
-          if (delErr) {
-            throw new Error('Erreur suppression récoltes Supabase: ' + delErr.message);
-          }
-        }
-      }
-
-      const allEntries = await fetchAllPaginated(actionClient, 'recolte_entries', companyId, (q) =>
-        q.order('created_at', { ascending: false })
-      );
-
-      return res.json({
-        success: true,
-        allEntries,
-        syncedCount,
-        timestamp: Date.now(),
-      });
-    }
-
-    // Mode développement local sans Supabase
+    // 2. Fusionner de manière non destructive d'éventuelles données historiques présentes dans recolte_db.json
     const db = readDB();
-    if (Array.isArray(pendingEntries) && pendingEntries.length > 0) {
-      const map = new Map<string, typeof db.recoltes[0]>();
-      for (const item of db.recoltes) {
-        map.set(item.id, item);
+    const map = new Map<string, any>();
+    for (const row of remoteRows) {
+      if (row?.id) map.set(row.id, row);
+    }
+    const legacyToSeed: any[] = [];
+    for (const localRow of (db.recoltes || []).filter((r) => r && r.company_id === companyId)) {
+      if (localRow?.id && !map.has(localRow.id)) {
+        map.set(localRow.id, localRow);
+        legacyToSeed.push(localRow);
       }
+    }
+    if (legacyToSeed.length > 0) {
+      await upsertRecolteEntriesToDb(dbClient, companyId, legacyToSeed, auth.user.id);
+    }
 
+    // 3. Traiter les créations/mises à jour client (LWW déterministe)
+    const toUpsert: any[] = [];
+    if (Array.isArray(pendingEntries) && pendingEntries.length > 0) {
       for (const clientItem of pendingEntries) {
+        if (!clientItem || !clientItem.id) continue;
         const existing = map.get(clientItem.id);
-        if (!existing) {
-          map.set(clientItem.id, { ...clientItem, company_id: companyId });
-        } else if (clientItem.updated_at && (!existing.updated_at || clientItem.updated_at > existing.updated_at)) {
-          map.set(clientItem.id, { ...clientItem, company_id: companyId });
+        if (existing && existing.company_id && existing.company_id !== companyId) {
+          continue;
+        }
+        const existingTs = existing?.updated_at
+          ? Date.parse(existing.updated_at) || 0
+          : existing?.created_at
+            ? Date.parse(existing.created_at) || 0
+            : 0;
+        const clientTs = clientItem.updated_at
+          ? Date.parse(clientItem.updated_at) || 0
+          : clientItem.created_at
+            ? Date.parse(clientItem.created_at) || 0
+            : Date.now();
+
+        if (!existing || clientTs >= existingTs) {
+          const safeItem = {
+            ...existing,
+            ...clientItem,
+            company_id: companyId,
+            created_by_id: existing ? existing.created_by_id : (clientItem.created_by_id || auth.user.id),
+            created_by_nom: existing ? existing.created_by_nom : (clientItem.created_by_nom || auth.user.nom),
+            updated_by_id: auth.user.id,
+            updated_at: clientItem.updated_at || new Date().toISOString(),
+          };
+          map.set(clientItem.id, safeItem);
+          toUpsert.push(safeItem);
         }
       }
-
-      db.recoltes = Array.from(map.values());
+      if (toUpsert.length > 0) {
+        await upsertRecolteEntriesToDb(dbClient, companyId, toUpsert, auth.user.id);
+      }
     }
+
+    // 4. Traiter les suppressions explicites client
+    let deletedCount = 0;
     if (Array.isArray(deletedIds) && deletedIds.length > 0) {
-      const delSet = new Set(deletedIds.map(String));
-      db.recoltes = db.recoltes.filter((r) => !(delSet.has(r.id) && (r.company_id === companyId || !r.company_id)));
+      const cleanDelIds = deletedIds.map((id: any) => String(id)).filter(Boolean);
+      if (cleanDelIds.length > 0) {
+        const { error: delErr } = await dbClient
+          .from('recolte_entries')
+          .delete()
+          .eq('company_id', companyId)
+          .in('id', cleanDelIds);
+        if (delErr) {
+          throw new Error('Erreur suppression récolte PostgreSQL: ' + delErr.message);
+        }
+        for (const delId of cleanDelIds) {
+          if (map.delete(delId)) deletedCount += 1;
+        }
+      }
     }
-    writeDB(db);
 
-    const filtered = db.recoltes.filter((r) => r.company_id === companyId || !r.company_id);
+    const filtered = Array.from(map.values()).sort((a, b) =>
+      String(b.created_at || '').localeCompare(String(a.created_at || ''))
+    );
+
+    // 5. Miroir local non destructif (préserve les autres sociétés)
+    const freshDb = readDB();
+    const otherCompanies = (freshDb.recoltes || []).filter((r) => r.company_id !== companyId);
+    freshDb.recoltes = [...otherCompanies, ...filtered];
+    writeDB(freshDb);
 
     res.json({
       success: true,
       allEntries: filtered,
-      syncedCount: pendingEntries ? pendingEntries.length : 0,
+      syncedCount: toUpsert.length,
+      deletedCount,
       timestamp: Date.now(),
     });
   } catch (err: unknown) {
@@ -819,44 +801,31 @@ app.post('/api/recolte/sync', async (req: Request, res: Response) => {
 // Récupérer les récoltes
 app.get('/api/recolte', async (req: Request, res: Response) => {
   const auth = await authenticateCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+  if (!auth.authenticated || !auth.user) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
   try {
-    const { date, startDate, endDate, serre_id, ouvrier_id, caporal_id } = req.query;
+    const { companyId: requestedCompanyId, date, startDate, endDate, serre_id, ouvrier_id, caporal_id } = req.query;
     const companyId = auth.user.company_id;
-
-    if (isSupabaseConfigured) {
-      const actionClient = supabaseAdmin || auth.supabaseClient;
-      let query = actionClient
-        .from('recolte_entries')
-        .select('*')
-        .eq('company_id', companyId);
-
-      if (date) query = query.eq('date', String(date));
-      if (startDate && endDate) query = query.gte('date', String(startDate)).lte('date', String(endDate));
-      if (serre_id) query = query.eq('serre_id', String(serre_id));
-      if (ouvrier_id) query = query.eq('ouvrier_id', String(ouvrier_id));
-      if (caporal_id) query = query.eq('created_by_id', String(caporal_id));
-
-      const { data, error } = await query.order('created_at', { ascending: false });
-      if (error) {
-        return res.status(500).json({ success: false, error: 'Erreur lecture récoltes Supabase: ' + error.message });
-      }
-      return res.json({ success: true, recoltes: data || [] });
+    if (requestedCompanyId && String(requestedCompanyId).trim() !== companyId) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour une autre entreprise.' });
     }
 
-    const db = readDB();
-    let list = db.recoltes.filter((r) => r.company_id === companyId || !r.company_id);
+    const dbClient = isSupabaseConfiguredServer
+      ? (supabaseAdmin || auth.supabaseClient)
+      : createLocalDbClient();
 
-    if (date) list = list.filter((r) => r.date === date);
-    if (startDate && endDate) list = list.filter((r) => r.date >= String(startDate) && r.date <= String(endDate));
-    if (serre_id) list = list.filter((r) => r.serre_id === serre_id);
-    if (ouvrier_id) list = list.filter((r) => r.ouvrier_id === ouvrier_id);
-    if (caporal_id) list = list.filter((r) => r.created_by_id === caporal_id);
+    let list = await fetchAllPaginated(dbClient, 'recolte_entries', companyId, (q) => {
+      if (date) q = q.eq('date', String(date));
+      else if (startDate && endDate) q = q.gte('date', String(startDate)).lte('date', String(endDate));
+      if (serre_id) q = q.eq('serre_id', String(serre_id));
+      if (ouvrier_id) q = q.eq('ouvrier_id', String(ouvrier_id));
+      if (caporal_id) q = q.eq('created_by_id', String(caporal_id));
+      return q;
+    });
 
-    list.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    list.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     res.json({ success: true, recoltes: list });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Erreur';
@@ -867,18 +836,21 @@ app.get('/api/recolte', async (req: Request, res: Response) => {
 // Enregistrer de nouvelles récoltes
 app.post('/api/recolte', async (req: Request, res: Response) => {
   const auth = await authenticateCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+  if (!auth.authenticated || !auth.user) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
-    const { entries, author } = req.body;
+    const { companyId: requestedCompanyId, entries } = req.body;
+    const companyId = auth.user.company_id;
+    if (requestedCompanyId && String(requestedCompanyId).trim() !== companyId) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour une autre entreprise.' });
+    }
+
     if (!Array.isArray(entries) || entries.length === 0) {
       return res.status(400).json({ success: false, error: 'Aucune donnée de récolte fournie.' });
     }
 
-    const companyId = auth.user.company_id;
     const now = new Date().toISOString();
     const addedList: any[] = [];
 
@@ -894,36 +866,25 @@ app.post('/api/recolte', async (req: Request, res: Response) => {
       addedList.push({
         id: e.id || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         company_id: companyId,
-        date: String(e.date).slice(0, 10),
-        serre_id: String(e.serre_id),
-        serre_nom: String(e.serre_nom || ''),
-        ouvrier_id: e.ouvrier_id ? String(e.ouvrier_id) : null,
+        date: e.date,
+        serre_id: e.serre_id,
+        serre_nom: e.serre_nom,
+        ouvrier_id: e.ouvrier_id,
         numero_ouvrier: Number(e.numero_ouvrier),
-        nom_ouvrier: String(e.nom_ouvrier || ''),
+        nom_ouvrier: e.nom_ouvrier,
         caisses: Math.round(qty * 10) / 10,
-        notes: e.notes ? String(e.notes).trim() : null,
-        type_operation: e.type_operation || 'RECOLTE',
-        domaine_id: e.domaine_id ? String(e.domaine_id) : 'dom_d2',
-        created_by_id: isSupabaseConfigured
-          ? (resolveValidProfileUuid(author?.id) || resolveValidProfileUuid(auth.user.id))
-          : (author?.id || auth.user.id),
-        created_by_nom: author?.nom || auth.user.nom || 'Inconnu',
-        created_at: e.created_at || now,
+        notes: e.notes ? String(e.notes).trim() : undefined,
+        created_by_id: auth.user.id,
+        created_by_nom: auth.user.nom,
+        created_at: now,
         updated_at: now,
       });
     }
 
-    if (isSupabaseConfigured) {
-      const actionClient = supabaseAdmin || auth.supabaseClient;
-      const { data, error } = await actionClient
-        .from('recolte_entries')
-        .upsert(addedList, { onConflict: 'id' })
-        .select();
-      if (error) {
-        return res.status(500).json({ success: false, error: 'Erreur enregistrement récolte Supabase: ' + error.message });
-      }
-      return res.json({ success: true, count: (data || addedList).length, added: data || addedList });
-    }
+    const dbClient = isSupabaseConfiguredServer
+      ? (supabaseAdmin || auth.supabaseClient)
+      : createLocalDbClient();
+    await upsertRecolteEntriesToDb(dbClient, companyId, addedList, auth.user.id);
 
     const db = readDB();
     for (const item of addedList) {
@@ -939,33 +900,32 @@ app.post('/api/recolte', async (req: Request, res: Response) => {
   }
 });
 
-// Supprimer une entrée de récolte
+// Supprimer une entrée récolte
 app.delete('/api/recolte/:id', async (req: Request, res: Response) => {
   const auth = await authenticateCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+  if (!auth.authenticated || !auth.user) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const { id } = req.params;
     const companyId = auth.user.company_id;
+    const dbClient = isSupabaseConfiguredServer
+      ? (supabaseAdmin || auth.supabaseClient)
+      : createLocalDbClient();
 
-    if (isSupabaseConfigured) {
-      const actionClient = supabaseAdmin || auth.supabaseClient;
-      const { error } = await actionClient
-        .from('recolte_entries')
-        .delete()
-        .eq('id', id)
-        .eq('company_id', companyId);
-      if (error) {
-        return res.status(500).json({ success: false, error: 'Erreur suppression récolte Supabase: ' + error.message });
-      }
-      return res.json({ success: true });
+    const { error } = await dbClient
+      .from('recolte_entries')
+      .delete()
+      .eq('id', id)
+      .eq('company_id', companyId);
+
+    if (error) {
+      throw new Error('Erreur suppression récolte PostgreSQL: ' + error.message);
     }
 
     const db = readDB();
-    db.recoltes = db.recoltes.filter((r) => !(r.id === id && (r.company_id === companyId || !r.company_id)));
+    db.recoltes = (db.recoltes || []).filter((r) => r.id !== id || r.company_id !== companyId);
     writeDB(db);
     res.json({ success: true });
   } catch (err: unknown) {
@@ -974,45 +934,52 @@ app.delete('/api/recolte/:id', async (req: Request, res: Response) => {
   }
 });
 
-// Récupérer les serres configurées (depuis Supabase en priorité, avec fallback local uniquement hors Supabase)
+// Récupérer les serres configurées (depuis Supabase en priorité, avec fallback local complété)
 app.get('/api/serres', async (req: Request, res: Response) => {
+  const auth = await authenticateActiveUser(req);
+  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
+    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
+  }
+
   try {
-    const { companyId, domaineId } = req.query;
+    const { companyId: requestedCompanyId, domaineId } = req.query;
+    const companyId = auth.user.company_id;
+    if (requestedCompanyId && String(requestedCompanyId).trim() !== companyId) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour une autre entreprise.' });
+    }
+
     let list: any[] = [];
 
     const isAnomalousSerre23 = (s: any) =>
       s?.id === 'serre_23' &&
       (!s.domaine_id || s.domaine_id === 'dom_d3' || String(s.code || '').toUpperCase() === 'S23');
 
-    if (isSupabaseConfigured) {
-      const client = supabaseAdmin || createClient(supabaseUrl, supabaseAnonKey);
-      let query = client.from('serres').select('*').order('ordre', { ascending: true });
-      if (companyId) {
-        query = query.eq('company_id', String(companyId));
-      }
-      const { data, error } = await query;
-      if (error) {
-        return res.status(500).json({ success: false, error: 'Erreur lecture serres Supabase: ' + error.message });
-      }
-      if (Array.isArray(data) && data.length > 0) {
-        list = data.filter((s) => !isAnomalousSerre23(s));
+    const dbClient = supabaseAdmin || auth.supabaseClient;
+    if (isSupabaseConfiguredServer) {
+      const { data, error } = await dbClient
+        .from('serres')
+        .select('*')
+        .eq('company_id', companyId)
+        .order('ordre', { ascending: true });
+      if (!error && Array.isArray(data) && data.length > 0) {
+        list = data.filter((s: any) => !isAnomalousSerre23(s));
       }
     }
 
-    if (list.length === 0 && !isSupabaseConfigured) {
+    if (list.length === 0) {
       const db = readDB();
       const canonicalById = new Map(DEFAULT_DB.serres.map((s) => [s.id, s]));
       const mergedMap = new Map<string, any>();
 
       for (const defS of DEFAULT_DB.serres) {
-        if (!companyId || defS.company_id === companyId) {
+        if (defS.company_id === companyId) {
           mergedMap.set(defS.id, { ...defS });
         }
       }
 
       for (const localS of db.serres || []) {
         if (!localS || isAnomalousSerre23(localS)) continue;
-        if (companyId && localS.company_id && localS.company_id !== companyId) continue;
+        if (localS.company_id !== companyId) continue;
         const canon = canonicalById.get(localS.id);
         mergedMap.set(localS.id, {
           ...canon,
@@ -1023,6 +990,45 @@ app.get('/api/serres', async (req: Request, res: Response) => {
       }
 
       list = Array.from(mergedMap.values()).sort((a, b) => (a.ordre || 0) - (b.ordre || 0));
+    }
+
+    // Deduplicate D2 serres (Serre 1 to Serre 15) and unique IDs
+    const seenD2Num = new Set<number>();
+    const seenSerreIds = new Set<string>();
+    const dedupedList: any[] = [];
+    for (const s of list) {
+      if (!s || s.id === 'serre_23') continue;
+      if (seenSerreIds.has(s.id)) continue;
+      seenSerreIds.add(s.id);
+
+      const dom = (s.domaine_id || 'dom_d2').trim().toLowerCase();
+      if (dom === 'dom_d2' || dom === 'd2') {
+        const nameNorm = (s.nom || '').trim().toUpperCase();
+        const codeNorm = (s.code || '').trim().toUpperCase();
+        const matchNum = nameNorm.match(/SERRE\s*(\d+)/) || codeNorm.match(/S0*(\d+)/);
+        if (matchNum) {
+          const num = parseInt(matchNum[1], 10);
+          if (num >= 1 && num <= 15) {
+            if (seenD2Num.has(num)) {
+              continue; // Skip duplicate D2 serre number
+            }
+            seenD2Num.add(num);
+          }
+        }
+      }
+      dedupedList.push(s);
+    }
+    list = dedupedList;
+
+    if (auth.user.role === 'caporal_contractuelles') {
+      if (auth.user.domaines_autorises && auth.user.domaines_autorises.length > 0) {
+        const allowedDoms = new Set(auth.user.domaines_autorises.map((d) => d.trim().toLowerCase()));
+        list = list.filter((s) => allowedDoms.has((s.domaine_id || 'dom_d2').trim().toLowerCase()));
+      }
+      if (auth.user.serres_autorisees && auth.user.serres_autorisees.length > 0) {
+        const allowedSerres = new Set(auth.user.serres_autorisees);
+        list = list.filter((s) => allowedSerres.has(s.id));
+      }
     }
 
     if (domaineId) {
@@ -1042,89 +1048,36 @@ app.get('/api/serres', async (req: Request, res: Response) => {
   }
 });
 
-// Récupérer les utilisateurs de la société authentifiée (depuis Supabase profiles en prod)
+// Récupérer les utilisateurs de l'entreprise (Admin actif requis, sans sels ni hashs)
 app.get('/api/users', async (req: Request, res: Response) => {
-  const auth = await authenticateCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
-    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
-  }
-
-  try {
-    const companyId = auth.user.company_id;
-    if (isSupabaseConfigured) {
-      const actionClient = supabaseAdmin || auth.supabaseClient;
-      const { data, error } = await actionClient
-        .from('profiles')
-        .select('id, username, nom, role, company_id, actif, module_attribue, domaines_autorises, serres_autorisees, telephone, created_at')
-        .eq('company_id', companyId)
-        .order('nom', { ascending: true });
-
-      if (error) {
-        return res.status(500).json({ success: false, error: 'Erreur lecture profils Supabase: ' + error.message });
-      }
-      return res.json({ success: true, users: data || [] });
-    }
-
-    const db = readDB();
-    const safeUsers = (db.users || []).map(({ passwordHash, salt, ...safe }) => safe);
-    res.json({ success: true, users: safeUsers });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: 'Erreur users' });
-  }
-});
-
-// Mise à jour sécurisée d'un compte utilisateur (Admin uniquement, interdit aux lecteurs)
-app.patch('/api/users/:id', async (req: Request, res: Response) => {
   const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
 
   try {
-    const { id } = req.params;
     const companyId = auth.admin.company_id;
-    const { actif, module_attribue, domaines_autorises, serres_autorisees, role, nom } = req.body;
-    const updates: Record<string, any> = {};
+    const dbClient = supabaseAdmin || auth.supabaseClient;
 
-    if (actif !== undefined) updates.actif = Boolean(actif);
-    if (module_attribue !== undefined) updates.module_attribue = module_attribue;
-    if (domaines_autorises !== undefined) updates.domaines_autorises = domaines_autorises;
-    if (serres_autorisees !== undefined) updates.serres_autorisees = serres_autorisees;
-    if (role !== undefined && ['admin', 'caporal', 'caporal_contractuelles', 'lecteur'].includes(role)) {
-      updates.role = role;
-    }
-    if (nom !== undefined) updates.nom = String(nom).trim();
-
-    if (isSupabaseConfigured) {
-      const actionClient = supabaseAdmin || auth.supabaseClient;
-      const { data, error } = await actionClient
+    if (isSupabaseConfiguredServer) {
+      const { data: profiles, error } = await dbClient
         .from('profiles')
-        .update(updates)
-        .eq('id', id)
+        .select('*')
         .eq('company_id', companyId)
-        .select('id, username, nom, role, company_id, actif, module_attribue, domaines_autorises, serres_autorisees, telephone, created_at')
-        .maybeSingle();
+        .order('created_at', { ascending: false });
 
-      if (error) {
-        return res.status(500).json({ success: false, error: 'Erreur mise à jour profil Supabase: ' + error.message });
+      if (!error && Array.isArray(profiles)) {
+        return res.json({ success: true, users: profiles });
       }
-      if (!data) {
-        return res.status(404).json({ success: false, error: 'Profil introuvable dans cette entreprise.' });
-      }
-      return res.json({ success: true, user: data });
     }
 
     const db = readDB();
-    const idx = (db.users || []).findIndex((u) => u.id === id);
-    if (idx < 0) {
-      return res.status(404).json({ success: false, error: 'Utilisateur introuvable.' });
-    }
-    db.users[idx] = { ...db.users[idx], ...updates };
-    writeDB(db);
-    const { passwordHash, salt, ...safe } = db.users[idx];
-    res.json({ success: true, user: safe });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    const safeUsers = (db.users || [])
+      .filter((u: any) => !u.company_id || u.company_id === companyId)
+      .map(({ passwordHash, salt, ...safe }: any) => safe);
+    res.json({ success: true, users: safeUsers });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: 'Erreur users' });
   }
 });
 
@@ -1204,44 +1157,58 @@ function saveIdempotency(key: string, response: any): void {
 }
 
 // Moteur de requêtes local pour le mode développement ou les tests automatisés
+function resolveLocalTableKey(table: string): keyof ServerDB {
+  if (table === 'recolte_entries') return 'recoltes';
+  return table as keyof ServerDB;
+}
+
 function createLocalDbClient() {
-  const createQueryBuilder = (table: string, filterFn: (x: any) => boolean = () => true) => {
+  const createQueryBuilder = (
+    table: string,
+    filterFn: (x: any) => boolean = () => true,
+    rangeBounds?: { from: number; to: number }
+  ) => {
+    const dbKey = resolveLocalTableKey(table);
+    const applyRange = (items: any[]) =>
+      rangeBounds ? items.slice(rangeBounds.from, rangeBounds.to + 1) : items;
+
     const q: any = {
-      eq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] === val2),
-      neq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] !== val2),
-      in: (col2: string, vals2: any[]) => createQueryBuilder(table, (x: any) => filterFn(x) && Array.isArray(vals2) && vals2.includes(x[col2])),
-      gte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] >= val2),
-      lte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] <= val2),
+      eq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] === val2, rangeBounds),
+      neq: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] !== val2, rangeBounds),
+      gte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] >= val2, rangeBounds),
+      lte: (col2: string, val2: any) => createQueryBuilder(table, (x: any) => filterFn(x) && x[col2] <= val2, rangeBounds),
+      in: (col2: string, vals: any[]) => createQueryBuilder(table, (x: any) => filterFn(x) && Array.isArray(vals) && vals.includes(x[col2]), rangeBounds),
       order: (_col2: string, _opts?: any) => q,
+      range: (from: number, to: number) => createQueryBuilder(table, filterFn, { from, to }),
       limit: (n: number) => ({
         then: (cb: any) => {
           const db = readDB();
-          const items = ((db[table as keyof ServerDB] as any[]) || []).filter(filterFn).slice(0, n);
+          const items = applyRange(((db[dbKey] as any[]) || []).filter(filterFn)).slice(0, n);
           return Promise.resolve({ data: items, error: null }).then(cb);
         }
       }),
       maybeSingle: () => {
         const db = readDB();
-        const items = (db[table as keyof ServerDB] as any[]) || [];
+        const items = (db[dbKey] as any[]) || [];
         const found = items.find(filterFn);
         return Promise.resolve({ data: found || null, error: null });
       },
       single: () => {
         const db = readDB();
-        const items = (db[table as keyof ServerDB] as any[]) || [];
+        const items = (db[dbKey] as any[]) || [];
         const found = items.find(filterFn);
         return Promise.resolve({ data: found || null, error: null });
       },
       delete: () => {
         const db = readDB();
-        const items = (db[table as keyof ServerDB] as any[]) || [];
-        (db as any)[table] = items.filter((x: any) => !filterFn(x));
+        const items = (db[dbKey] as any[]) || [];
+        (db as any)[dbKey] = items.filter((x: any) => !filterFn(x));
         writeDB(db);
         return Promise.resolve({ error: null });
       },
       then: (cb: any, rej?: any) => {
         const db = readDB();
-        const items = ((db[table as keyof ServerDB] as any[]) || []).filter(filterFn);
+        const items = applyRange(((db[dbKey] as any[]) || []).filter(filterFn));
         return Promise.resolve({ data: items, error: null }).then(cb, rej);
       }
     };
@@ -1249,26 +1216,16 @@ function createLocalDbClient() {
   };
 
   return {
-    from: (table: string) => ({
-      select: (_fields?: string) => createQueryBuilder(table),
-      update: (updates: any) => {
-        let filter: (x: any) => boolean = () => true;
-        const builder: any = {
-          eq: (col: string, val: any) => {
-            const prev = filter;
-            filter = (x: any) => prev(x) && x[col] === val;
-            return builder;
-          },
-          neq: (col: string, val: any) => {
-            const prev = filter;
-            filter = (x: any) => prev(x) && x[col] !== val;
-            return builder;
-          },
-          select: () => builder,
-          single: () => {
+    from: (table: string) => {
+      const dbKey = resolveLocalTableKey(table);
+      return {
+        select: (_fields?: string) => createQueryBuilder(table),
+        update: (updates: any) => {
+          let filter: (x: any) => boolean = () => true;
+          const executeUpdate = () => {
             const db = readDB();
-            if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-            const items = (db[table as keyof ServerDB] as any[]) || [];
+            if (!db[dbKey]) (db as any)[dbKey] = [];
+            const items = (db[dbKey] as any[]) || [];
             let updatedItem: any = null;
             for (let i = 0; i < items.length; i++) {
               if (filter(items[i])) {
@@ -1277,128 +1234,162 @@ function createLocalDbClient() {
               }
             }
             writeDB(db);
-            return Promise.resolve({ data: updatedItem, error: null });
-          },
-          then: (cb: any, rej?: any) => {
+            return updatedItem;
+          };
+          const builder: any = {
+            eq: (col: string, val: any) => {
+              const prev = filter;
+              filter = (x: any) => prev(x) && x[col] === val;
+              return builder;
+            },
+            neq: (col: string, val: any) => {
+              const prev = filter;
+              filter = (x: any) => prev(x) && x[col] !== val;
+              return builder;
+            },
+            select: () => builder,
+            maybeSingle: () => Promise.resolve({ data: executeUpdate(), error: null }),
+            single: () => Promise.resolve({ data: executeUpdate(), error: null }),
+            then: (cb: any, rej?: any) => {
+              return Promise.resolve({ data: executeUpdate(), error: null }).then(cb, rej);
+            },
+          };
+          return builder;
+        },
+        delete: () => {
+          let filter: (x: any) => boolean = () => true;
+          let returnSelect = false;
+          const executeDelete = () => {
             const db = readDB();
-            if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-            const items = (db[table as keyof ServerDB] as any[]) || [];
-            let updatedItem: any = null;
-            for (let i = 0; i < items.length; i++) {
-              if (filter(items[i])) {
-                items[i] = { ...items[i], ...updates };
-                updatedItem = items[i];
-              }
-            }
+            const items = (db[dbKey] as any[]) || [];
+            const removed = items.filter((x: any) => filter(x));
+            (db as any)[dbKey] = items.filter((x: any) => !filter(x));
             writeDB(db);
-            return Promise.resolve({ data: updatedItem, error: null }).then(cb, rej);
-          },
-        };
-        return builder;
-      },
-      delete: () => {
-        let filter: (x: any) => boolean = () => true;
-        const builder: any = {
-          eq: (col: string, val: any) => {
-            const prev = filter;
-            filter = (x: any) => prev(x) && x[col] === val;
-            return builder;
-          },
-          neq: (col: string, val: any) => {
-            const prev = filter;
-            filter = (x: any) => prev(x) && x[col] !== val;
-            return builder;
-          },
-          in: (col: string, vals: any[]) => {
-            const prev = filter;
-            filter = (x: any) => prev(x) && Array.isArray(vals) && vals.includes(x[col]);
-            return builder;
-          },
-          then: (cb: any, rej?: any) => {
-            const db = readDB();
-            const items = (db[table as keyof ServerDB] as any[]) || [];
-            (db as any)[table] = items.filter((x: any) => !filter(x));
-            writeDB(db);
-            return Promise.resolve({ error: null }).then(cb, rej);
-          },
-        };
-        return builder;
-      },
-      upsert: (record: any, _options?: any) => {
-        const db = readDB();
-        if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-        const list = db[table as keyof ServerDB] as any[];
-        const idx = list.findIndex((x: any) => x.id === record.id);
-        if (idx >= 0) {
-          list[idx] = { ...list[idx], ...record };
-        } else {
-          list.push(record);
-        }
-        writeDB(db);
-        return Promise.resolve({ data: record, error: null });
-      },
-      insert: (recordOrList: any) => {
-        const db = readDB();
-        const items = Array.isArray(recordOrList) ? recordOrList : [recordOrList];
-        if (table === 'stock_produits' || table === 'stock_mouvements') {
-          if (!db.companies) db.companies = [];
-          for (const item of items) {
-            if (item.company_id) {
-              if (!db.companies.some((c: any) => c.id === item.company_id)) {
-                db.companies.push({
-                  id: item.company_id,
-                  nom: 'Exploitation Agricole Lahcen Pointeur',
-                  code: 'LAH',
-                  actif: true,
-                });
-                writeDB(db);
-              }
+            return returnSelect ? { data: removed, error: null } : { error: null };
+          };
+          const builder: any = {
+            eq: (col: string, val: any) => {
+              const prev = filter;
+              filter = (x: any) => prev(x) && x[col] === val;
+              return builder;
+            },
+            neq: (col: string, val: any) => {
+              const prev = filter;
+              filter = (x: any) => prev(x) && x[col] !== val;
+              return builder;
+            },
+            in: (col: string, vals: any[]) => {
+              const prev = filter;
+              filter = (x: any) => prev(x) && Array.isArray(vals) && vals.includes(x[col]);
+              return builder;
+            },
+            select: (_fields?: string) => {
+              returnSelect = true;
+              return builder;
+            },
+            then: (cb: any, rej?: any) => {
+              return Promise.resolve(executeDelete()).then(cb, rej);
+            },
+          };
+          return builder;
+        },
+        upsert: (recordOrList: any, options?: { onConflict?: string }) => {
+          const db = readDB();
+          if (!db[dbKey]) (db as any)[dbKey] = [];
+          const list = db[dbKey] as any[];
+          const items = Array.isArray(recordOrList) ? recordOrList : [recordOrList];
+          const conflictCols = options?.onConflict
+            ? options.onConflict.split(',').map((s) => s.trim()).filter(Boolean)
+            : ['id'];
+
+          const savedItems: any[] = [];
+          for (const rec of items) {
+            const idx = list.findIndex((x: any) =>
+              conflictCols.every((col) => rec[col] !== undefined && x[col] === rec[col])
+            );
+            if (idx >= 0) {
+              list[idx] = { ...list[idx], ...rec };
+              savedItems.push(list[idx]);
             } else {
-              const fkErr = new Error(`insert or update on table "${table}" violates foreign key constraint "${table}_company_id_fkey"`);
-              return {
-                select: () => ({
-                  single: () => Promise.resolve({ data: null, error: fkErr }),
-                  then: (_cb: any, rej?: any) => Promise.resolve({ data: null, error: fkErr }).then(_cb, rej)
-                }),
-                then: (_onFulfilled: any, onRejected?: any) => {
-                  return Promise.resolve({ data: null, error: fkErr }).then(_onFulfilled, onRejected);
-                }
-              };
+              list.push(rec);
+              savedItems.push(rec);
             }
           }
-        }
-
-        if (!db[table as keyof ServerDB]) (db as any)[table] = [];
-        for (const item of items) {
-          (db[table as keyof ServerDB] as any[]).push(item);
-        }
-        writeDB(db);
-
-        const singleData = items[0];
-        const resData = Array.isArray(recordOrList) ? items : singleData;
-        return {
-          select: () => ({
-            single: () => Promise.resolve({ data: singleData, error: null }),
-            then: (cb: any, rej?: any) => Promise.resolve({ data: resData, error: null }).then(cb, rej)
-          }),
-          then: (onFulfilled: any, onRejected?: any) => {
-            return Promise.resolve({ data: resData, error: null }).then(onFulfilled, onRejected);
+          writeDB(db);
+          const singleData = savedItems[0] || null;
+          const resData = Array.isArray(recordOrList) ? savedItems : singleData;
+          return {
+            select: () => ({
+              single: () => Promise.resolve({ data: singleData, error: null }),
+              maybeSingle: () => Promise.resolve({ data: singleData, error: null }),
+              then: (cb: any, rej?: any) => Promise.resolve({ data: resData, error: null }).then(cb, rej),
+            }),
+            then: (onFulfilled: any, onRejected?: any) =>
+              Promise.resolve({ data: resData, error: null }).then(onFulfilled, onRejected),
+          };
+        },
+        insert: (recordOrList: any) => {
+          const db = readDB();
+          const items = Array.isArray(recordOrList) ? recordOrList : [recordOrList];
+          if (table === 'stock_produits' || table === 'stock_mouvements') {
+            if (!db.companies) db.companies = [];
+            for (const item of items) {
+              if (item.company_id) {
+                if (!db.companies.some((c: any) => c.id === item.company_id)) {
+                  db.companies.push({
+                    id: item.company_id,
+                    nom: 'Exploitation Agricole Lahcen Pointeur',
+                    code: 'LAH',
+                    actif: true,
+                  });
+                  writeDB(db);
+                }
+              } else {
+                const fkErr = new Error(`insert or update on table "${table}" violates foreign key constraint "${table}_company_id_fkey"`);
+                return {
+                  select: () => ({
+                    single: () => Promise.resolve({ data: null, error: fkErr }),
+                    maybeSingle: () => Promise.resolve({ data: null, error: fkErr }),
+                    then: (_cb: any, rej?: any) => Promise.resolve({ data: null, error: fkErr }).then(_cb, rej)
+                  }),
+                  then: (_onFulfilled: any, onRejected?: any) => {
+                    return Promise.resolve({ data: null, error: fkErr }).then(_onFulfilled, onRejected);
+                  }
+                };
+              }
+            }
           }
-        };
-      }
-    })
+
+          if (!db[dbKey]) (db as any)[dbKey] = [];
+          for (const item of items) {
+            (db[dbKey] as any[]).push(item);
+          }
+          writeDB(db);
+
+          const singleData = items[0];
+          const resData = Array.isArray(recordOrList) ? items : singleData;
+          return {
+            select: () => ({
+              single: () => Promise.resolve({ data: singleData, error: null }),
+              maybeSingle: () => Promise.resolve({ data: singleData, error: null }),
+              then: (cb: any, rej?: any) => Promise.resolve({ data: resData, error: null }).then(cb, rej)
+            }),
+            then: (onFulfilled: any, onRejected?: any) => {
+              return Promise.resolve({ data: resData, error: null }).then(onFulfilled, onRejected);
+            }
+          };
+        }
+      };
+    }
   };
 }
 
-// Vérification stricte du rôle ADMIN (ou lecteur en GET seul si allowLecteur = true)
-async function authenticateAdmin(
-  req: Request,
-  options?: { allowLecteur?: boolean }
-): Promise<{
+// Vérification stricte du rôle ADMIN (Réservé aux modules critiques, ex: Stock Pro)
+async function authenticateAdmin(req: Request): Promise<{
   authenticated: boolean;
   error?: string;
   statusCode?: number;
-  admin?: { id: string; nom: string; company_id: string; role?: AppUserRole };
+  admin?: { id: string; nom: string; company_id: string };
   supabaseClient?: any;
 }> {
   const authHeader = req.headers.authorization;
@@ -1411,18 +1402,12 @@ async function authenticateAdmin(
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Bypass uniquement autorisé en développement local sans Supabase ET hors production
-  if (isDevTokenBypassAllowed() && (token === 'dev_admin_token' || token === 'dev_lecteur_token')) {
-    const isLecteur = token === 'dev_lecteur_token';
-    if (isLecteur && (!options?.allowLecteur || req.method !== 'GET')) {
-      return {
-        authenticated: false,
-        error: 'Action interdite : compte en lecture seule (lecteur).',
-        statusCode: 403,
-      };
-    }
+  if (isDevTokensEnabled() && STATIC_ADMIN_DEV_TOKENS.has(token)) {
+    const db = readDB();
+    const companies = db.companies || [];
     const profileCompanyId = 'cie_lahcen_pointeur';
     const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+
     if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
       return {
         authenticated: false,
@@ -1430,19 +1415,32 @@ async function authenticateAdmin(
         statusCode: 400,
       };
     }
+
+    const compFound = companies.find((c: any) => c.id === profileCompanyId);
+    if (!compFound) {
+      return {
+        authenticated: false,
+        error: `L'entreprise associée au profil ("${profileCompanyId}") est introuvable dans la table "companies". Accès bloqué.`,
+        statusCode: 400,
+      };
+    }
+
     return {
       authenticated: true,
       admin: {
-        id: isLecteur ? 'usr_lecteur' : 'usr_admin',
-        nom: isLecteur ? 'Mahdi (Lecteur)' : 'Lahcen (Administrateur)',
+        id: 'usr_admin',
+        nom: 'Lahcen (Administrateur)',
         company_id: profileCompanyId,
-        role: isLecteur ? 'lecteur' : 'admin',
       },
-      supabaseClient: createLocalDbClient(),
+      supabaseClient: isSupabaseConfiguredServer ? getSupabaseClientForRequest(token) : createLocalDbClient(),
     };
   }
 
-  if (!isSupabaseConfigured) {
+  if (!isThreePartJwt(token)) {
+    return { authenticated: false, error: 'Jeton de session invalide.', statusCode: 401 };
+  }
+
+  if (!isSupabaseConfiguredServer) {
     return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
   }
 
@@ -1456,7 +1454,7 @@ async function authenticateAdmin(
     const dbQueryClient = supabaseAdmin || client;
     const { data: profile, error: profileError } = await dbQueryClient
       .from('profiles')
-      .select('id, company_id, role, actif, nom, username')
+      .select('*')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -1468,20 +1466,16 @@ async function authenticateAdmin(
       return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
     }
 
-    if (!profile.actif) {
-      return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
+    const userEmail = (user.email || '').toLowerCase();
+    const isTariq = userEmail === 'tariq@caporal.com' || String((profile as any).username || '').toLowerCase() === 'tariq';
+    if (isTariq || profile.role === 'caporal_contractuelles' || profile.module_attribue === 'contractuelles') {
+      return { authenticated: false, error: 'Action interdite : ce compte est strictement réservé au module Contractuelles.', statusCode: 403 };
     }
 
-    const resolvedRole = resolveAuthRole(profile.role, user.email, profile.username, user.user_metadata);
-    if (resolvedRole === 'lecteur') {
-      if (!options?.allowLecteur || req.method !== 'GET') {
-        return { authenticated: false, error: 'Action interdite : compte en lecture seule (lecteur).', statusCode: 403 };
-      }
-    } else if (resolvedRole !== 'admin') {
+    if (profile.role !== 'admin' || profile.actif === false) {
       return { authenticated: false, error: 'Action interdite : rôle Administrateur actif requis.', statusCode: 403 };
     }
 
-    // Récupération stricte du company_id depuis le profil vérifié
     const profileCompanyId = (profile.company_id || '').trim();
     if (!profileCompanyId) {
       return {
@@ -1491,7 +1485,6 @@ async function authenticateAdmin(
       };
     }
 
-    // Sécurité multi-tenant : validation de l'en-tête x-company-id s'il est fourni
     const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
     if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
       return {
@@ -1505,9 +1498,8 @@ async function authenticateAdmin(
       authenticated: true,
       admin: {
         id: profile.id,
-        nom: profile.nom || (resolvedRole === 'lecteur' ? 'Lecteur' : 'Administrateur'),
+        nom: profile.nom || 'Administrateur',
         company_id: profileCompanyId,
-        role: resolvedRole,
       },
       supabaseClient: client,
     };
@@ -1516,12 +1508,12 @@ async function authenticateAdmin(
   }
 }
 
-// Vérification ciblée des rôles CAPORAL, ADMIN ou LECTEUR pour les modules autorisés (Heures Sup, Tâches Sup, Récolte)
+// Vérification ciblée des rôles CAPORAL (Récolte) ou ADMIN pour les modules autorisés (Heures Sup, Tâches Sup, Récolte)
 async function authenticateCaporalOrAdmin(req: Request): Promise<{
   authenticated: boolean;
   error?: string;
   statusCode?: number;
-  user?: { id: string; nom: string; role: AppUserRole; company_id: string };
+  user?: { id: string; nom: string; role: 'admin' | 'caporal'; company_id: string };
   supabaseClient?: any;
 }> {
   const authHeader = req.headers.authorization;
@@ -1534,31 +1526,11 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Bypass STRICTEMENT interdit en production et lorsque Supabase est configuré
-  if (
-    isDevTokenBypassAllowed() &&
-    (token === 'dev_admin_token' ||
-      token === 'dev_caporal_token' ||
-      token === 'dev_caporal_contractuel_token' ||
-      token === 'dev_lecteur_token' ||
-      token === 'usr_caporal_brahim')
-  ) {
-    const isLecteur = token === 'dev_lecteur_token';
-    const isContractuelCaporal = token === 'dev_caporal_contractuel_token';
-    const isCaporal = token === 'dev_caporal_token' || token === 'usr_caporal_brahim';
-    const role: AppUserRole = isLecteur
-      ? 'lecteur'
-      : isContractuelCaporal
-      ? 'caporal_contractuelles'
-      : isCaporal
-      ? 'caporal'
-      : 'admin';
-    const nom = isLecteur
-      ? 'Mahdi (Lecteur)'
-      : isCaporal || isContractuelCaporal
-      ? 'Brahim (Caporal)'
-      : 'Lahcen (Administrateur)';
-    const userId = isLecteur ? 'usr_lecteur' : isCaporal ? 'usr_caporal_1' : 'usr_admin';
+  if (isDevTokensEnabled() && (STATIC_ADMIN_DEV_TOKENS.has(token) || STATIC_CAPORAL_DEV_TOKENS.has(token))) {
+    const isCaporal = STATIC_CAPORAL_DEV_TOKENS.has(token);
+    const role: 'admin' | 'caporal' = isCaporal ? 'caporal' : 'admin';
+    const nom = isCaporal ? 'Brahim (Caporal)' : 'Lahcen (Administrateur)';
+    const userId = isCaporal ? 'usr_caporal_1' : 'usr_admin';
 
     const db = readDB();
     const companies = db.companies || [];
@@ -1590,11 +1562,15 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
         role,
         company_id: profileCompanyId,
       },
-      supabaseClient: createLocalDbClient(),
+      supabaseClient: isSupabaseConfiguredServer ? getSupabaseClientForRequest(token) : createLocalDbClient(),
     };
   }
 
-  if (!isSupabaseConfigured) {
+  if (!isThreePartJwt(token)) {
+    return { authenticated: false, error: 'Jeton de session invalide.', statusCode: 401 };
+  }
+
+  if (!isSupabaseConfiguredServer) {
     return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
   }
 
@@ -1606,39 +1582,31 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
     }
 
     const dbQueryClient = supabaseAdmin || client;
-    let { data: profile, error: profileError } = await dbQueryClient
+    const { data: profile, error: profileError } = await dbQueryClient
       .from('profiles')
-      .select('id, company_id, role, actif, nom, username')
+      .select('*')
       .eq('id', user.id)
       .maybeSingle();
 
-    const userEmail = (user.email || '').toLowerCase();
-    const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
-
     if (profileError || !profile) {
-      if (isAdminEmail || supabaseAdmin) {
-        const inferredRole = resolveAuthRole(user.user_metadata?.role, userEmail, user.user_metadata?.username, user.user_metadata);
-        const newProfile = {
-          id: user.id,
-          username: userEmail.split('@')[0] || 'user',
-          nom: inferredRole === 'admin' ? 'Lahcen (Administrateur)' : (user.user_metadata?.nom || userEmail.split('@')[0] || 'Utilisateur'),
-          role: inferredRole,
-          company_id: user.user_metadata?.company_id || 'cie_lahcen_pointeur',
-          actif: true,
-        };
-        await dbQueryClient.from('profiles').upsert(newProfile, { onConflict: 'id' });
-        profile = newProfile;
-      } else {
-        return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
-      }
+      return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
     }
 
-    const actualRole = resolveAuthRole(profile.role, userEmail, profile.username, user.user_metadata);
-    if (!profile.actif) {
+    const userEmail = (user.email || '').toLowerCase();
+    const isTariq = userEmail === 'tariq@caporal.com' || String((profile as any).username || '').toLowerCase() === 'tariq';
+    if (isTariq || profile.role === 'caporal_contractuelles' || profile.module_attribue === 'contractuelles') {
+      return { authenticated: false, error: 'Action interdite : ce compte est strictement réservé au module Contractuelles.', statusCode: 403 };
+    }
+
+    if (profile.actif === false) {
       return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
     }
 
-    const adminDb = supabaseAdmin || client;
+    if (profile.role !== 'admin' && profile.role !== 'caporal') {
+      return { authenticated: false, error: 'Action interdite : rôle non autorisé.', statusCode: 403 };
+    }
+
+    const actualRole: 'admin' | 'caporal' = profile.role === 'admin' ? 'admin' : 'caporal';
     const profileCompanyId = (profile.company_id || '').trim();
     if (!profileCompanyId) {
       return {
@@ -1657,7 +1625,7 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
       };
     }
 
-    const { data: compCheck, error: compErr } = await adminDb
+    const { data: compCheck, error: compErr } = await dbQueryClient
       .from('companies')
       .select('id, nom, code')
       .eq('id', profileCompanyId)
@@ -1675,7 +1643,7 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
       authenticated: true,
       user: {
         id: profile.id,
-        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : actualRole === 'lecteur' ? 'Lecteur' : 'Caporal'),
+        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : 'Caporal'),
         role: actualRole,
         company_id: compCheck.id,
       },
@@ -1686,9 +1654,134 @@ async function authenticateCaporalOrAdmin(req: Request): Promise<{
   }
 }
 
+// Authentification pour tout utilisateur actif (Admin, Caporal Récolte ou Caporal Contractuelles)
+async function authenticateActiveUser(req: Request): Promise<{
+  authenticated: boolean;
+  error?: string;
+  statusCode?: number;
+  user?: {
+    id: string;
+    nom: string;
+    role: 'admin' | 'caporal' | 'caporal_contractuelles';
+    company_id: string;
+    domaines_autorises?: string[];
+    serres_autorisees?: string[];
+  };
+  supabaseClient?: any;
+}> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return { authenticated: false, error: 'Authentification requise (en-tête manquant).', statusCode: 401 };
+  }
+
+  const token = authHeader.replace('Bearer ', '').trim();
+  if (!token || token === 'none') {
+    return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
+  }
+
+  if (
+    isDevTokensEnabled() &&
+    (STATIC_ADMIN_DEV_TOKENS.has(token) ||
+      STATIC_CAPORAL_DEV_TOKENS.has(token) ||
+      STATIC_CONTRACTUEL_DEV_TOKENS.has(token))
+  ) {
+    const profileCompanyId = 'cie_lahcen_pointeur';
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+
+    const role: 'admin' | 'caporal' | 'caporal_contractuelles' = STATIC_ADMIN_DEV_TOKENS.has(token)
+      ? 'admin'
+      : STATIC_CONTRACTUEL_DEV_TOKENS.has(token)
+        ? 'caporal_contractuelles'
+        : 'caporal';
+
+    return {
+      authenticated: true,
+      user: {
+        id: role === 'admin' ? 'usr_admin' : role === 'caporal_contractuelles' ? 'usr_caporal_contractuel_1' : 'usr_caporal_1',
+        nom: role === 'admin' ? 'Lahcen (Administrateur)' : role === 'caporal_contractuelles' ? 'Caporal (Contractuelles)' : 'Brahim (Caporal)',
+        role,
+        company_id: profileCompanyId,
+      },
+      supabaseClient: isSupabaseConfiguredServer ? getSupabaseClientForRequest(token) : createLocalDbClient(),
+    };
+  }
+
+  if (!isThreePartJwt(token)) {
+    return { authenticated: false, error: 'Jeton de session invalide.', statusCode: 401 };
+  }
+
+  if (!isSupabaseConfiguredServer) {
+    return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
+  }
+
+  try {
+    const client = getSupabaseClientForRequest(token);
+    const { data: { user }, error: authError } = await client.auth.getUser(token);
+    if (authError || !user) {
+      return { authenticated: false, error: 'Session invalide ou expirée.', statusCode: 401 };
+    }
+
+    const dbQueryClient = supabaseAdmin || client;
+    const { data: profile, error: profileError } = await dbQueryClient
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profileError || !profile || profile.actif === false) {
+      return { authenticated: false, error: 'Profil utilisateur introuvable ou inactif.', statusCode: 403 };
+    }
+
+    const profileCompanyId = (profile.company_id || '').trim();
+    if (!profileCompanyId) {
+      return { authenticated: false, error: 'Profil non rattaché à une entreprise.', statusCode: 400 };
+    }
+
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
+
+    const userEmail = (user.email || '').toLowerCase();
+    const isTariq = userEmail === 'tariq@caporal.com' || String(profile.username || '').toLowerCase() === 'tariq';
+    const effectiveRole: 'admin' | 'caporal' | 'caporal_contractuelles' =
+      isTariq || profile.role === 'caporal_contractuelles' || profile.module_attribue === 'contractuelles'
+        ? (profile.role === 'admin' && !isTariq ? 'admin' : 'caporal_contractuelles')
+        : profile.role === 'admin'
+          ? 'admin'
+          : 'caporal';
+
+    return {
+      authenticated: true,
+      user: {
+        id: profile.id,
+        nom: profile.nom || 'Utilisateur',
+        role: effectiveRole,
+        company_id: profileCompanyId,
+        domaines_autorises: Array.isArray(profile.domaines_autorises) ? profile.domaines_autorises : [],
+        serres_autorisees: Array.isArray(profile.serres_autorisees) ? profile.serres_autorisees : [],
+      },
+      supabaseClient: client,
+    };
+  } catch (err: any) {
+    return { authenticated: false, error: 'Erreur vérification Supabase: ' + err.message, statusCode: 500 };
+  }
+}
+
 // 1. GET /api/stock : Récupérer le catalogue et le stock actuel consolidé depuis PostgreSQL
 app.get('/api/stock', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req, { allowLecteur: true });
+  const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -2184,10 +2277,10 @@ app.put('/api/stock/produit/:id', async (req: Request, res: Response) => {
       .eq('produit_id', id)
       .eq('company_id', companyId);
 
-    // Synchronisation DB locale si présente
+    // Synchronisation DB locale si présente (strictement scopée par company_id)
     const localDb = readDB();
     if (localDb.stock_produits) {
-      const idx = localDb.stock_produits.findIndex((p: any) => p.id === id);
+      const idx = localDb.stock_produits.findIndex((p: any) => p.id === id && p.company_id === companyId);
       if (idx !== -1) {
         localDb.stock_produits[idx] = {
           ...localDb.stock_produits[idx],
@@ -2256,13 +2349,13 @@ app.delete('/api/stock/produit/:id', async (req: Request, res: Response) => {
 
     if (prodErr) throw new Error('Erreur suppression produit: ' + prodErr.message);
 
-    // Nettoyage DB locale
+    // Nettoyage DB locale scopé par company_id
     const localDb = readDB();
     if (localDb.stock_produits) {
-      localDb.stock_produits = localDb.stock_produits.filter((p: any) => p.id !== id);
+      localDb.stock_produits = localDb.stock_produits.filter((p: any) => p.id !== id || p.company_id !== companyId);
     }
     if (localDb.stock_mouvements) {
-      localDb.stock_mouvements = localDb.stock_mouvements.filter((m: any) => m.produit_id !== id);
+      localDb.stock_mouvements = localDb.stock_mouvements.filter((m: any) => m.produit_id !== id || m.company_id !== companyId);
     }
     writeDB(localDb);
 
@@ -2325,10 +2418,9 @@ app.post('/api/stock/reset-catalogue', async (req: Request, res: Response) => {
       throw new Error('Erreur suppression des produits du catalogue: ' + delProdsErr.message);
     }
 
-    // 3. Vider le stockage local tout en préservant 100% des autres modules
-    // (users, serres, recoltes, heures_supplementaires, taches_supplementaires, companies restent intacts)
-    localDb.stock_produits = [];
-    localDb.stock_mouvements = [];
+    // 3. Vider le stockage local de l'entreprise courante tout en préservant les autres sociétés et modules
+    localDb.stock_produits = (localDb.stock_produits || []).filter((p: any) => p.company_id !== companyId);
+    localDb.stock_mouvements = (localDb.stock_mouvements || []).filter((m: any) => m.company_id !== companyId);
     writeDB(localDb);
 
     res.json({
@@ -2915,7 +3007,7 @@ app.post('/api/stock/correction', async (req: Request, res: Response) => {
 
 // 7. GET /api/stock/mouvements : Récupérer l'historique des mouvements avec filtres (PostgreSQL Only)
 app.get('/api/stock/mouvements', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req, { allowLecteur: true });
+  const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -3549,8 +3641,38 @@ async function fetchMergedTachesSupplementaires(
   return Array.from(byId.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 
-// Helper pour retrouver un ouvrier légitime dans la base (aucun ouvrier ne peut être créé automatiquement)
-async function findRealCompanyWorker(dbClient: any, companyId: string, criteria: { numero?: number; id?: string }) {
+const PROVISIONAL_DEMO_WORKERS_BY_NUM: Record<number, string> = {
+  1: 'Mohammed Amine',
+  2: 'Fatima Zahra',
+  3: 'Youssef El Idrissi',
+  4: 'Hassan Benali',
+  5: 'Khadija Mansouri',
+  6: 'Brahim Oukacha',
+  7: 'Aïcha Tazi',
+  8: 'Omar Naciri',
+  9: 'Salma Daoudi',
+  10: 'Khalid Berrada',
+  11: 'Zineb Alaoui',
+  12: 'Mustapha Chaoui',
+  13: 'Nadia El Fassi',
+  14: 'Rachid Bouzid',
+  15: 'Samira Bennani',
+};
+
+function isProvisionalDemoWorkerRow(row: any): boolean {
+  if (!row || !row.numero) return false;
+  const expected = PROVISIONAL_DEMO_WORKERS_BY_NUM[Number(row.numero)];
+  return Boolean(expected && row.id === `ouv_${row.numero}` && String(row.nom || '').trim() === expected);
+}
+
+// Helper pour retrouver un ouvrier légitime dans la base (priorité au nom réel issu de Pointage Matin sur les données démo provisoires)
+async function findRealCompanyWorker(
+  dbClient: any,
+  companyId: string,
+  criteria: { numero?: number; id?: string; nom_hint?: string }
+) {
+  const hintNom = criteria.nom_hint ? String(criteria.nom_hint).trim() : '';
+
   if (criteria.numero !== undefined) {
     const num = Number(criteria.numero);
     if (isNaN(num) || num <= 0) return null;
@@ -3561,9 +3683,27 @@ async function findRealCompanyWorker(dbClient: any, companyId: string, criteria:
         .eq('company_id', companyId)
         .eq('numero', num)
         .maybeSingle();
-      if (data) return data;
+      if (data) {
+        if (hintNom && isProvisionalDemoWorkerRow(data)) {
+          return {
+            ...data,
+            id: criteria.id ? String(criteria.id).trim() : data.id,
+            nom: hintNom,
+          };
+        }
+        return data;
+      }
     } catch {
       // ignore
+    }
+    if (hintNom) {
+      return {
+        id: criteria.id ? String(criteria.id).trim() : `ouv_${num}`,
+        company_id: companyId,
+        numero: num,
+        nom: hintNom,
+        actif: true,
+      };
     }
     const local = readDB();
     const found = (local.ouvriers || []).find(
@@ -3581,9 +3721,23 @@ async function findRealCompanyWorker(dbClient: any, companyId: string, criteria:
         .eq('company_id', companyId)
         .eq('id', sId)
         .maybeSingle();
-      if (data) return data;
+      if (data) {
+        if (hintNom && isProvisionalDemoWorkerRow(data)) {
+          return { ...data, nom: hintNom };
+        }
+        return data;
+      }
     } catch {
       // ignore
+    }
+    if (hintNom && criteria.numero !== undefined && !isNaN(Number(criteria.numero))) {
+      return {
+        id: sId,
+        company_id: companyId,
+        numero: Number(criteria.numero),
+        nom: hintNom,
+        actif: true,
+      };
     }
     const local = readDB();
     const found = (local.ouvriers || []).find(
@@ -3603,36 +3757,30 @@ app.get('/api/ouvriers', async (req: Request, res: Response) => {
       return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
     }
     const companyId = auth.user.company_id;
-    const actionClient = supabaseAdmin || auth.supabaseClient;
-    const { data, error } = await actionClient
+    const { data } = await auth.supabaseClient
       .from('ouvriers')
       .select('*')
       .eq('company_id', companyId)
       .order('numero', { ascending: true });
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture ouvriers Supabase: ' + error.message });
-    }
-    if (isSupabaseConfigured) {
-      return res.json({ success: true, ouvriers: data || [] });
-    }
     if (data && data.length > 0) {
       return res.json({ success: true, ouvriers: data });
     }
     const local = readDB();
-    return res.json({ success: true, ouvriers: local.ouvriers || [] });
+    const localOuvriers = (local.ouvriers || []).filter((o: any) => o.company_id === companyId);
+    return res.json({ success: true, ouvriers: localOuvriers });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // =========================================================================
-// SECTION 1 : HEURES SUPPLÉMENTAIRES (ADMIN + LECTEUR EN LECTURE SEULE)
+// SECTION 1 : HEURES SUPPLÉMENTAIRES (RÉSERVÉ EXCLUSIVEMENT À ADMIN)
 // =========================================================================
 
-// 1. GET /api/heures-supplementaires : Consultation filtrée des heures sup
+// 1. GET /api/heures-supplementaires : Consultation filtrée des heures sup (ADMIN ONLY)
 app.get('/api/heures-supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req, { allowLecteur: true });
+  const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -3668,6 +3816,7 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
     const {
       ouvrier_id,
       numero_ouvrier,
+      nom_ouvrier,
       date,
       heure_debut,
       heure_fin,
@@ -3691,11 +3840,12 @@ app.post('/api/heures-supplementaires', async (req: Request, res: Response) => {
     const companyId = auth.admin.company_id;
     const dbClient = auth.supabaseClient;
 
-    // Validation stricte du travailleur existant (Interdiction formelle de créer un ouvrier depuis ce module)
+    // Validation du travailleur existant (priorité Supabase ou nom réel issu du Pointage Matin)
     const numOuvrier = numero_ouvrier !== undefined ? parseInt(String(numero_ouvrier), 10) : undefined;
     const realWorker = await findRealCompanyWorker(dbClient, companyId, {
       numero: !isNaN(numOuvrier as number) ? numOuvrier : undefined,
       id: ouvrier_id ? String(ouvrier_id) : undefined,
+      nom_hint: nom_ouvrier ? String(nom_ouvrier).trim() : undefined,
     });
 
     if (!realWorker) {
@@ -4080,9 +4230,9 @@ app.delete('/api/heures-supplementaires/:id', async (req: Request, res: Response
 
 const tachesIdempotencyCache = new Map<string, { createdAt: number; payload: any }>();
 
-// 1. GET /api/taches-supplementaires : Consultation filtrée des tâches sup
+// 1. GET /api/taches-supplementaires : Consultation filtrée des tâches sup (ADMIN ONLY)
 app.get('/api/taches-supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req, { allowLecteur: true });
+  const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -4120,6 +4270,7 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       ouvriers,
       ouvrier_id,
       numero_ouvrier,
+      nom_ouvrier,
       date,
       tache_id,
       nom_tache,
@@ -4176,9 +4327,11 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       for (const w of ouvriers) {
         const wNum = w?.numero !== undefined ? Number(w.numero) : undefined;
         const wId = w?.id ? String(w.id) : undefined;
+        const wNomHint = w?.nom ? String(w.nom).trim() : (w?.nom_ouvrier ? String(w.nom_ouvrier).trim() : undefined);
         const found = await findRealCompanyWorker(dbClient, companyId, {
           numero: wNum !== undefined && !isNaN(wNum) ? wNum : undefined,
           id: wId,
+          nom_hint: wNomHint,
         });
 
         if (!found) {
@@ -4219,6 +4372,7 @@ app.post('/api/taches-supplementaires', async (req: Request, res: Response) => {
       const found = await findRealCompanyWorker(dbClient, companyId, {
         numero: !isNaN(num as number) ? num : undefined,
         id: ouvrier_id ? String(ouvrier_id) : undefined,
+        nom_hint: nom_ouvrier ? String(nom_ouvrier).trim() : undefined,
       });
       if (!found) {
         return res.status(400).json({
@@ -4537,7 +4691,7 @@ app.delete('/api/taches-supplementaires/:id', async (req: Request, res: Response
 // =========================================================================
 
 app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req, { allowLecteur: true });
+  const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -4564,16 +4718,15 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
       fetchMergedTachesSupplementaires(dbClient, companyId, filters),
     ]);
 
-    // 3. Charger le référentiel des ouvriers pour les noms complets et numéros
-    const local = readDB();
-    const allWorkers: any[] = local.ouvriers || [];
+    // 3. Charger uniquement les ouvriers réels depuis Supabase (exclure les 15 ouvriers démo provisoires)
+    const allWorkers: any[] = [];
     try {
       const { data: dbWorkers } = await dbClient
         .from('ouvriers')
         .select('id, numero, nom')
         .eq('company_id', companyId);
       if (dbWorkers && dbWorkers.length > 0) {
-        allWorkers.push(...dbWorkers);
+        allWorkers.push(...dbWorkers.filter((w: any) => !isProvisionalDemoWorkerRow(w)));
       }
     } catch {
       // ignore
@@ -4761,7 +4914,7 @@ app.get('/api/supplementaires/recap', async (req: Request, res: Response) => {
 // =========================================================================
 
 app.get('/api/supplementaires', async (req: Request, res: Response) => {
-  const auth = await authenticateAdmin(req, { allowLecteur: true });
+  const auth = await authenticateAdmin(req);
   if (!auth.authenticated || !auth.admin || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
@@ -4860,7 +5013,7 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
   user?: {
     id: string;
     nom: string;
-    role: AppUserRole;
+    role: 'admin' | 'caporal' | 'caporal_contractuelles';
     company_id: string;
     module_attribue?: 'recolte' | 'contractuelles' | 'all';
     domaines_autorises?: string[];
@@ -4878,40 +5031,50 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
     return { authenticated: false, error: 'Jeton de session Supabase manquant ou invalide.', statusCode: 401 };
   }
 
-  // Bypass uniquement autorisé en développement local sans Supabase ET hors production
-  if (
-    isDevTokenBypassAllowed() &&
-    (token === 'dev_admin_token' ||
-      token === 'dev_caporal_contractuel_token' ||
-      token === 'dev_caporal_token' ||
-      token === 'dev_lecteur_token')
-  ) {
-    const isLecteur = token === 'dev_lecteur_token';
-    const isContractuelCaporal = token === 'dev_caporal_contractuel_token' || token === 'dev_caporal_token';
-    const role: AppUserRole = isLecteur ? 'lecteur' : isContractuelCaporal ? 'caporal_contractuelles' : 'admin';
-    const nom = isLecteur
-      ? 'Mahdi (Lecteur)'
-      : isContractuelCaporal
-      ? 'Caporal (Contractuelles)'
-      : 'Lahcen (Administrateur)';
-    const userId = isLecteur ? 'usr_lecteur' : isContractuelCaporal ? 'usr_caporal_contractuel_1' : 'usr_admin';
+  // Support dev local / tests strictement conditionné à ALLOW_DEV_TOKENS === 'true' hors production
+  if (isDevTokensEnabled() && (STATIC_ADMIN_DEV_TOKENS.has(token) || STATIC_CONTRACTUEL_DEV_TOKENS.has(token))) {
+    const isAdmin = STATIC_ADMIN_DEV_TOKENS.has(token);
+    const role = isAdmin ? 'admin' : 'caporal_contractuelles';
+    const nom = isAdmin ? 'Lahcen (Administrateur)' : 'Caporal (Contractuelles)';
+    const userId = isAdmin ? 'usr_admin' : 'usr_caporal_contractuel_1';
     const profileCompanyId = 'cie_lahcen_pointeur';
+
+    const clientCompanyHeader = (req.headers['x-company-id'] as string || '').trim();
+    if (clientCompanyHeader && clientCompanyHeader !== profileCompanyId) {
+      return {
+        authenticated: false,
+        error: `Violation de cloisonnement : l'en-tête x-company-id ("${clientCompanyHeader}") ne correspond pas à l'entreprise du profil authentifié.`,
+        statusCode: 400,
+      };
+    }
 
     return {
       authenticated: true,
       user: {
         id: userId,
         nom,
-        role,
+        role: role as any,
         company_id: profileCompanyId,
-        module_attribue: role === 'caporal_contractuelles' ? 'contractuelles' : 'all',
+        module_attribue: isAdmin ? 'all' : 'contractuelles',
         domaines_autorises: [],
       },
-      supabaseClient: createLocalDbClient(),
+      supabaseClient: isSupabaseConfiguredServer ? getSupabaseClientForRequest(token) : createLocalDbClient(),
     };
   }
 
-  if (!isSupabaseConfigured) {
+  if (isDevTokensEnabled() && STATIC_CAPORAL_DEV_TOKENS.has(token)) {
+    return {
+      authenticated: false,
+      error: 'Action interdite : votre compte Caporal est affecté au module Récolte et ne possède pas d\'autorisation sur les Contractuelles.',
+      statusCode: 403,
+    };
+  }
+
+  if (!isThreePartJwt(token)) {
+    return { authenticated: false, error: 'Jeton de session invalide.', statusCode: 401 };
+  }
+
+  if (!isSupabaseConfiguredServer) {
     return { authenticated: false, error: 'Configuration Supabase absente sur le serveur.', statusCode: 500 };
   }
 
@@ -4923,65 +5086,34 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
     }
 
     const adminDb = supabaseAdmin || client;
-    let { data: profile, error: profileError } = await adminDb
+    const { data: profile, error: profileError } = await adminDb
       .from('profiles')
       .select('*')
       .eq('id', authUser.id)
       .maybeSingle();
 
-    if (profileError) {
-      return { authenticated: false, error: 'Erreur lecture profil Supabase: ' + profileError.message, statusCode: 500 };
+    if (profileError || !profile) {
+      return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
     }
 
-    const userEmail = (authUser.email || '').toLowerCase();
-    const isAdminEmail = userEmail === 'lahcengelmim@gmail.com' || userEmail.startsWith('admin');
-
-    if (!profile) {
-      if (isAdminEmail || supabaseAdmin) {
-        const inferredRole = resolveAuthRole(authUser.user_metadata?.role, userEmail, authUser.user_metadata?.username, authUser.user_metadata);
-        const newProfile = {
-          id: authUser.id,
-          username: userEmail.split('@')[0] || 'admin',
-          nom: inferredRole === 'admin' ? 'Lahcen (Administrateur)' : (authUser.user_metadata?.nom || userEmail.split('@')[0] || 'Utilisateur'),
-          role: inferredRole,
-          company_id: authUser.user_metadata?.company_id || 'cie_lahcen_pointeur',
-          actif: true,
-        };
-        await adminDb.from('profiles').upsert(newProfile, { onConflict: 'id' });
-        profile = newProfile;
-      } else {
-        return { authenticated: false, error: 'Profil utilisateur introuvable dans la base de données.', statusCode: 403 };
-      }
-    }
-
-    if (!profile.actif) {
+    if (profile.actif === false) {
       return { authenticated: false, error: 'Action interdite : compte utilisateur inactif.', statusCode: 403 };
     }
 
-    const actualRole = resolveAuthRole(profile.role, userEmail, profile.username, authUser.user_metadata);
-    const isTariq = userEmail === 'tariq@caporal.com' || profile.username === 'tariq';
-    const isAuthorizedRole =
-      actualRole === 'admin' ||
-      actualRole === 'caporal_contractuelles' ||
-      actualRole === 'lecteur' ||
+    const userEmail = (authUser.email || '').toLowerCase();
+    const isTariq = userEmail === 'tariq@caporal.com' || String(profile.username || '').toLowerCase() === 'tariq';
+    const isContractuelCaporal =
+      profile.role === 'caporal_contractuelles' ||
       profile.module_attribue === 'contractuelles' ||
       isTariq;
+    const isAdmin = !isContractuelCaporal && profile.role === 'admin';
 
-    if (!isAuthorizedRole) {
+    if (!isAdmin && !isContractuelCaporal) {
       return {
         authenticated: false,
         error: 'Action interdite : votre compte Caporal est affecté au module Récolte et ne possède pas d\'autorisation sur les Contractuelles.',
         statusCode: 403,
       };
-    }
-
-    // Auto-mise à jour du profil de tariq@caporal.com si la colonne module_attribue n'était pas encore positionnée
-    if (isTariq && profile.module_attribue !== 'contractuelles') {
-      adminDb
-        .from('profiles')
-        .update({ module_attribue: 'contractuelles', role: 'caporal_contractuelles' })
-        .eq('id', profile.id)
-        .then(() => {}, () => {});
     }
 
     const profileCompanyId = (profile.company_id || '').trim();
@@ -5006,12 +5138,12 @@ async function authenticateContractuelCaporalOrAdmin(req: Request): Promise<{
       authenticated: true,
       user: {
         id: profile.id,
-        nom: profile.nom || (actualRole === 'admin' ? 'Administrateur' : actualRole === 'lecteur' ? 'Lecteur' : 'Caporal Contractuelles'),
-        role: actualRole,
+        nom: profile.nom || (isAdmin ? 'Administrateur' : 'Caporal Contractuelles'),
+        role: isAdmin ? 'admin' : 'caporal_contractuelles',
         company_id: profileCompanyId,
-        module_attribue: actualRole === 'caporal_contractuelles' ? 'contractuelles' : 'all',
-        domaines_autorises: profile.domaines_autorises || authUser.user_metadata?.domaines_autorises || [],
-        serres_autorisees: profile.serres_autorisees || authUser.user_metadata?.serres_autorisees || [],
+        module_attribue: isAdmin ? 'all' : 'contractuelles',
+        domaines_autorises: Array.isArray(profile.domaines_autorises) ? profile.domaines_autorises : [],
+        serres_autorisees: Array.isArray(profile.serres_autorisees) ? profile.serres_autorisees : [],
       },
       supabaseClient: client,
     };
@@ -5047,17 +5179,11 @@ app.get('/api/contractuels/contrats', async (req: Request, res: Response) => {
 
     const { data, error } = await query.order('designation', { ascending: true });
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture contrats Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur lecture PostgreSQL contractuels_contrats: ' + error.message);
     }
 
     let contrats = data || [];
-    if (!isSupabaseConfigured && (error || !data)) {
-      const db = readDB();
-      let list = (db.contractuels_contrats || []).filter((c: any) => c.company_id === companyId);
-      if (actif === 'true') list = list.filter((c: any) => c.actif !== false);
-      contrats = list;
-    }
 
     if (searchQuery && typeof searchQuery === 'string' && searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
@@ -5129,18 +5255,18 @@ app.post('/api/contractuels/contrats', async (req: Request, res: Response) => {
 
     const { data, error } = await actionClient
       .from('contractuels_contrats')
-      .upsert(newContrat, { onConflict: 'id' })
+      .insert(newContrat)
       .select()
       .maybeSingle();
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur création contrat Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur insertion PostgreSQL contractuels_contrats: ' + error.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (!db.contractuels_contrats) db.contractuels_contrats = [];
-      db.contractuels_contrats.push(newContrat);
+    const db = readDB();
+    if (!db.contractuels_contrats) db.contractuels_contrats = [];
+    if (!db.contractuels_contrats.some((c: any) => c.id === newContrat.id)) {
+      db.contractuels_contrats.push(data || newContrat);
       writeDB(db);
     }
 
@@ -5168,18 +5294,15 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
 
-    const { data: existingData, error: existingErr } = await actionClient
+    // Récupérer les contrats existants pour dédoublonner
+    const { data: existingData } = await actionClient
       .from('contractuels_contrats')
       .select('*')
       .eq('company_id', companyId);
 
-    if (existingErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture contrats Supabase: ' + existingErr.message });
-    }
-
-    const db = !isSupabaseConfigured ? readDB() : null;
-    if (db && !db.contractuels_contrats) db.contractuels_contrats = [];
-    const localExisting = db ? (db.contractuels_contrats || []).filter((c: any) => c.company_id === companyId) : [];
+    const db = readDB();
+    if (!db.contractuels_contrats) db.contractuels_contrats = [];
+    const localExisting = db.contractuels_contrats.filter((c: any) => c.company_id === companyId);
     const existingList = existingData || localExisting;
 
     const importedContrats: any[] = [];
@@ -5206,6 +5329,7 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
       const modeClean = (['JOUR', 'TACHE', 'UNITE', 'HEURE'].includes(rawMode) ? rawMode : 'JOUR') as any;
       const uniteClean = String(item.unite || modeClean).trim().toUpperCase();
 
+      // Vérifier si un contrat avec cette désignation existe déjà
       const existing = existingList.find(
         (c: any) => c.designation.toLowerCase().trim() === desigClean.toLowerCase()
       );
@@ -5215,6 +5339,7 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
           skippedCount++;
           continue;
         }
+        // Mise à jour du prix et des propriétés
         const updatedRecord = {
           ...existing,
           prix_unitaire: prix,
@@ -5225,24 +5350,19 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
           updated_at: now,
         };
 
-        const { error: updErr } = await actionClient
+        await actionClient
           .from('contractuels_contrats')
           .update(updatedRecord)
           .eq('id', existing.id)
           .eq('company_id', companyId);
 
-        if (updErr && isSupabaseConfigured) {
-          throw new Error('Erreur mise à jour contrat Supabase: ' + updErr.message);
-        }
-
-        if (db?.contractuels_contrats) {
-          const localIdx = db.contractuels_contrats.findIndex((c: any) => c.id === existing.id);
-          if (localIdx >= 0) db.contractuels_contrats[localIdx] = updatedRecord;
-        }
+        const localIdx = db.contractuels_contrats.findIndex((c: any) => c.id === existing.id);
+        if (localIdx >= 0) db.contractuels_contrats[localIdx] = updatedRecord;
 
         importedContrats.push(updatedRecord);
         updatedCount++;
       } else {
+        // Création
         const id = `ct_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
         const code = item.code ? String(item.code).trim().toUpperCase() : `CTR-${String(existingList.length + createdCount + 1).padStart(3, '0')}`;
 
@@ -5261,19 +5381,14 @@ app.post('/api/contractuels/contrats/import', async (req: Request, res: Response
           updated_at: now,
         };
 
-        const { error: insErr } = await actionClient
-          .from('contractuels_contrats')
-          .upsert(newRecord, { onConflict: 'id' });
-        if (insErr && isSupabaseConfigured) {
-          throw new Error('Erreur insertion contrat Supabase: ' + insErr.message);
-        }
-        if (db?.contractuels_contrats) db.contractuels_contrats.push(newRecord);
+        await actionClient.from('contractuels_contrats').insert(newRecord);
+        db.contractuels_contrats.push(newRecord);
         importedContrats.push(newRecord);
         createdCount++;
       }
     }
 
-    if (db) writeDB(db);
+    writeDB(db);
 
     return res.json({
       success: true,
@@ -5332,18 +5447,16 @@ app.put('/api/contractuels/contrats/:id', async (req: Request, res: Response) =>
       .select()
       .maybeSingle();
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur mise à jour contrat Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur mise à jour PostgreSQL contractuels_contrats: ' + error.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (db.contractuels_contrats) {
-        const idx = db.contractuels_contrats.findIndex((c: any) => c.id === id && c.company_id === companyId);
-        if (idx >= 0) {
-          db.contractuels_contrats[idx] = { ...db.contractuels_contrats[idx], ...updatePayload };
-          writeDB(db);
-        }
+    const db = readDB();
+    if (db.contractuels_contrats) {
+      const idx = db.contractuels_contrats.findIndex((c: any) => c.id === id && c.company_id === companyId);
+      if (idx >= 0) {
+        db.contractuels_contrats[idx] = { ...db.contractuels_contrats[idx], ...updatePayload };
+        writeDB(db);
       }
     }
 
@@ -5372,16 +5485,14 @@ app.delete('/api/contractuels/contrats/:id', async (req: Request, res: Response)
       .eq('id', id)
       .eq('company_id', companyId);
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur suppression contrat Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur suppression PostgreSQL contractuels_contrats: ' + error.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (db.contractuels_contrats) {
-        db.contractuels_contrats = db.contractuels_contrats.filter((c: any) => c.id !== id || c.company_id !== companyId);
-        writeDB(db);
-      }
+    const db = readDB();
+    if (db.contractuels_contrats) {
+      db.contractuels_contrats = db.contractuels_contrats.filter((c: any) => c.id !== id || c.company_id !== companyId);
+      writeDB(db);
     }
 
     return res.json({ success: true, message: 'Contrat supprimé avec succès.' });
@@ -5417,6 +5528,15 @@ app.get('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const { actif, domaineId } = req.query;
 
+    const allowedDomaines =
+      auth.user.role === 'caporal_contractuelles' && auth.user.domaines_autorises && auth.user.domaines_autorises.length > 0
+        ? auth.user.domaines_autorises
+        : null;
+
+    if (allowedDomaines && domaineId && domaineId !== 'ALL' && !allowedDomaines.includes(String(domaineId))) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour ce domaine.' });
+    }
+
     let query = actionClient
       .from('contractuels_ouvriers')
       .select('*')
@@ -5427,36 +5547,32 @@ app.get('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
     }
     if (domaineId && domaineId !== 'ALL') {
       query = query.eq('domaine_id', String(domaineId));
+    } else if (allowedDomaines) {
+      query = query.in('domaine_id', allowedDomaines);
     }
 
     const { data, error } = await query.order('nom', { ascending: true });
 
     if (error) {
-      if (isSupabaseConfigured) {
-        return res.status(500).json({ success: false, error: 'Erreur lecture ouvriers contractuels Supabase: ' + error.message });
-      }
-      const db = readDB();
-      let list = (db.contractuels_ouvriers || []).filter(
-        (o: any) =>
-          o.company_id === companyId &&
-          !DEMO_CONTRACTUEL_IDS.includes(o.id) &&
-          !DEMO_CONTRACTUEL_NAMES.includes(String(o.nom_complet || `${o.nom} ${o.prenom}`).trim().toUpperCase())
-      );
-      if (actif === 'true') list = list.filter((o: any) => o.actif !== false);
-      if (domaineId && domaineId !== 'ALL') list = list.filter((o: any) => o.domaine_id === String(domaineId));
-      return res.json({ success: true, ouvriers: list });
+      throw new Error('Erreur lecture PostgreSQL contractuels_ouvriers: ' + error.message);
     }
 
-    const cleanList = (data || []).filter(
+    // Filtrer tout enregistrement de démonstration qui pourrait encore exister dans Supabase
+    let cleanList = (data || []).filter(
       (o: any) =>
         !DEMO_CONTRACTUEL_IDS.includes(o.id) &&
         !DEMO_CONTRACTUEL_NAMES.includes(String(o.nom_complet || `${o.nom} ${o.prenom}`).trim().toUpperCase())
     );
+    if (allowedDomaines) {
+      cleanList = cleanList.filter((o: any) => allowedDomaines.includes(o.domaine_id));
+    }
 
+    // Nettoyage asynchrone des 4 fiches de démo si elles étaient présentes en base Supabase
     if (data && data.some((o: any) => DEMO_CONTRACTUEL_IDS.includes(o.id))) {
       actionClient
         .from('contractuels_ouvriers')
         .delete()
+        .eq('company_id', companyId)
         .in('id', DEMO_CONTRACTUEL_IDS)
         .then(() => {}, (delErr: any) => console.warn('Nettoyage Supabase demo contractuels:', delErr?.message));
     }
@@ -5497,8 +5613,8 @@ app.post('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
     const modeClean = (['JOUR', 'TACHE', 'UNITE', 'HEURE'].includes(mode_remuneration) ? mode_remuneration : 'JOUR') as any;
     const prix = Number(prix_convenu);
 
-    if (!nomClean || !prenomClean) {
-      return res.status(400).json({ success: false, error: 'Le nom et le prénom de l\'ouvrier sont obligatoires.' });
+    if (!nomClean) {
+      return res.status(400).json({ success: false, error: 'Le nom de l\'ouvrier est obligatoire.' });
     }
     if (isNaN(prix) || prix < 0) {
       return res.status(400).json({ success: false, error: 'Le prix convenu doit être un montant positif (>= 0).' });
@@ -5531,18 +5647,19 @@ app.post('/api/contractuels/ouvriers', async (req: Request, res: Response) => {
 
     const { data, error } = await actionClient
       .from('contractuels_ouvriers')
-      .upsert(newOuvrier, { onConflict: 'id' })
+      .insert(newOuvrier)
       .select()
       .maybeSingle();
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur création ouvrier contractuel Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur insertion PostgreSQL contractuels_ouvriers: ' + error.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
-      db.contractuels_ouvriers.push(newOuvrier);
+    // Persistance locale miroir
+    const db = readDB();
+    if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
+    if (!db.contractuels_ouvriers.some((o: any) => o.id === newOuvrier.id)) {
+      db.contractuels_ouvriers.push(data || newOuvrier);
       writeDB(db);
     }
 
@@ -5604,18 +5721,17 @@ app.put('/api/contractuels/ouvriers/:id', async (req: Request, res: Response) =>
       .select()
       .maybeSingle();
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur mise à jour ouvrier contractuel Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur mise à jour PostgreSQL contractuels_ouvriers: ' + error.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (db.contractuels_ouvriers) {
-        const idx = db.contractuels_ouvriers.findIndex((o: any) => o.id === id && o.company_id === companyId);
-        if (idx >= 0) {
-          db.contractuels_ouvriers[idx] = { ...db.contractuels_ouvriers[idx], ...updatePayload };
-          writeDB(db);
-        }
+    // Mise à jour locale
+    const db = readDB();
+    if (db.contractuels_ouvriers) {
+      const idx = db.contractuels_ouvriers.findIndex((o: any) => o.id === id && o.company_id === companyId);
+      if (idx >= 0) {
+        db.contractuels_ouvriers[idx] = { ...db.contractuels_ouvriers[idx], ...updatePayload };
+        writeDB(db);
       }
     }
 
@@ -5644,16 +5760,14 @@ app.delete('/api/contractuels/ouvriers/:id', async (req: Request, res: Response)
       .eq('id', id)
       .eq('company_id', companyId);
 
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur suppression ouvrier contractuel Supabase: ' + error.message });
+    if (error) {
+      throw new Error('Erreur suppression PostgreSQL contractuels_ouvriers: ' + error.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (db.contractuels_ouvriers) {
-        db.contractuels_ouvriers = db.contractuels_ouvriers.filter((o: any) => o.id !== id || o.company_id !== companyId);
-        writeDB(db);
-      }
+    const db = readDB();
+    if (db.contractuels_ouvriers) {
+      db.contractuels_ouvriers = db.contractuels_ouvriers.filter((o: any) => o.id !== id || o.company_id !== companyId);
+      writeDB(db);
     }
 
     return res.json({ success: true, message: 'Ouvrier contractuel supprimé.' });
@@ -5680,33 +5794,79 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
 
+    // Récupérer la liste des serres réelles de la société pour associer par nom/code/domaine
     const { data: realSerres } = await actionClient
       .from('serres')
-      .select('id, nom, code')
+      .select('id, nom, code, domaine_id')
       .eq('company_id', companyId);
 
-    const { data: existingOuvriers, error: existingErr } = await actionClient
+    const serresPool = (realSerres && realSerres.length > 0)
+      ? realSerres
+      : (readDB().serres || []);
+
+    // Récupérer les ouvriers existants de la société
+    const { data: existingOuvriers } = await actionClient
       .from('contractuels_ouvriers')
       .select('*')
       .eq('company_id', companyId);
 
-    if (existingErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture ouvriers contractuels Supabase: ' + existingErr.message });
-    }
-
-    const db = !isSupabaseConfigured ? readDB() : null;
-    const existingList = existingOuvriers || (db ? (db.contractuels_ouvriers || []).filter((o: any) => o.company_id === companyId) : []);
+    const db = readDB();
+    const existingList = existingOuvriers || (db.contractuels_ouvriers || []).filter((o: any) => o.company_id === companyId);
 
     let createdCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     const importedList: any[] = [];
 
+    const normalizeDomaineId = (rawDom?: string): string => {
+      const val = String(rawDom || '').trim().toUpperCase();
+      if (val === 'DOM_D2' || val === 'D2' || val === '2' || val.includes('D2')) return 'dom_d2';
+      if (val === 'DOM_D3' || val === 'D3' || val === '3' || val.includes('D3')) return 'dom_d3';
+      if (val === 'DOM_D5' || val === 'D5' || val === '5' || val.includes('D5')) return 'dom_d5';
+      return val && val.startsWith('DOM_') ? val.toLowerCase() : 'dom_d2';
+    };
+
+    const resolveSerreId = (serreText: string, targetDomaineId: string): string | null => {
+      if (!serreText) return null;
+      const tokens = serreText
+        .split(/[,;/+&]+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+      for (const token of tokens) {
+        const tLower = token.toLowerCase();
+        const tNumMatch = tLower.match(/\d+/);
+        const tNum = tNumMatch ? String(parseInt(tNumMatch[0], 10)) : null;
+
+        const matchFn = (s: any) => {
+          const sNom = String(s.nom || '').toLowerCase().trim();
+          const sCode = String(s.code || '').toLowerCase().trim();
+          if (sNom === tLower || sCode === tLower) return true;
+          if (tNum) {
+            if (sCode === `s${tNum}` || sCode === `d5-s${tNum}` || sNom === `serre ${tNum}`) return true;
+          }
+          return false;
+        };
+
+        // Préférer la serre du domaine cible en premier
+        const inDomain = serresPool.find((s: any) => s.domaine_id === targetDomaineId && matchFn(s));
+        if (inDomain) return inDomain.id;
+
+        const anyDomain = serresPool.find(matchFn);
+        if (anyDomain) return anyDomain.id;
+      }
+      return null;
+    };
+
     for (let i = 0; i < ouvriers.length; i++) {
       const item = ouvriers[i];
       const nomClean = String(item.nom || '').trim().toUpperCase();
       const prenomClean = String(item.prenom || '').trim();
-      if (!nomClean) {
+      const nomCompletClean = item.nom_complet
+        ? String(item.nom_complet).trim().toUpperCase()
+        : (prenomClean ? `${nomClean} ${prenomClean}`.toUpperCase() : nomClean);
+
+      if (!nomClean && !nomCompletClean) {
         skippedCount++;
         continue;
       }
@@ -5718,24 +5878,31 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
       }
 
       const prix = Math.round(prixRaw * 100) / 100;
-      const nomCompletClean = prenomClean ? `${nomClean} ${prenomClean}` : nomClean;
+      const resolvedDomaineId = normalizeDomaineId(item.domaine_id || item.domaine);
+      const rawSerreText = String(item.serre_nom || item.serre || '').trim();
+      const foundSerreId = resolveSerreId(rawSerreText, resolvedDomaineId);
 
-      let foundSerreId: string | null = null;
-      if (item.serre_nom || item.serre) {
-        const sTarget = String(item.serre_nom || item.serre).trim().toLowerCase();
-        const found = (realSerres || []).find(
-          (s: any) => s.nom.toLowerCase().trim() === sTarget || (s.code && s.code.toLowerCase().trim() === sTarget)
-        );
-        if (found) foundSerreId = found.id;
+      // Construction propre des notes (Serres + Tâches)
+      let resolvedNotes: string | undefined = item.notes ? String(item.notes).trim() : undefined;
+      if (!resolvedNotes && (rawSerreText || item.taches)) {
+        const parts: string[] = [];
+        if (rawSerreText) parts.push(`Serres: ${rawSerreText}`);
+        if (item.taches) parts.push(`Tâches: ${String(item.taches).trim()}`);
+        resolvedNotes = parts.length > 0 ? parts.join(' | ') : undefined;
       }
 
+      // Recherche du doublon par matricule, nom_complet, ou (nom + prenom)
       const existing = existingList.find((o: any) => {
         if (item.matricule && o.matricule && String(item.matricule).trim().toUpperCase() === String(o.matricule).trim().toUpperCase()) {
           return true;
         }
+        const existingFull = String(o.nom_complet || `${o.nom || ''} ${o.prenom || ''}`).toLowerCase().trim();
+        if (existingFull === nomCompletClean.toLowerCase().trim()) {
+          return true;
+        }
         return (
-          o.nom.toLowerCase().trim() === nomClean.toLowerCase() &&
-          (o.prenom || '').toLowerCase().trim() === prenomClean.toLowerCase()
+          String(o.nom || '').toLowerCase().trim() === nomClean.toLowerCase() &&
+          String(o.prenom || '').toLowerCase().trim() === prenomClean.toLowerCase()
         );
       });
 
@@ -5744,73 +5911,74 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
           skippedCount++;
           continue;
         }
+        // Mise à jour
         const updatedRecord = {
           ...existing,
-          nom: nomClean,
+          nom: nomClean || existing.nom,
           prenom: prenomClean,
           nom_complet: nomCompletClean,
+          domaine_id: item.domaine_id || item.domaine ? resolvedDomaineId : existing.domaine_id,
           prix_convenu: prix,
           serre_id: foundSerreId || existing.serre_id,
+          notes: resolvedNotes !== undefined ? resolvedNotes : existing.notes,
           actif: true,
           updated_at: now,
         };
 
-        const { error: updErr } = await actionClient
+        const { error: updateErr } = await actionClient
           .from('contractuels_ouvriers')
           .update(updatedRecord)
           .eq('id', existing.id)
           .eq('company_id', companyId);
 
-        if (updErr && isSupabaseConfigured) {
-          throw new Error('Erreur mise à jour ouvrier import Supabase: ' + updErr.message);
+        if (updateErr) {
+          console.warn('Supabase contractuels_ouvriers import update warning:', updateErr.message);
         }
 
-        if (db) {
-          if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
-          const localIdx = db.contractuels_ouvriers.findIndex((o: any) => o.id === existing.id);
-          if (localIdx >= 0) db.contractuels_ouvriers[localIdx] = updatedRecord;
-        }
+        if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
+        const localIdx = db.contractuels_ouvriers.findIndex((o: any) => o.id === existing.id);
+        if (localIdx >= 0) db.contractuels_ouvriers[localIdx] = updatedRecord;
+        else db.contractuels_ouvriers.push(updatedRecord);
 
         importedList.push(updatedRecord);
         updatedCount++;
       } else {
+        // Création
         const id = `co_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
         const finalMatricule = item.matricule ? String(item.matricule).trim().toUpperCase() : `C-${String(existingList.length + createdCount + 1).padStart(3, '0')}`;
 
         const newRecord = {
           id,
           company_id: companyId,
-          nom: nomClean,
+          nom: nomClean || nomCompletClean,
           prenom: prenomClean,
           nom_complet: nomCompletClean,
           matricule: finalMatricule,
-          domaine_id: item.domaine_id ? String(item.domaine_id).trim() : 'dom_d2',
+          domaine_id: resolvedDomaineId,
           serre_id: foundSerreId,
           mode_remuneration: item.mode_remuneration || 'JOUR',
           prix_convenu: prix,
           unite: item.unite || 'JOUR',
           actif: true,
+          notes: resolvedNotes,
           created_at: now,
           updated_at: now,
         };
 
-        const { error: insErr } = await actionClient
-          .from('contractuels_ouvriers')
-          .upsert(newRecord, { onConflict: 'id' });
-        if (insErr && isSupabaseConfigured) {
-          throw new Error('Erreur insertion ouvrier import Supabase: ' + insErr.message);
+        const { error: insertErr } = await actionClient.from('contractuels_ouvriers').insert(newRecord);
+        if (insertErr) {
+          console.warn('Supabase contractuels_ouvriers import insert warning:', insertErr.message);
         }
-        if (db) {
-          if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
-          db.contractuels_ouvriers.push(newRecord);
-        }
+
+        if (!db.contractuels_ouvriers) db.contractuels_ouvriers = [];
+        db.contractuels_ouvriers.push(newRecord);
 
         importedList.push(newRecord);
         createdCount++;
       }
     }
 
-    if (db) writeDB(db);
+    writeDB(db);
 
     return res.json({
       success: true,
@@ -5826,379 +5994,7 @@ app.post('/api/contractuels/ouvriers/import', async (req: Request, res: Response
   }
 });
 
-const WORKFLOW_META_TACHE_ID = '__WORKFLOW_META__';
-
-const DEFAULT_CONTRACTUEL_TACHES = [
-  { id: 'tch_instable', company_id: 'cie_lahcen_pointeur', code: 'INS01', nom: 'INSTABLE', couleur: '#16a34a', actif: true },
-  { id: 'tch_stationnaire', company_id: 'cie_lahcen_pointeur', code: 'STA01', nom: 'STATIONNAIRE', couleur: '#0284c7', actif: true },
-  { id: 'tch_ebourgeonnage_d5', company_id: 'cie_lahcen_pointeur', code: 'EBD05', nom: 'ÉBOURGEONNAGE D5', couleur: '#ea580c', actif: true },
-  { id: 'tch_traitement_phyto', company_id: 'cie_lahcen_pointeur', code: 'PHY01', nom: 'TRAITEMENT PHYTO', couleur: '#dc2626', actif: true },
-  { id: 'tch_recolte', company_id: 'cie_lahcen_pointeur', code: 'R01', nom: 'RECOLTE', couleur: '#16a34a', actif: true },
-  { id: 'tch_effeuillage', company_id: 'cie_lahcen_pointeur', code: 'E01', nom: 'EFFEUILLAGE', couleur: '#2563eb', actif: true },
-  { id: 'tch_entretien', company_id: 'cie_lahcen_pointeur', code: 'EN01', nom: 'ENTRETIEN', couleur: '#d97706', actif: true },
-  { id: 'tch_plantation', company_id: 'cie_lahcen_pointeur', code: 'P01', nom: 'PLANTATION', couleur: '#7c3aed', actif: true },
-];
-
-function isMissingColumnSchemaError(err: any): boolean {
-  if (!err) return false;
-  const code = String(err.code || '');
-  const msg = String(err.message || '');
-  return code === '42703' || code === 'PGRST204' || /column|schema cache/i.test(msg);
-}
-
-function buildLegacyPointageRecord(rec: any) {
-  return {
-    id: rec.id,
-    company_id: rec.company_id,
-    ouvrier_id: rec.ouvrier_id,
-    matricule: rec.matricule,
-    nom_complet: rec.nom_complet,
-    date: rec.date,
-    present: rec.present,
-    domaine_id: rec.domaine_id,
-    serre_id: rec.serre_id || null,
-    montant_total_jour: rec.montant_total_jour,
-    created_by_id: rec.created_by_id,
-    created_by_nom: rec.created_by_nom,
-    created_at: rec.created_at,
-    updated_at: rec.updated_at,
-  };
-}
-
-function buildLegacyActiviteRecord(act: any) {
-  return {
-    id: act.id,
-    pointage_id: act.pointage_id,
-    company_id: act.company_id,
-    ouvrier_id: act.ouvrier_id,
-    nom_complet: act.nom_complet,
-    matricule: act.matricule,
-    date: act.date,
-    contrat_id: act.contrat_id || null,
-    contrat_nom: act.contrat_nom || null,
-    tache_id: act.tache_id,
-    tache_nom: act.tache_nom,
-    domaine_id: act.domaine_id,
-    serre_id: act.serre_id,
-    serre_nom: act.serre_nom,
-    mode_remuneration: act.mode_remuneration,
-    quantite: act.quantite,
-    unite: act.unite,
-    prix_unitaire: act.prix_unitaire,
-    montant_total: act.montant_total,
-    observation: act.observation || null,
-    created_by_id: act.created_by_id,
-    created_by_nom: act.created_by_nom,
-    created_at: act.created_at,
-    updated_at: act.updated_at,
-  };
-}
-
-function hydratePointageWithMeta(ptg: any, linkedActivitesRaw: any[], localMirror?: any) {
-  const metaRow = linkedActivitesRaw.find((a: any) => a.tache_id === WORKFLOW_META_TACHE_ID);
-  let metaObj: any = {};
-  if (metaRow?.observation) {
-    try {
-      metaObj = JSON.parse(metaRow.observation);
-    } catch {
-      metaObj = {};
-    }
-  }
-
-  const visibleActivites = linkedActivitesRaw.filter((a: any) => a.tache_id !== WORKFLOW_META_TACHE_ID);
-  const merged = {
-    ...(localMirror || {}),
-    ...(metaObj || {}),
-    ...ptg,
-  };
-
-  const statut = normalizeStatutValidation(
-    ptg.statut_validation ?? metaObj.statut_validation ?? localMirror?.statut_validation
-  );
-  const isPresent = Boolean(merged.present);
-
-  const tachesIds: string[] = Array.isArray(merged.taches_ids) && merged.taches_ids.length > 0
-    ? merged.taches_ids
-    : visibleActivites.map((a: any) => String(a.tache_id)).filter(Boolean);
-  const tachesNoms: string[] = Array.isArray(merged.taches_noms) && merged.taches_noms.length > 0
-    ? merged.taches_noms
-    : visibleActivites.map((a: any) => String(a.tache_nom)).filter(Boolean);
-  const tachesTexte: string | null = isPresent
-    ? (merged.taches_texte || (tachesNoms.length > 0 ? tachesNoms.join(', ') : null))
-    : null;
-
-  const serresIds: string[] = Array.isArray(merged.serres_ids) && merged.serres_ids.length > 0
-    ? merged.serres_ids
-    : (merged.serre_id ? [String(merged.serre_id)] : []);
-  const serresNoms: string[] = Array.isArray(merged.serres_noms) && merged.serres_noms.length > 0
-    ? merged.serres_noms
-    : (merged.serres_texte ? String(merged.serres_texte).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-  const serresTexte: string | null = isPresent
-    ? (merged.serres_texte || (serresNoms.length > 0 ? serresNoms.join(', ') : null))
-    : null;
-
-  const tarifInitial = roundAmount(Number(merged.tarif_initial ?? ptg.tarif_initial ?? 0));
-  const montantPropose = isPresent
-    ? roundAmount(Number(merged.montant_propose ?? ptg.montant_propose ?? ptg.montant_total_jour ?? tarifInitial))
-    : 0;
-  const montantValide =
-    statut === 'VALIDE'
-      ? (isPresent ? roundAmount(Number(merged.montant_valide ?? ptg.montant_valide ?? ptg.montant_total_jour ?? montantPropose)) : 0)
-      : null;
-
-  const heureDebut = isPresent ? (merged.heure_debut || null) : null;
-  const heureFin = isPresent ? (merged.heure_fin || null) : null;
-  const dureeHeures = isPresent
-    ? (computeWorkDurationHours(heureDebut, heureFin) ?? (merged.duree_heures !== undefined && merged.duree_heures !== null ? roundAmount(Number(merged.duree_heures)) : null))
-    : null;
-
-  const hydrated = {
-    ...merged,
-    serres_ids: isPresent ? serresIds : [],
-    serres_noms: isPresent ? serresNoms : [],
-    serres_texte: serresTexte,
-    taches_ids: isPresent ? tachesIds : [],
-    taches_noms: isPresent ? tachesNoms : [],
-    taches_texte: tachesTexte,
-    heure_debut: heureDebut,
-    heure_fin: heureFin,
-    duree_heures: dureeHeures,
-    tarif_initial: tarifInitial,
-    montant_propose: montantPropose,
-    montant_valide: montantValide,
-    tarif_modifie: isPresent ? Boolean(merged.tarif_modifie ?? isTarifModifie(tarifInitial, montantPropose, isPresent)) : false,
-    motif_modification: isPresent ? (merged.motif_modification || null) : null,
-    statut_validation: statut,
-    submitted_by_id: merged.submitted_by_id || null,
-    submitted_by_nom: merged.submitted_by_nom || null,
-    submitted_at: merged.submitted_at || null,
-    validated_by_id: merged.validated_by_id || null,
-    validated_by_nom: merged.validated_by_nom || null,
-    validated_at: merged.validated_at || null,
-    motif_refus: merged.motif_refus || null,
-    historique_validations: Array.isArray(merged.historique_validations) ? merged.historique_validations : [],
-    activites: visibleActivites.map((a: any) => ({
-      ...a,
-      statut_validation: normalizeStatutValidation(a.statut_validation || statut),
-    })),
-  };
-
-  // Règle absolue : seul un montant VALIDÉ par l'administrateur entre dans la rémunération officielle
-  hydrated.montant_total_jour = getOfficialPointageMontant(hydrated);
-  return hydrated;
-}
-
-async function persistPointageResilient(
-  actionClient: any,
-  pointageRecord: any,
-  formattedActivites: any[],
-  validationLogEntry: any,
-  companyId: string,
-  dateClean: string,
-  ouvrierId: string
-) {
-  // 1. UPSERT sécurisé sur contractuels_pointages (jamais DELETE + INSERT destructif)
-  let usedSchemaFallback = false;
-  const { error: ptgErr } = await actionClient
-    .from('contractuels_pointages')
-    .upsert(pointageRecord, { onConflict: 'id' });
-
-  if (ptgErr) {
-    if (isMissingColumnSchemaError(ptgErr)) {
-      usedSchemaFallback = true;
-      const { error: legacyErr } = await actionClient
-        .from('contractuels_pointages')
-        .upsert(buildLegacyPointageRecord(pointageRecord), { onConflict: 'id' });
-      if (legacyErr) {
-        throw new Error('Erreur sauvegarde pointage contractuel (legacy Supabase): ' + legacyErr.message);
-      }
-    } else {
-      throw new Error('Erreur sauvegarde pointage contractuel Supabase: ' + ptgErr.message);
-    }
-  }
-
-  // 2. UPSERT des activités visibles + nettoyage ciblé des activités retirées uniquement
-  if (formattedActivites.length > 0) {
-    const { error: actErr } = await actionClient
-      .from('contractuels_activites')
-      .upsert(formattedActivites, { onConflict: 'id' });
-    if (actErr) {
-      if (isMissingColumnSchemaError(actErr)) {
-        usedSchemaFallback = true;
-        const { error: legacyActErr } = await actionClient
-          .from('contractuels_activites')
-          .upsert(formattedActivites.map(buildLegacyActiviteRecord), { onConflict: 'id' });
-        if (legacyActErr) {
-          throw new Error('Erreur sauvegarde activités contractuelles (legacy Supabase): ' + legacyActErr.message);
-        }
-      } else {
-        throw new Error('Erreur sauvegarde activités contractuelles Supabase: ' + actErr.message);
-      }
-    }
-  }
-
-  // Supprimer uniquement les activités de ce pointage qui ont été retirées par l'utilisateur
-  const keepIds = new Set(formattedActivites.map((a: any) => String(a.id)));
-  const { data: existingActs } = await actionClient
-    .from('contractuels_activites')
-    .select('id, tache_id')
-    .eq('company_id', companyId)
-    .eq('pointage_id', pointageRecord.id);
-
-  if (Array.isArray(existingActs) && existingActs.length > 0) {
-    const obsoleteIds = existingActs
-      .filter((a: any) => !keepIds.has(String(a.id)) && (!usedSchemaFallback || a.tache_id !== WORKFLOW_META_TACHE_ID))
-      .map((a: any) => a.id);
-    if (obsoleteIds.length > 0) {
-      const { error: delObsoleteErr } = await actionClient
-        .from('contractuels_activites')
-        .delete()
-        .eq('company_id', companyId)
-        .in('id', obsoleteIds);
-      if (delObsoleteErr && isSupabaseConfigured) {
-        throw new Error('Erreur nettoyage activités retirées Supabase: ' + delObsoleteErr.message);
-      }
-    }
-  }
-
-  // 3. Fallback __WORKFLOW_META__ uniquement si le schéma Supabase n'a pas encore toutes les colonnes V2
-  if (usedSchemaFallback) {
-    const metaPayload = {
-      serres_ids: pointageRecord.serres_ids,
-      serres_noms: pointageRecord.serres_noms,
-      serres_texte: pointageRecord.serres_texte,
-      taches_ids: pointageRecord.taches_ids,
-      taches_noms: pointageRecord.taches_noms,
-      taches_texte: pointageRecord.taches_texte,
-      heure_debut: pointageRecord.heure_debut,
-      heure_fin: pointageRecord.heure_fin,
-      duree_heures: pointageRecord.duree_heures,
-      tarif_initial: pointageRecord.tarif_initial,
-      montant_propose: pointageRecord.montant_propose,
-      montant_valide: pointageRecord.montant_valide,
-      tarif_modifie: pointageRecord.tarif_modifie,
-      motif_modification: pointageRecord.motif_modification,
-      statut_validation: pointageRecord.statut_validation,
-      submitted_by_id: pointageRecord.submitted_by_id,
-      submitted_by_nom: pointageRecord.submitted_by_nom,
-      submitted_at: pointageRecord.submitted_at,
-      validated_by_id: pointageRecord.validated_by_id,
-      validated_by_nom: pointageRecord.validated_by_nom,
-      validated_at: pointageRecord.validated_at,
-      motif_refus: pointageRecord.motif_refus,
-      historique_validations: pointageRecord.historique_validations,
-    };
-
-    const { error: metaErr } = await actionClient.from('contractuels_activites').upsert(
-      {
-        id: `ca_meta_${pointageRecord.id}`,
-        pointage_id: pointageRecord.id,
-        company_id: companyId,
-        ouvrier_id: ouvrierId,
-        nom_complet: pointageRecord.nom_complet,
-        matricule: pointageRecord.matricule,
-        date: dateClean,
-        tache_id: WORKFLOW_META_TACHE_ID,
-        tache_nom: WORKFLOW_META_TACHE_ID,
-        domaine_id: pointageRecord.domaine_id,
-        serre_id: pointageRecord.serre_id || 'serre_1',
-        serre_nom: pointageRecord.serres_texte || 'Meta',
-        mode_remuneration: 'JOUR',
-        quantite: 0,
-        unite: 'META',
-        prix_unitaire: 0,
-        montant_total: 0,
-        observation: JSON.stringify(metaPayload),
-        created_by_id: pointageRecord.created_by_id,
-        created_by_nom: pointageRecord.created_by_nom,
-        created_at: pointageRecord.created_at,
-        updated_at: pointageRecord.updated_at,
-      },
-      { onConflict: 'id' }
-    );
-    if (metaErr) {
-      throw new Error('Erreur sauvegarde métadonnées workflow Supabase: ' + metaErr.message);
-    }
-  }
-
-  // 4. Journal d'audit contractuels_validation_logs
-  if (validationLogEntry) {
-    const { error: logErr } = await actionClient
-      .from('contractuels_validation_logs')
-      .insert(validationLogEntry);
-    if (logErr) {
-      const code = String((logErr as any).code || '');
-      const msg = String(logErr.message || '');
-      if (code !== '42P01' && code !== 'PGRST205' && !/does not exist|schema cache/i.test(msg)) {
-        console.warn('Avertissement journal contractuels_validation_logs:', msg);
-      }
-    }
-  }
-
-  // 5. Persistance locale uniquement hors mode Supabase (dev offline tests)
-  if (!isSupabaseConfigured) {
-    const db = readDB();
-    if (!db.contractuels_pointages) db.contractuels_pointages = [];
-    if (!db.contractuels_activites) db.contractuels_activites = [];
-    if (!db.contractuels_validation_logs) db.contractuels_validation_logs = [];
-
-    db.contractuels_pointages = db.contractuels_pointages.filter(
-      (p: any) => !(p.company_id === companyId && p.date === dateClean && p.ouvrier_id === ouvrierId)
-    );
-    db.contractuels_activites = db.contractuels_activites.filter(
-      (a: any) => !(a.company_id === companyId && a.date === dateClean && a.ouvrier_id === ouvrierId)
-    );
-
-    db.contractuels_pointages.push(pointageRecord);
-    for (const a of formattedActivites) {
-      db.contractuels_activites.push(a);
-    }
-    if (validationLogEntry) {
-      db.contractuels_validation_logs.push(validationLogEntry);
-    }
-    writeDB(db);
-  }
-}
-
-// 4b. GET /api/contractuels/taches : Liste réelle des tâches de l'application accessibles au Caporal & Admin
-app.get('/api/contractuels/taches', async (req: Request, res: Response) => {
-  const auth = await authenticateContractuelCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
-    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
-  }
-
-  try {
-    const companyId = auth.user.company_id;
-    const actionClient = supabaseAdmin || auth.supabaseClient;
-    let tachesList: any[] = [];
-
-    const { data, error } = await actionClient
-      .from('taches')
-      .select('*')
-      .eq('company_id', companyId);
-
-    if (error && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture tâches Supabase: ' + error.message });
-    }
-
-    if (!error && Array.isArray(data) && data.length > 0) {
-      tachesList = data.filter((t: any) => t.actif !== false);
-    }
-
-    if (tachesList.length === 0 && !isSupabaseConfigured) {
-      const db = readDB();
-      const localTaches = (db.taches || []).filter((t: any) => t.company_id === companyId && t.actif !== false);
-      tachesList = localTaches.length > 0 ? localTaches : DEFAULT_CONTRACTUEL_TACHES.map((t) => ({ ...t, company_id: companyId }));
-    }
-
-    return res.json({ success: true, taches: tachesList });
-  } catch (err: any) {
-    console.error('Erreur GET /api/contractuels/taches:', err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 5. GET /api/contractuels/pointages : Liste des pointages journaliers avec leurs activités et statut de validation
+// 5. GET /api/contractuels/pointages : Liste des pointages journaliers avec leurs activités
 app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
   const auth = await authenticateContractuelCaporalOrAdmin(req);
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
@@ -6208,7 +6004,16 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
   try {
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
-    const { date, startDate, endDate, domaineId, serreId, ouvrierId, statutValidation } = req.query;
+    const { date, startDate, endDate, domaineId, serreId, ouvrierId } = req.query;
+
+    const allowedDomaines =
+      auth.user.role === 'caporal_contractuelles' && auth.user.domaines_autorises && auth.user.domaines_autorises.length > 0
+        ? auth.user.domaines_autorises
+        : null;
+
+    if (allowedDomaines && domaineId && domaineId !== 'ALL' && !allowedDomaines.includes(String(domaineId))) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour ce domaine.' });
+    }
 
     let pQuery = actionClient
       .from('contractuels_pointages')
@@ -6222,6 +6027,8 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
     }
     if (domaineId && domaineId !== 'ALL') {
       pQuery = pQuery.eq('domaine_id', String(domaineId));
+    } else if (allowedDomaines) {
+      pQuery = pQuery.in('domaine_id', allowedDomaines);
     }
     if (ouvrierId) {
       pQuery = pQuery.eq('ouvrier_id', String(ouvrierId));
@@ -6229,7 +6036,7 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
 
     const { data: pointagesData, error: pErr } = await pQuery.order('date', { ascending: false });
 
-    // Activités (NE JAMAIS filtrer par serre_id en SQL ici pour préserver __WORKFLOW_META__ et multi-serres)
+    // Activités
     let aQuery = actionClient
       .from('contractuels_activites')
       .select('*')
@@ -6242,6 +6049,11 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
     }
     if (domaineId && domaineId !== 'ALL') {
       aQuery = aQuery.eq('domaine_id', String(domaineId));
+    } else if (allowedDomaines) {
+      aQuery = aQuery.in('domaine_id', allowedDomaines);
+    }
+    if (serreId && serreId !== 'ALL') {
+      aQuery = aQuery.eq('serre_id', String(serreId));
     }
     if (ouvrierId) {
       aQuery = aQuery.eq('ouvrier_id', String(ouvrierId));
@@ -6249,90 +6061,40 @@ app.get('/api/contractuels/pointages', async (req: Request, res: Response) => {
 
     const { data: activitesData, error: aErr } = await aQuery.order('created_at', { ascending: true });
 
-    if (isSupabaseConfigured && (pErr || aErr)) {
-      return res.status(500).json({
-        success: false,
-        error: 'Erreur lecture pointages contractuels Supabase: ' + (pErr?.message || aErr?.message),
-      });
+    if (pErr) {
+      throw new Error('Erreur lecture PostgreSQL contractuels_pointages: ' + pErr.message);
+    }
+    if (aErr) {
+      throw new Error('Erreur lecture PostgreSQL contractuels_activites: ' + aErr.message);
     }
 
-    let finalPointages = pointagesData || [];
-    let finalActivites = activitesData || [];
-    let localMirrorList: any[] = [];
+    const finalPointages = pointagesData || [];
+    const finalActivites = activitesData || [];
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (pErr || (!pointagesData && !activitesData)) {
-        let localP = (db.contractuels_pointages || []).filter((p: any) => p.company_id === companyId);
-        let localA = (db.contractuels_activites || []).filter((a: any) => a.company_id === companyId);
-
-        if (date) {
-          localP = localP.filter((p: any) => p.date === String(date));
-          localA = localA.filter((a: any) => a.date === String(date));
-        } else if (startDate && endDate) {
-          localP = localP.filter((p: any) => p.date >= String(startDate) && p.date <= String(endDate));
-          localA = localA.filter((a: any) => a.date >= String(startDate) && a.date <= String(endDate));
-        }
-        if (domaineId && domaineId !== 'ALL') {
-          localP = localP.filter((p: any) => p.domaine_id === String(domaineId));
-          localA = localA.filter((a: any) => a.domaine_id === String(domaineId));
-        }
-        if (ouvrierId) {
-          localP = localP.filter((p: any) => p.ouvrier_id === String(ouvrierId));
-          localA = localA.filter((a: any) => a.ouvrier_id === String(ouvrierId));
-        }
-        finalPointages = localP;
-        finalActivites = localA;
-      }
-      localMirrorList = (db.contractuels_pointages || []).filter((p: any) => p.company_id === companyId);
-    }
-
-    // Associer les activités à chaque pointage + hydrater le workflow (sans jamais écraser Supabase par le local)
-    let enrichedPointages = finalPointages.map((ptg: any) => {
+    // Associer les activités à chaque pointage
+    const enrichedPointages = finalPointages.map((ptg: any) => {
       const linkedActivites = finalActivites.filter(
         (act: any) => (act.pointage_id && act.pointage_id === ptg.id) || (act.ouvrier_id === ptg.ouvrier_id && act.date === ptg.date)
       );
-      const localMirror = !isSupabaseConfigured
-        ? localMirrorList.find((lp: any) => lp.id === ptg.id || (lp.ouvrier_id === ptg.ouvrier_id && lp.date === ptg.date))
-        : undefined;
-      return hydratePointageWithMeta(ptg, linkedActivites, localMirror);
+      return {
+        ...ptg,
+        activites: linkedActivites,
+      };
     });
 
-    if (serreId && serreId !== 'ALL') {
-      const sTarget = String(serreId).trim().toLowerCase();
-      enrichedPointages = enrichedPointages.filter((p: any) => {
-        if (String(p.serre_id || '').toLowerCase() === sTarget) return true;
-        if (Array.isArray(p.serres_ids) && p.serres_ids.some((sid: any) => String(sid).toLowerCase() === sTarget)) return true;
-        if (Array.isArray(p.serres_noms) && p.serres_noms.some((sn: any) => String(sn).toLowerCase().includes(sTarget))) return true;
-        if (String(p.serres_texte || '').toLowerCase().includes(sTarget)) return true;
-        if (Array.isArray(p.activites) && p.activites.some((a: any) => String(a.serre_id || '').toLowerCase() === sTarget)) return true;
-        return false;
-      });
-    }
-
-    if (statutValidation && statutValidation !== 'ALL') {
-      const targetStatut = normalizeStatutValidation(String(statutValidation));
-      enrichedPointages = enrichedPointages.filter(
-        (p: any) => normalizeStatutValidation(p.statut_validation) === targetStatut
-      );
-    }
-
-    const visibleActivites = finalActivites.filter((a: any) => a.tache_id !== WORKFLOW_META_TACHE_ID);
-
-    return res.json({ success: true, pointages: enrichedPointages, activites: visibleActivites });
+    return res.json({ success: true, pointages: enrichedPointages, activites: finalActivites });
   } catch (err: any) {
     console.error('Erreur GET /api/contractuels/pointages:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 6. POST /api/contractuels/pointages : Enregistrer un pointage (Brouillon ou Soumis par Caporal, ou Admin)
+// 6. POST /api/contractuels/pointages : Enregistrer un pointage et ses activités (Présence, Tâches, Serres, Tarifs)
 app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
   const auth = await authenticateContractuelCaporalOrAdmin(req);
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const {
@@ -6343,16 +6105,6 @@ app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
       present,
       domaine_id,
       serre_id,
-      serres_ids,
-      serres_noms,
-      serres_texte,
-      taches_ids,
-      taches_noms,
-      taches_texte,
-      heure_debut,
-      heure_fin,
-      duree_heures,
-      motif_modification,
       activites,
     } = req.body;
 
@@ -6360,386 +6112,163 @@ app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Ouvrier et date obligatoires.' });
     }
 
-    const currentUser = auth.user;
-    const companyId = currentUser.company_id;
+    const targetDomaineId = String(domaine_id || 'dom_d2');
+    if (
+      auth.user.role === 'caporal_contractuelles' &&
+      auth.user.domaines_autorises &&
+      auth.user.domaines_autorises.length > 0 &&
+      !auth.user.domaines_autorises.includes(targetDomaineId)
+    ) {
+      return res.status(403).json({ success: false, error: 'Accès refusé pour ce domaine.' });
+    }
+
+    const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
     const now = new Date().toISOString();
     const isPresent = Boolean(present);
     const dateClean = String(date).slice(0, 10);
+    const pointageId = `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-    // Vérifier l'existant dans Supabase (ne jamais laisser recolte_db.json écraser Supabase)
-    let existingPointage: any = null;
-    const { data: existingRows, error: existingErr } = await actionClient
-      .from('contractuels_pointages')
-      .select('*')
-      .eq('company_id', companyId)
-      .eq('date', dateClean)
-      .eq('ouvrier_id', ouvrier_id);
-
-    if (existingErr && isSupabaseConfigured) {
-      throw new Error('Erreur lecture pointage existant Supabase: ' + existingErr.message);
-    }
-
-    if (Array.isArray(existingRows) && existingRows.length > 0) {
-      const { data: existingActs } = await actionClient
-        .from('contractuels_activites')
-        .select('*')
-        .eq('company_id', companyId)
-        .eq('pointage_id', existingRows[0].id);
-      existingPointage = hydratePointageWithMeta(existingRows[0], existingActs || []);
-    }
-
-    const dbRead = !isSupabaseConfigured ? readDB() : null;
-    if (!isSupabaseConfigured && dbRead) {
-      const localExisting = (dbRead.contractuels_pointages || []).find(
-        (p: any) => p.company_id === companyId && p.date === dateClean && p.ouvrier_id === ouvrier_id
-      );
-      if (localExisting) {
-        existingPointage = { ...(existingPointage || {}), ...localExisting };
-      }
-    }
-
-    const existingStatut = existingPointage
-      ? normalizeStatutValidation(existingPointage.statut_validation)
-      : null;
-
-    if (existingStatut === 'VALIDE' && auth.user.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        error: 'Ce pointage est déjà VALIDÉ par l\'administrateur et ne peut plus être modifié par le caporal.',
-      });
-    }
-
-    const requestedStatut = normalizeStatutValidation(req.body.statut_validation || 'BROUILLON');
-    if (auth.user.role !== 'admin' && (requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE')) {
-      return res.status(403).json({
-        success: false,
-        error: 'Action interdite : seul l\'administrateur peut valider ou refuser une rémunération.',
-      });
-    }
-
-    let workerCatalogRecord: any = null;
-    const { data: wData } = await actionClient
-      .from('contractuels_ouvriers')
-      .select('id, prix_convenu, domaine_id, matricule, nom_complet, mode_remuneration, unite')
-      .eq('id', ouvrier_id)
-      .eq('company_id', companyId)
-      .maybeSingle();
-    if (wData) workerCatalogRecord = wData;
-    if (!workerCatalogRecord && !isSupabaseConfigured && dbRead) {
-      workerCatalogRecord = (dbRead.contractuels_ouvriers || []).find(
-        (o: any) => o.id === ouvrier_id && o.company_id === companyId
-      );
-    }
-
-    const tarifInitial = roundAmount(
-      Number(workerCatalogRecord?.prix_convenu ?? req.body.tarif_initial ?? existingPointage?.tarif_initial ?? 0)
-    );
-    const workerDomaineId = String(domaine_id || workerCatalogRecord?.domaine_id || existingPointage?.domaine_id || 'dom_d2');
-    const workerMatricule = String(matricule || workerCatalogRecord?.matricule || '');
-    const workerNomComplet = String(nom_complet || workerCatalogRecord?.nom_complet || 'Ouvrier Contractuel');
-
-    const pointageId = existingPointage?.id || `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-    const heureDebutClean = isPresent && heure_debut ? String(heure_debut).trim() : null;
-    const heureFinClean = isPresent && heure_fin ? String(heure_fin).trim() : null;
-    const computedDuree = isPresent
-      ? (computeWorkDurationHours(heureDebutClean, heureFinClean) ??
-        (duree_heures !== undefined && duree_heures !== null && !isNaN(Number(duree_heures))
-          ? roundAmount(Number(duree_heures))
-          : null))
-      : null;
-
-    const rawProposed = req.body.montant_propose ?? req.body.montant_total_jour ?? req.body.montant ?? tarifInitial;
-    const montantPropose = isPresent ? roundAmount(Number(rawProposed)) : 0;
-    const tarifModifie = isPresent ? isTarifModifie(tarifInitial, montantPropose, true) : false;
-
-    const montantValide =
-      requestedStatut === 'VALIDE'
-        ? (isPresent ? roundAmount(Number(req.body.montant_valide ?? montantPropose)) : 0)
-        : null;
-
-    const montantTotalJourOfficiel =
-      isPresent && requestedStatut === 'VALIDE' ? (montantValide ?? 0) : 0;
-
-    const normalizedSerresIds: string[] = isPresent
-      ? (Array.isArray(serres_ids) && serres_ids.length > 0
-          ? serres_ids.map(String)
-          : (serre_id ? [String(serre_id)] : []))
-      : [];
-    const normalizedSerresNoms: string[] = isPresent
-      ? (Array.isArray(serres_noms) && serres_noms.length > 0
-          ? serres_noms.map(String)
-          : (serres_texte ? String(serres_texte).split(',').map((s: string) => s.trim()).filter(Boolean) : []))
-      : [];
-
-    const normalizedTachesIds: string[] = isPresent && Array.isArray(taches_ids) ? taches_ids.map(String) : [];
-    const normalizedTachesNoms: string[] = isPresent && Array.isArray(taches_noms)
-      ? taches_noms.map((n: any) => String(n).trim()).filter(Boolean)
-      : (isPresent && taches_texte ? String(taches_texte).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-
+    // Calcul du montant total
+    let montantTotalJour = isPresent ? Math.max(0, Number(req.body.montant_total_jour ?? req.body.montant ?? 0)) : 0;
     const formattedActivites: any[] = [];
-    const allSelectedSerresIds = new Set<string>(normalizedSerresIds);
-    const allSelectedSerresNoms = new Set<string>(normalizedSerresNoms);
-    const allSelectedTachesIds = new Set<string>(normalizedTachesIds);
-    const allSelectedTachesNoms = new Set<string>(normalizedTachesNoms);
+    const allSelectedSerresIds = new Set<string>();
+    const allSelectedSerresNoms = new Set<string>();
 
-    if (isPresent) {
-      if (Array.isArray(activites) && activites.length > 0) {
-        const count = activites.length;
-        let runningAllocated = 0;
-        activites.forEach((act: any, idx: number) => {
-          const sIds: string[] = Array.isArray(act.serres_ids) && act.serres_ids.length > 0
-            ? act.serres_ids.map(String)
-            : (normalizedSerresIds.length > 0 ? normalizedSerresIds : (act.serre_id ? [String(act.serre_id)] : []));
-          const sNoms: string[] = Array.isArray(act.serres_noms) && act.serres_noms.length > 0
-            ? act.serres_noms.map(String)
-            : (normalizedSerresNoms.length > 0 ? normalizedSerresNoms : (act.serre_nom ? [String(act.serre_nom)] : []));
-          const sTexte: string = act.serres_texte || (sNoms.length > 0 ? sNoms.join(', ') : (act.serre_nom || 'Non affectée'));
+    if (isPresent && Array.isArray(activites) && activites.length > 0) {
+      let actSum = 0;
+      for (const act of activites) {
+        const qte = Number(act.quantite) || 1;
+        const prix = Number(act.prix_unitaire) || 0;
+        const mTotal = Math.round(qte * prix * 100) / 100;
+        actSum += mTotal;
 
-          sIds.forEach((id) => allSelectedSerresIds.add(id));
-          sNoms.forEach((nom) => allSelectedSerresNoms.add(nom));
+        // Normalisation multi-serres
+        const sIds: string[] = Array.isArray(act.serres_ids) && act.serres_ids.length > 0
+          ? act.serres_ids
+          : (act.serre_id ? [String(act.serre_id)] : []);
+        const sNoms: string[] = Array.isArray(act.serres_noms) && act.serres_noms.length > 0
+          ? act.serres_noms
+          : (act.serre_nom ? [String(act.serre_nom)] : []);
+        const sTexte: string = act.serres_texte || (sNoms.length > 0 ? sNoms.join(', ') : (act.serre_nom || 'Non affectée'));
 
-          const tId = String(act.tache_id || normalizedTachesIds[idx] || 'tch_contractuel');
-          const tNom = String(act.tache_nom || normalizedTachesNoms[idx] || 'Tâche contractuelle').trim();
-          allSelectedTachesIds.add(tId);
-          allSelectedTachesNoms.add(tNom);
+        sIds.forEach((id) => allSelectedSerresIds.add(id));
+        sNoms.forEach((nom) => allSelectedSerresNoms.add(nom));
 
-          let actMontant = Number(act.montant_total);
-          if (isNaN(actMontant) || req.body.montant_propose !== undefined) {
-            if (idx === count - 1) {
-              actMontant = roundAmount(Math.max(0, montantPropose - runningAllocated));
-            } else {
-              actMontant = roundAmount(montantPropose / count);
-              runningAllocated += actMontant;
-            }
-          }
-
-          formattedActivites.push({
-            id: act.id || `ca_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
-            pointage_id: pointageId,
-            company_id: companyId,
-            ouvrier_id,
-            nom_complet: workerNomComplet,
-            matricule: workerMatricule,
-            date: dateClean,
-            contrat_id: act.contrat_id ? String(act.contrat_id) : null,
-            contrat_nom: act.contrat_nom ? String(act.contrat_nom) : null,
-            tache_id: tId,
-            tache_nom: tNom,
-            domaine_id: String(act.domaine_id || workerDomaineId),
-            serre_id: sIds[0] || String(act.serre_id || serre_id || 'serre_1'),
-            serre_nom: sTexte,
-            serres_ids: sIds,
-            serres_noms: sNoms,
-            serres_texte: sTexte,
-            heure_debut: heureDebutClean,
-            heure_fin: heureFinClean,
-            duree_heures: computedDuree,
-            tarif_initial: tarifInitial,
-            montant_propose: montantPropose,
-            montant_valide: montantValide,
-            statut_validation: requestedStatut,
-            mode_remuneration: act.mode_remuneration || workerCatalogRecord?.mode_remuneration || 'JOUR',
-            quantite: Number(act.quantite) || 1,
-            unite: String(act.unite || workerCatalogRecord?.unite || 'JOUR').toUpperCase(),
-            prix_unitaire: roundAmount(Number(act.prix_unitaire ?? actMontant)),
-            montant_total: roundAmount(actMontant),
-            observation: act.observation ? String(act.observation).trim() : (motif_modification ? String(motif_modification).trim() : null),
-            created_by_id: currentUser.id,
-            created_by_nom: currentUser.nom,
-            created_at: now,
-            updated_at: now,
-          });
+        const actId = act.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        formattedActivites.push({
+          id: actId,
+          pointage_id: pointageId,
+          company_id: companyId,
+          ouvrier_id,
+          nom_complet: nom_complet || 'Ouvrier Contractuel',
+          matricule: String(matricule || ''),
+          date: dateClean,
+          contrat_id: act.contrat_id ? String(act.contrat_id) : null,
+          contrat_nom: act.contrat_nom ? String(act.contrat_nom) : null,
+          tache_id: String(act.tache_id || 'tch_contractuel'),
+          tache_nom: String(act.tache_nom || 'Tâche contractuelle').trim(), // Saisie libre
+          domaine_id: String(act.domaine_id || domaine_id || 'dom_d2'),
+          serre_id: sIds[0] || String(act.serre_id || serre_id || 'serre_1'),
+          serre_nom: sTexte,
+          serres_ids: sIds,
+          serres_noms: sNoms,
+          serres_texte: sTexte,
+          mode_remuneration: act.mode_remuneration || 'JOUR',
+          quantite: qte,
+          unite: String(act.unite || 'JOUR').toUpperCase(),
+          prix_unitaire: prix, // Tarif historique figé au pointage
+          montant_total: mTotal,
+          observation: act.observation ? String(act.observation).trim() : null,
+          created_by_id: auth.user.id,
+          created_by_nom: auth.user.nom,
+          created_at: now,
+          updated_at: now,
         });
-      } else if (normalizedTachesIds.length > 0 || normalizedTachesNoms.length > 0) {
-        const count = Math.max(normalizedTachesIds.length, normalizedTachesNoms.length);
-        const sIds = Array.from(allSelectedSerresIds);
-        const sNoms = Array.from(allSelectedSerresNoms);
-        const sTexte = sNoms.join(', ') || 'Non affectée';
-        let runningAllocated = 0;
-
-        for (let idx = 0; idx < count; idx++) {
-          const tId = normalizedTachesIds[idx] || `tch_${idx}`;
-          const tNom = normalizedTachesNoms[idx] || tId;
-          const actMontant =
-            idx === count - 1
-              ? roundAmount(Math.max(0, montantPropose - runningAllocated))
-              : roundAmount(montantPropose / count);
-          if (idx < count - 1) runningAllocated += actMontant;
-
-          formattedActivites.push({
-            id: `ca_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
-            pointage_id: pointageId,
-            company_id: companyId,
-            ouvrier_id,
-            nom_complet: workerNomComplet,
-            matricule: workerMatricule,
-            date: dateClean,
-            contrat_id: null,
-            contrat_nom: null,
-            tache_id: tId,
-            tache_nom: tNom,
-            domaine_id: workerDomaineId,
-            serre_id: sIds[0] || String(serre_id || 'serre_1'),
-            serre_nom: sTexte,
-            serres_ids: sIds,
-            serres_noms: sNoms,
-            serres_texte: sTexte,
-            heure_debut: heureDebutClean,
-            heure_fin: heureFinClean,
-            duree_heures: computedDuree,
-            tarif_initial: tarifInitial,
-            montant_propose: montantPropose,
-            montant_valide: montantValide,
-            statut_validation: requestedStatut,
-            mode_remuneration: workerCatalogRecord?.mode_remuneration || 'JOUR',
-            quantite: computedDuree || 1,
-            unite: computedDuree ? 'HEURE' : (workerCatalogRecord?.unite || 'JOUR'),
-            prix_unitaire: actMontant,
-            montant_total: actMontant,
-            observation: motif_modification ? String(motif_modification).trim() : null,
-            created_by_id: auth.user.id,
-            created_by_nom: auth.user.nom,
-            created_at: now,
-            updated_at: now,
-          });
-        }
+      }
+      if (req.body.montant_total_jour === undefined && req.body.montant === undefined) {
+        montantTotalJour = Math.round(actSum * 100) / 100;
       }
     }
 
-    const aggregatedSerresIds = isPresent ? Array.from(allSelectedSerresIds) : [];
-    const aggregatedSerresNoms = isPresent ? Array.from(allSelectedSerresNoms) : [];
-    const aggregatedSerresTexte = isPresent ? (aggregatedSerresNoms.join(', ') || null) : null;
+    montantTotalJour = isPresent ? Math.max(0, Math.round(montantTotalJour * 100) / 100) : 0;
 
-    const aggregatedTachesIds = isPresent ? Array.from(allSelectedTachesIds) : [];
-    const aggregatedTachesNoms = isPresent ? Array.from(allSelectedTachesNoms) : [];
-    const aggregatedTachesTexte = isPresent ? (aggregatedTachesNoms.join(', ') || taches_texte || null) : null;
-
-    const actionType =
-      requestedStatut === 'VALIDE'
-        ? 'VALIDATION'
-        : requestedStatut === 'REFUSE'
-        ? 'REFUS'
-        : requestedStatut === 'SOUMIS'
-        ? 'SOUMISSION'
-        : existingPointage
-        ? 'MODIFICATION'
-        : 'CREATION';
-
-    const historyEntry = buildHistoriqueEntry({
-      action: actionType,
-      auteur_id: auth.user.id,
-      auteur_nom: auth.user.nom,
-      auteur_role: auth.user.role,
-      statut_avant: existingStatut,
-      statut_apres: requestedStatut,
-      present: isPresent,
-      domaine_id: workerDomaineId,
-      taches_ids: aggregatedTachesIds,
-      taches_noms: aggregatedTachesNoms,
-      serres_ids: aggregatedSerresIds,
-      serres_noms: aggregatedSerresNoms,
-      heure_debut: heureDebutClean,
-      heure_fin: heureFinClean,
-      duree_heures: computedDuree,
-      tarif_initial: tarifInitial,
-      montant_propose: montantPropose,
-      montant_valide: montantValide,
-      tarif_modifie: tarifModifie,
-      motif:
-        requestedStatut === 'REFUSE'
-          ? (req.body.motif_refus || req.body.motif || null)
-          : (motif_modification ? String(motif_modification).trim() : null),
-      timestamp: now,
-    });
-
-    const updatedHistorique = appendHistorique(existingPointage?.historique_validations, historyEntry);
+    const aggregatedSerresIds = Array.from(allSelectedSerresIds);
+    const aggregatedSerresNoms = Array.from(allSelectedSerresNoms);
+    const aggregatedSerresTexte = aggregatedSerresNoms.join(', ') || null;
 
     const pointageRecord = {
       id: pointageId,
       company_id: companyId,
       ouvrier_id,
-      matricule: workerMatricule,
-      nom_complet: workerNomComplet,
+      matricule: String(matricule || ''),
+      nom_complet: nom_complet || 'Ouvrier Contractuel',
       date: dateClean,
       present: isPresent,
-      domaine_id: workerDomaineId,
-      serre_id: aggregatedSerresIds[0] || (isPresent && serre_id ? String(serre_id) : null),
+      domaine_id: String(domaine_id || 'dom_d2'),
+      serre_id: aggregatedSerresIds[0] || (serre_id ? String(serre_id) : null),
       serres_ids: aggregatedSerresIds,
       serres_noms: aggregatedSerresNoms,
       serres_texte: aggregatedSerresTexte,
-      taches_ids: aggregatedTachesIds,
-      taches_noms: aggregatedTachesNoms,
-      taches_texte: aggregatedTachesTexte,
-      heure_debut: heureDebutClean,
-      heure_fin: heureFinClean,
-      duree_heures: computedDuree,
-      tarif_initial: tarifInitial,
-      montant_propose: montantPropose,
-      montant_valide: montantValide,
-      tarif_modifie: tarifModifie,
-      motif_modification: isPresent && motif_modification ? String(motif_modification).trim() : null,
-      statut_validation: requestedStatut,
-      submitted_by_id:
-        requestedStatut === 'SOUMIS'
-          ? auth.user.id
-          : (existingPointage?.submitted_by_id || (requestedStatut === 'BROUILLON' ? null : auth.user.id)),
-      submitted_by_nom:
-        requestedStatut === 'SOUMIS'
-          ? auth.user.nom
-          : (existingPointage?.submitted_by_nom || (requestedStatut === 'BROUILLON' ? null : auth.user.nom)),
-      submitted_at:
-        requestedStatut === 'SOUMIS'
-          ? now
-          : (existingPointage?.submitted_at || null),
-      validated_by_id: requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE' ? auth.user.id : null,
-      validated_by_nom: requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE' ? auth.user.nom : null,
-      validated_at: requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE' ? now : null,
-      motif_refus: requestedStatut === 'REFUSE' ? (req.body.motif_refus || req.body.motif || null) : null,
-      historique_validations: updatedHistorique,
-      montant_total_jour: montantTotalJourOfficiel,
-      created_by_id: existingPointage?.created_by_id || auth.user.id,
-      created_by_nom: existingPointage?.created_by_nom || auth.user.nom,
-      created_at: existingPointage?.created_at || now,
+      montant_total_jour: montantTotalJour,
+      created_by_id: auth.user.id,
+      created_by_nom: auth.user.nom,
+      created_at: now,
       updated_at: now,
     };
 
-    const validationLogRow = {
-      id: `vlog_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      pointage_id: pointageId,
-      company_id: companyId,
-      ouvrier_id,
-      date: dateClean,
-      action: actionType,
-      auteur_id: auth.user.id,
-      auteur_nom: auth.user.nom,
-      auteur_role: auth.user.role,
-      statut_avant: existingStatut,
-      statut_apres: requestedStatut,
-      present: isPresent,
-      tarif_initial: tarifInitial,
-      montant_propose: montantPropose,
-      montant_valide: montantValide,
-      tarif_modifie: tarifModifie,
-      taches_noms: aggregatedTachesNoms,
-      serres_noms: aggregatedSerresNoms,
-      heure_debut: heureDebutClean,
-      heure_fin: heureFinClean,
-      duree_heures: computedDuree,
-      motif: historyEntry.motif,
-      created_at: now,
-    };
+    // Supprimer l'ancien pointage et anciennes activités de ce jour pour cet ouvrier pour éviter les doublons
+    const { error: delPErr } = await actionClient
+      .from('contractuels_pointages')
+      .delete()
+      .eq('company_id', companyId)
+      .eq('date', dateClean)
+      .eq('ouvrier_id', ouvrier_id);
+    if (delPErr) throw new Error('Erreur nettoyage pointage contractuel: ' + delPErr.message);
 
-    await persistPointageResilient(
-      actionClient,
-      pointageRecord,
-      formattedActivites,
-      validationLogRow,
-      companyId,
-      dateClean,
-      ouvrier_id
+    const { error: delAErr } = await actionClient
+      .from('contractuels_activites')
+      .delete()
+      .eq('company_id', companyId)
+      .eq('date', dateClean)
+      .eq('ouvrier_id', ouvrier_id);
+    if (delAErr) throw new Error('Erreur nettoyage activités contractuelles: ' + delAErr.message);
+
+    // Insérer le nouveau pointage
+    const { error: insPErr } = await actionClient
+      .from('contractuels_pointages')
+      .insert(pointageRecord);
+    if (insPErr) throw new Error('Erreur insertion pointage contractuel: ' + insPErr.message);
+
+    // Insérer les activités si présent
+    if (formattedActivites.length > 0) {
+      const { error: insAErr } = await actionClient
+        .from('contractuels_activites')
+        .insert(formattedActivites);
+      if (insAErr) throw new Error('Erreur insertion activités contractuelles: ' + insAErr.message);
+    }
+
+    // Persistance locale miroir
+    const db = readDB();
+    if (!db.contractuels_pointages) db.contractuels_pointages = [];
+    if (!db.contractuels_activites) db.contractuels_activites = [];
+
+    db.contractuels_pointages = db.contractuels_pointages.filter(
+      (p: any) => !(p.company_id === companyId && p.date === dateClean && p.ouvrier_id === ouvrier_id)
     );
+    db.contractuels_activites = db.contractuels_activites.filter(
+      (a: any) => !(a.company_id === companyId && a.date === dateClean && a.ouvrier_id === ouvrier_id)
+    );
+
+    if (!db.contractuels_pointages.some((p: any) => p.id === pointageRecord.id)) {
+      db.contractuels_pointages.push(pointageRecord);
+    }
+    for (const a of formattedActivites) {
+      if (!db.contractuels_activites.some((x: any) => x.id === a.id)) {
+        db.contractuels_activites.push(a);
+      }
+    }
+    writeDB(db);
 
     return res.json({
       success: true,
@@ -6747,371 +6276,10 @@ app.post('/api/contractuels/pointages', async (req: Request, res: Response) => {
         ...pointageRecord,
         activites: formattedActivites,
       },
-      message: `Pointage enregistré (${isPresent ? 'Présent' : 'Absent'} • ${requestedStatut}, proposé ${montantPropose} DH).`,
+      message: `Pointage enregistré (${isPresent ? 'Présent' : 'Absent'}, ${montantTotalJour} DH).`,
     });
   } catch (err: any) {
     console.error('Erreur POST /api/contractuels/pointages:', err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 6b. POST /api/contractuels/pointages/:id/validate : Validation / Refus ADMINISTRATEUR UNIQUEMENT
-app.post('/api/contractuels/pointages/:id/validate', async (req: Request, res: Response) => {
-  const auth = await authenticateContractuelCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
-    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
-  }
-
-  if (auth.user.role !== 'admin') {
-    return res.status(403).json({
-      success: false,
-      error: 'Action interdite : seul l\'administrateur peut valider ou refuser une rémunération contractuelle.',
-    });
-  }
-
-  try {
-    const { id } = req.params;
-    const { decision, montant_valide, motif } = req.body;
-    const decisionClean = normalizeStatutValidation(decision);
-
-    if (decisionClean !== 'VALIDE' && decisionClean !== 'REFUSE') {
-      return res.status(400).json({
-        success: false,
-        error: 'Décision invalide. Valeurs attendues : VALIDE ou REFUSE.',
-      });
-    }
-
-    const companyId = auth.user.company_id;
-    const actionClient = supabaseAdmin || auth.supabaseClient;
-    const now = new Date().toISOString();
-
-    let existingPtg: any = null;
-    let existingActs: any[] = [];
-    const { data: ptgRow, error: ptgReadErr } = await actionClient
-      .from('contractuels_pointages')
-      .select('*')
-      .eq('id', id)
-      .eq('company_id', companyId)
-      .maybeSingle();
-
-    if (ptgReadErr && isSupabaseConfigured) {
-      throw new Error('Erreur lecture pointage Supabase: ' + ptgReadErr.message);
-    }
-    if (ptgRow) existingPtg = ptgRow;
-
-    const { data: actsRows, error: actsReadErr } = await actionClient
-      .from('contractuels_activites')
-      .select('*')
-      .eq('pointage_id', id)
-      .eq('company_id', companyId);
-
-    if (actsReadErr && isSupabaseConfigured) {
-      throw new Error('Erreur lecture activités Supabase: ' + actsReadErr.message);
-    }
-    if (Array.isArray(actsRows)) existingActs = actsRows;
-
-    let localMirror: any = undefined;
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      localMirror = (db.contractuels_pointages || []).find(
-        (p: any) => p.id === id && p.company_id === companyId
-      );
-      if (!existingPtg && localMirror) {
-        existingPtg = localMirror;
-        existingActs = (db.contractuels_activites || []).filter(
-          (a: any) => a.pointage_id === id && a.company_id === companyId
-        );
-      }
-    }
-
-    if (!existingPtg) {
-      return res.status(404).json({ success: false, error: 'Pointage contractuel introuvable.' });
-    }
-
-    const hydrated = hydratePointageWithMeta(existingPtg, existingActs, localMirror);
-    const statutAvant = normalizeStatutValidation(hydrated.statut_validation);
-    const isPresent = Boolean(hydrated.present);
-
-    let finalMontantValide: number | null = null;
-    let finalMontantOfficiel = 0;
-    let finalMotifRefus: string | null = null;
-
-    if (decisionClean === 'VALIDE') {
-      finalMontantValide = isPresent
-        ? roundAmount(Number(montant_valide ?? hydrated.montant_propose ?? hydrated.tarif_initial ?? 0))
-        : 0;
-      finalMontantOfficiel = finalMontantValide;
-      finalMotifRefus = null;
-    } else {
-      finalMontantValide = null;
-      finalMontantOfficiel = 0;
-      finalMotifRefus = motif ? String(motif).trim() : 'Refusé par l\'administrateur';
-    }
-
-    const historyEntry = buildHistoriqueEntry({
-      action: decisionClean === 'VALIDE' ? 'VALIDATION' : 'REFUS',
-      auteur_id: auth.user.id,
-      auteur_nom: auth.user.nom,
-      auteur_role: auth.user.role,
-      statut_avant: statutAvant,
-      statut_apres: decisionClean,
-      present: isPresent,
-      domaine_id: hydrated.domaine_id,
-      taches_ids: hydrated.taches_ids,
-      taches_noms: hydrated.taches_noms,
-      serres_ids: hydrated.serres_ids,
-      serres_noms: hydrated.serres_noms,
-      heure_debut: hydrated.heure_debut,
-      heure_fin: hydrated.heure_fin,
-      duree_heures: hydrated.duree_heures,
-      tarif_initial: hydrated.tarif_initial,
-      montant_propose: hydrated.montant_propose,
-      montant_valide: finalMontantValide,
-      tarif_modifie: hydrated.tarif_modifie,
-      motif: motif ? String(motif).trim() : finalMotifRefus,
-      timestamp: now,
-    });
-
-    const updatedHistorique = appendHistorique(hydrated.historique_validations, historyEntry);
-
-    const updatedRecord = {
-      ...hydrated,
-      statut_validation: decisionClean,
-      montant_valide: finalMontantValide,
-      montant_total_jour: finalMontantOfficiel,
-      validated_by_id: auth.user.id,
-      validated_by_nom: auth.user.nom,
-      validated_at: now,
-      motif_refus: finalMotifRefus,
-      historique_validations: updatedHistorique,
-      updated_at: now,
-    };
-    delete (updatedRecord as any).activites;
-
-    const visibleActs = Array.isArray(hydrated.activites) ? hydrated.activites : [];
-    const updatedActs = visibleActs.map((act: any, idx: number) => {
-      let mAct = Number(act.montant_total) || 0;
-      if (decisionClean === 'VALIDE' && isPresent && finalMontantValide !== null && visibleActs.length > 0) {
-        if (montant_valide !== undefined || visibleActs.length === 1) {
-          mAct = idx === 0 ? finalMontantValide : 0;
-          if (visibleActs.length > 1) {
-            const perAct = roundAmount(finalMontantValide / visibleActs.length);
-            mAct = idx === visibleActs.length - 1
-              ? roundAmount(Math.max(0, finalMontantValide - perAct * (visibleActs.length - 1)))
-              : perAct;
-          }
-        }
-      }
-      return {
-        ...act,
-        montant_valide: finalMontantValide,
-        statut_validation: decisionClean,
-        montant_total: mAct,
-        updated_at: now,
-      };
-    });
-
-    const validationLogRow = {
-      id: `vlog_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      pointage_id: hydrated.id,
-      company_id: companyId,
-      ouvrier_id: hydrated.ouvrier_id,
-      date: hydrated.date,
-      action: decisionClean === 'VALIDE' ? 'VALIDATION' : 'REFUS',
-      auteur_id: auth.user.id,
-      auteur_nom: auth.user.nom,
-      auteur_role: auth.user.role,
-      statut_avant: statutAvant,
-      statut_apres: decisionClean,
-      present: isPresent,
-      tarif_initial: hydrated.tarif_initial,
-      montant_propose: hydrated.montant_propose,
-      montant_valide: finalMontantValide,
-      tarif_modifie: hydrated.tarif_modifie,
-      taches_noms: hydrated.taches_noms,
-      serres_noms: hydrated.serres_noms,
-      heure_debut: hydrated.heure_debut,
-      heure_fin: hydrated.heure_fin,
-      duree_heures: hydrated.duree_heures,
-      motif: historyEntry.motif,
-      created_at: now,
-    };
-
-    await persistPointageResilient(
-      actionClient,
-      updatedRecord,
-      updatedActs,
-      validationLogRow,
-      companyId,
-      hydrated.date,
-      hydrated.ouvrier_id
-    );
-
-    return res.json({
-      success: true,
-      pointage: {
-        ...updatedRecord,
-        activites: updatedActs,
-      },
-      message:
-        decisionClean === 'VALIDE'
-          ? `Rémunération validée (${finalMontantOfficiel} DH).`
-          : `Rémunération refusée (${finalMotifRefus}).`,
-    });
-  } catch (err: any) {
-    console.error('Erreur POST /api/contractuels/pointages/:id/validate:', err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 6c. POST /api/contractuels/pointages/validate-batch : Validation en lot (Admin uniquement)
-app.post('/api/contractuels/pointages/validate-batch', async (req: Request, res: Response) => {
-  const auth = await authenticateContractuelCaporalOrAdmin(req);
-  if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
-    return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
-  }
-
-  if (auth.user.role !== 'admin') {
-    return res.status(403).json({
-      success: false,
-      error: 'Action interdite : seul l\'administrateur peut valider en lot.',
-    });
-  }
-
-  try {
-    const { items } = req.body;
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ success: false, error: 'Aucun élément à valider.' });
-    }
-
-    const companyId = auth.user.company_id;
-    const actionClient = supabaseAdmin || auth.supabaseClient;
-    const now = new Date().toISOString();
-    const updatedList: any[] = [];
-
-    for (const item of items) {
-      if (!item?.id) continue;
-      const decisionClean = normalizeStatutValidation(item.decision || 'VALIDE');
-      if (decisionClean !== 'VALIDE' && decisionClean !== 'REFUSE') continue;
-
-      let existingPtg: any = null;
-      let existingActs: any[] = [];
-      const { data: pRow, error: pErr } = await actionClient
-        .from('contractuels_pointages')
-        .select('*')
-        .eq('id', item.id)
-        .eq('company_id', companyId)
-        .maybeSingle();
-      if (pErr && isSupabaseConfigured) {
-        throw new Error('Erreur lecture pointage batch Supabase: ' + pErr.message);
-      }
-      if (pRow) existingPtg = pRow;
-
-      const { data: aRows, error: aErr } = await actionClient
-        .from('contractuels_activites')
-        .select('*')
-        .eq('pointage_id', item.id)
-        .eq('company_id', companyId);
-      if (aErr && isSupabaseConfigured) {
-        throw new Error('Erreur lecture activités batch Supabase: ' + aErr.message);
-      }
-      if (Array.isArray(aRows)) existingActs = aRows;
-
-      let localMirror: any = undefined;
-      if (!isSupabaseConfigured) {
-        const db = readDB();
-        localMirror = (db.contractuels_pointages || []).find(
-          (p: any) => p.id === item.id && p.company_id === companyId
-        );
-        if (!existingPtg && localMirror) {
-          existingPtg = localMirror;
-          existingActs = (db.contractuels_activites || []).filter(
-            (a: any) => a.pointage_id === item.id && a.company_id === companyId
-          );
-        }
-      }
-      if (!existingPtg) continue;
-
-      const hydrated = hydratePointageWithMeta(existingPtg, existingActs, localMirror);
-      const statutAvant = normalizeStatutValidation(hydrated.statut_validation);
-      const isPresent = Boolean(hydrated.present);
-
-      const finalMontantValide =
-        decisionClean === 'VALIDE'
-          ? (isPresent ? roundAmount(Number(item.montant_valide ?? hydrated.montant_propose ?? hydrated.tarif_initial ?? 0)) : 0)
-          : null;
-      const finalMontantOfficiel = decisionClean === 'VALIDE' ? (finalMontantValide ?? 0) : 0;
-      const finalMotifRefus = decisionClean === 'REFUSE'
-        ? (item.motif ? String(item.motif).trim() : 'Refusé par l\'administrateur')
-        : null;
-
-      const historyEntry = buildHistoriqueEntry({
-        action: decisionClean === 'VALIDE' ? 'VALIDATION' : 'REFUS',
-        auteur_id: auth.user.id,
-        auteur_nom: auth.user.nom,
-        auteur_role: auth.user.role,
-        statut_avant: statutAvant,
-        statut_apres: decisionClean,
-        present: isPresent,
-        domaine_id: hydrated.domaine_id,
-        taches_ids: hydrated.taches_ids,
-        taches_noms: hydrated.taches_noms,
-        serres_ids: hydrated.serres_ids,
-        serres_noms: hydrated.serres_noms,
-        heure_debut: hydrated.heure_debut,
-        heure_fin: hydrated.heure_fin,
-        duree_heures: hydrated.duree_heures,
-        tarif_initial: hydrated.tarif_initial,
-        montant_propose: hydrated.montant_propose,
-        montant_valide: finalMontantValide,
-        tarif_modifie: hydrated.tarif_modifie,
-        motif: item.motif ? String(item.motif).trim() : finalMotifRefus,
-        timestamp: now,
-      });
-
-      const updatedRecord = {
-        ...hydrated,
-        statut_validation: decisionClean,
-        montant_valide: finalMontantValide,
-        montant_total_jour: finalMontantOfficiel,
-        validated_by_id: auth.user.id,
-        validated_by_nom: auth.user.nom,
-        validated_at: now,
-        motif_refus: finalMotifRefus,
-        historique_validations: appendHistorique(hydrated.historique_validations, historyEntry),
-        updated_at: now,
-      };
-      delete (updatedRecord as any).activites;
-
-      const visibleActs = Array.isArray(hydrated.activites) ? hydrated.activites : [];
-      const updatedActs = visibleActs.map((act: any) => ({
-        ...act,
-        montant_valide: finalMontantValide,
-        statut_validation: decisionClean,
-        updated_at: now,
-      }));
-
-      await persistPointageResilient(
-        actionClient,
-        updatedRecord,
-        updatedActs,
-        null,
-        companyId,
-        hydrated.date,
-        hydrated.ouvrier_id
-      );
-
-      updatedList.push({ ...updatedRecord, activites: updatedActs });
-    }
-
-    return res.json({
-      success: true,
-      count: updatedList.length,
-      pointages: updatedList,
-      message: `${updatedList.length} pointage(s) traité(s) par l'administrateur.`,
-    });
-  } catch (err: any) {
-    console.error('Erreur POST /api/contractuels/pointages/validate-batch:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -7122,75 +6290,34 @@ app.delete('/api/contractuels/pointages/:id', async (req: Request, res: Response
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const { id } = req.params;
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
 
-    // Vérifier le statut VALIDE directement en base
-    const { data: remotePtg, error: readErr } = await actionClient
-      .from('contractuels_pointages')
-      .select('*')
-      .eq('id', id)
-      .eq('company_id', companyId)
-      .maybeSingle();
-
-    if (readErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture pointage Supabase: ' + readErr.message });
-    }
-
-    let targetPtg = remotePtg;
-    if (targetPtg) {
-      const { data: remoteActs } = await actionClient
-        .from('contractuels_activites')
-        .select('*')
-        .eq('pointage_id', id)
-        .eq('company_id', companyId);
-      targetPtg = hydratePointageWithMeta(targetPtg, remoteActs || []);
-    } else if (!isSupabaseConfigured) {
-      const dbCheck = readDB();
-      targetPtg = (dbCheck.contractuels_pointages || []).find((p: any) => p.id === id && p.company_id === companyId);
-    }
-
-    if (targetPtg && normalizeStatutValidation(targetPtg.statut_validation) === 'VALIDE' && auth.user.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        error: 'Action interdite : un pointage déjà validé par l\'administrateur ne peut pas être supprimé par le caporal.',
-      });
-    }
-
-    const { error: delActErr } = await actionClient
+    const { error: delAErr } = await actionClient
       .from('contractuels_activites')
       .delete()
       .eq('pointage_id', id)
       .eq('company_id', companyId);
+    if (delAErr) throw new Error('Erreur suppression activités contractuelles: ' + delAErr.message);
 
-    if (delActErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur suppression activités Supabase: ' + delActErr.message });
-    }
-
-    const { error: delPtgErr } = await actionClient
+    const { error: delPErr } = await actionClient
       .from('contractuels_pointages')
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
+    if (delPErr) throw new Error('Erreur suppression pointage contractuel: ' + delPErr.message);
 
-    if (delPtgErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur suppression pointage Supabase: ' + delPtgErr.message });
+    const db = readDB();
+    if (db.contractuels_pointages) {
+      db.contractuels_pointages = db.contractuels_pointages.filter((p: any) => p.id !== id || p.company_id !== companyId);
     }
-
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (db.contractuels_pointages) {
-        db.contractuels_pointages = db.contractuels_pointages.filter((p: any) => p.id !== id || p.company_id !== companyId);
-      }
-      if (db.contractuels_activites) {
-        db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.pointage_id !== id || a.company_id !== companyId);
-      }
-      writeDB(db);
+    if (db.contractuels_activites) {
+      db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.pointage_id !== id || a.company_id !== companyId);
     }
+    writeDB(db);
 
     return res.json({ success: true, message: 'Pointage contractuel supprimé.' });
   } catch (err: any) {
@@ -7205,92 +6332,50 @@ app.delete('/api/contractuels/activites/:id', async (req: Request, res: Response
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
     const { id } = req.params;
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
 
-    const { data: act, error: actErr } = await actionClient
+    // Récupérer l'activité pour connaître le pointage_id
+    const { data: act, error: readActErr } = await actionClient
       .from('contractuels_activites')
       .select('pointage_id, montant_total')
       .eq('id', id)
       .eq('company_id', companyId)
       .maybeSingle();
+    if (readActErr) throw new Error('Erreur lecture activité contractuelle: ' + readActErr.message);
 
-    if (actErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur lecture activité Supabase: ' + actErr.message });
-    }
-
-    if (act?.pointage_id && auth.user.role !== 'admin') {
-      const { data: parentRow } = await actionClient
-        .from('contractuels_pointages')
-        .select('*')
-        .eq('id', act.pointage_id)
-        .eq('company_id', companyId)
-        .maybeSingle();
-
-      let parentPtg = parentRow;
-      if (parentPtg) {
-        const { data: pActs } = await actionClient
-          .from('contractuels_activites')
-          .select('*')
-          .eq('pointage_id', act.pointage_id)
-          .eq('company_id', companyId);
-        parentPtg = hydratePointageWithMeta(parentPtg, pActs || []);
-      } else if (!isSupabaseConfigured) {
-        const dbCheck = readDB();
-        parentPtg = (dbCheck.contractuels_pointages || []).find((p: any) => p.id === act.pointage_id);
-      }
-
-      if (parentPtg && normalizeStatutValidation(parentPtg.statut_validation) === 'VALIDE') {
-        return res.status(403).json({
-          success: false,
-          error: 'Action interdite : ce pointage est déjà validé par l\'administrateur.',
-        });
-      }
-    }
-
-    const { error: delErr } = await actionClient
+    const { error: delActErr } = await actionClient
       .from('contractuels_activites')
       .delete()
       .eq('id', id)
       .eq('company_id', companyId);
+    if (delActErr) throw new Error('Erreur suppression activité contractuelle: ' + delActErr.message);
 
-    if (delErr && isSupabaseConfigured) {
-      return res.status(500).json({ success: false, error: 'Erreur suppression activité Supabase: ' + delErr.message });
-    }
-
+    // Mettre à jour le montant du pointage parent si trouvé (scopé company_id)
     if (act?.pointage_id) {
-      const { data: remainingActs } = await actionClient
+      const { data: remainingActs, error: remErr } = await actionClient
         .from('contractuels_activites')
-        .select('tache_id, montant_total')
+        .select('montant_total')
         .eq('pointage_id', act.pointage_id)
         .eq('company_id', companyId);
+      if (remErr) throw new Error('Erreur recalcul pointage contractuel: ' + remErr.message);
 
-      const newTotal = (remainingActs || [])
-        .filter((a: any) => a.tache_id !== WORKFLOW_META_TACHE_ID)
-        .reduce((sum: number, a: any) => sum + (Number(a.montant_total) || 0), 0);
-
-      const rounded = roundAmount(newTotal);
+      const newTotal = (remainingActs || []).reduce((sum: number, a: any) => sum + (Number(a.montant_total) || 0), 0);
       const { error: updErr } = await actionClient
         .from('contractuels_pointages')
-        .update({ montant_propose: rounded })
+        .update({ montant_total_jour: Math.round(newTotal * 100) / 100 })
         .eq('id', act.pointage_id)
         .eq('company_id', companyId);
-
-      if (updErr && !isMissingColumnSchemaError(updErr) && isSupabaseConfigured) {
-        return res.status(500).json({ success: false, error: 'Erreur mise à jour pointage parent Supabase: ' + updErr.message });
-      }
+      if (updErr) throw new Error('Erreur mise à jour total contractuel: ' + updErr.message);
     }
 
-    if (!isSupabaseConfigured) {
-      const db = readDB();
-      if (db.contractuels_activites) {
-        db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.id !== id || a.company_id !== companyId);
-        writeDB(db);
-      }
+    const db = readDB();
+    if (db.contractuels_activites) {
+      db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.id !== id || a.company_id !== companyId);
+      writeDB(db);
     }
 
     return res.json({ success: true, message: 'Activité supprimée avec succès.' });
@@ -7300,218 +6385,158 @@ app.delete('/api/contractuels/activites/:id', async (req: Request, res: Response
   }
 });
 
-// 9. POST /api/contractuels/sync : Synchronisation hors ligne V2 des contractuelles (sans jamais écraser plus récent/validé)
+// 9. POST /api/contractuels/sync : Synchronisation hors ligne des contractuelles
 app.post('/api/contractuels/sync', async (req: Request, res: Response) => {
   const auth = await authenticateContractuelCaporalOrAdmin(req);
   if (!auth.authenticated || !auth.user || !auth.supabaseClient) {
     return res.status(auth.statusCode || 401).json({ success: false, error: auth.error });
   }
-  if (!requireWritePermission(auth.user.role, res)) return;
 
   try {
-    const { pendingPointages } = req.body;
-    if (!Array.isArray(pendingPointages) || pendingPointages.length === 0) {
-      return res.json({ success: true, count: 0, pointages: [] });
-    }
-
+    const { pendingPointages, deletedIds } = req.body;
     const companyId = auth.user.company_id;
     const actionClient = supabaseAdmin || auth.supabaseClient;
-    const now = new Date().toISOString();
-    const syncedPointages: any[] = [];
-    let synced = 0;
-
-    for (const item of pendingPointages) {
-      if (!item?.ouvrier_id || !item?.date) continue;
-
-      const dateClean = String(item.date).slice(0, 10);
-      const isPresent = Boolean(item.present);
-
-      // Lire l'existant en base pour protéger VALIDE et données plus récentes
-      const { data: existingRows, error: existingErr } = await actionClient
-        .from('contractuels_pointages')
-        .select('*')
-        .eq('company_id', companyId)
-        .eq('date', dateClean)
-        .eq('ouvrier_id', item.ouvrier_id);
-
-      if (existingErr && isSupabaseConfigured) {
-        throw new Error('Erreur lecture pointage existant pendant sync Supabase: ' + existingErr.message);
-      }
-
-      let existingPointage: any = null;
-      if (Array.isArray(existingRows) && existingRows.length > 0) {
-        const { data: existingActs } = await actionClient
-          .from('contractuels_activites')
-          .select('*')
-          .eq('company_id', companyId)
-          .eq('pointage_id', existingRows[0].id);
-        existingPointage = hydratePointageWithMeta(existingRows[0], existingActs || []);
-      }
-
-      if (existingPointage) {
-        const existingStatut = normalizeStatutValidation(existingPointage.statut_validation);
-        if (existingStatut === 'VALIDE' && auth.user.role !== 'admin') {
-          continue; // Jamais écraser un pointage déjà validé par un cache caporal hors ligne
-        }
-        const serverTs = existingPointage.updated_at || existingPointage.created_at || '';
-        const clientTs = item.updated_at || item.created_at || '';
-        if (serverTs && clientTs && serverTs > clientTs) {
-          continue; // Jamais écraser une donnée serveur plus récente par un cache ancien
-        }
-      }
-
-      const requestedStatut = normalizeStatutValidation(item.statut_validation || 'BROUILLON');
-      const safeStatut =
-        auth.user.role !== 'admin' && (requestedStatut === 'VALIDE' || requestedStatut === 'REFUSE')
-          ? 'SOUMIS'
-          : requestedStatut;
-
-      const tarifInitial = roundAmount(Number(item.tarif_initial ?? existingPointage?.tarif_initial ?? 0));
-      const montantPropose = isPresent
-        ? roundAmount(Number(item.montant_propose ?? item.montant_total_jour ?? tarifInitial))
-        : 0;
-      const montantValide =
-        safeStatut === 'VALIDE'
-          ? (isPresent ? roundAmount(Number(item.montant_valide ?? montantPropose)) : 0)
-          : null;
-      const montantOfficiel = safeStatut === 'VALIDE' && isPresent ? (montantValide ?? 0) : 0;
-      const pointageId = existingPointage?.id || item.id || `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-      const heureDebutClean = isPresent && item.heure_debut ? String(item.heure_debut).trim() : null;
-      const heureFinClean = isPresent && item.heure_fin ? String(item.heure_fin).trim() : null;
-      const dureeHeures = isPresent
-        ? (computeWorkDurationHours(heureDebutClean, heureFinClean) ??
-          (item.duree_heures !== undefined && item.duree_heures !== null ? roundAmount(Number(item.duree_heures)) : null))
+    const allowedDomaines =
+      auth.user.role === 'caporal_contractuelles' &&
+      auth.user.domaines_autorises &&
+      auth.user.domaines_autorises.length > 0
+        ? auth.user.domaines_autorises
         : null;
 
-      const serresIds = isPresent && Array.isArray(item.serres_ids) ? item.serres_ids.map(String) : [];
-      const serresNoms = isPresent && Array.isArray(item.serres_noms) ? item.serres_noms.map(String) : [];
-      const tachesIds = isPresent && Array.isArray(item.taches_ids) ? item.taches_ids.map(String) : [];
-      const tachesNoms = isPresent && Array.isArray(item.taches_noms) ? item.taches_noms.map(String) : [];
-      const tarifModifie = isPresent ? isTarifModifie(tarifInitial, montantPropose, true) : false;
+    let synced = 0;
+    let deletedCount = 0;
+    const db = readDB();
+    if (!db.contractuels_pointages) db.contractuels_pointages = [];
+    if (!db.contractuels_activites) db.contractuels_activites = [];
 
-      const historyEntry = buildHistoriqueEntry({
-        action: safeStatut === 'SOUMIS' ? 'SOUMISSION' : existingPointage ? 'MODIFICATION' : 'CREATION',
-        auteur_id: auth.user.id,
-        auteur_nom: auth.user.nom,
-        auteur_role: auth.user.role,
-        statut_avant: existingPointage ? normalizeStatutValidation(existingPointage.statut_validation) : null,
-        statut_apres: safeStatut,
-        present: isPresent,
-        domaine_id: String(item.domaine_id || 'dom_d2'),
-        taches_ids: tachesIds,
-        taches_noms: tachesNoms,
-        serres_ids: serresIds,
-        serres_noms: serresNoms,
-        heure_debut: heureDebutClean,
-        heure_fin: heureFinClean,
-        duree_heures: dureeHeures,
-        tarif_initial: tarifInitial,
-        montant_propose: montantPropose,
-        montant_valide: montantValide,
-        tarif_modifie: tarifModifie,
-        motif: item.motif_modification || 'Synchronisation hors ligne',
-        timestamp: now,
-      });
+    if (Array.isArray(pendingPointages) && pendingPointages.length > 0) {
+      for (const item of pendingPointages) {
+        if (!item?.ouvrier_id || !item?.date) continue;
+        const targetDomaineId = String(item.domaine_id || 'dom_d2');
+        if (allowedDomaines && !allowedDomaines.includes(targetDomaineId)) {
+          return res.status(403).json({ success: false, error: 'Accès refusé pour ce domaine.' });
+        }
 
-      const baseHist = Array.isArray(item.historique_validations) && item.historique_validations.length > 0
-        ? item.historique_validations
-        : existingPointage?.historique_validations;
+        const dateClean = String(item.date).slice(0, 10);
+        const isPresent = Boolean(item.present);
+        const montantTotal = Number(item.montant_total_jour) || 0;
+        const pointageId = item.id || `cp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const nowIso = new Date().toISOString();
 
-      const pointageRecord = {
-        id: pointageId,
-        company_id: companyId,
-        ouvrier_id: item.ouvrier_id,
-        matricule: String(item.matricule || ''),
-        nom_complet: String(item.nom_complet || ''),
-        date: dateClean,
-        present: isPresent,
-        domaine_id: String(item.domaine_id || 'dom_d2'),
-        serre_id: serresIds[0] || item.serre_id || null,
-        serres_ids: serresIds,
-        serres_noms: serresNoms,
-        serres_texte: isPresent ? (item.serres_texte || serresNoms.join(', ') || null) : null,
-        taches_ids: tachesIds,
-        taches_noms: tachesNoms,
-        taches_texte: isPresent ? (item.taches_texte || tachesNoms.join(', ') || null) : null,
-        heure_debut: heureDebutClean,
-        heure_fin: heureFinClean,
-        duree_heures: dureeHeures,
-        tarif_initial: tarifInitial,
-        montant_propose: montantPropose,
-        montant_valide: montantValide,
-        tarif_modifie: tarifModifie,
-        motif_modification: isPresent ? (item.motif_modification || null) : null,
-        statut_validation: safeStatut,
-        submitted_by_id: safeStatut === 'SOUMIS' ? auth.user.id : (existingPointage?.submitted_by_id || null),
-        submitted_by_nom: safeStatut === 'SOUMIS' ? auth.user.nom : (existingPointage?.submitted_by_nom || null),
-        submitted_at: safeStatut === 'SOUMIS' ? now : (existingPointage?.submitted_at || null),
-        validated_by_id: safeStatut === 'VALIDE' ? auth.user.id : null,
-        validated_by_nom: safeStatut === 'VALIDE' ? auth.user.nom : null,
-        validated_at: safeStatut === 'VALIDE' ? now : null,
-        motif_refus: null,
-        historique_validations: appendHistorique(baseHist, historyEntry),
-        montant_total_jour: montantOfficiel,
-        created_by_id: existingPointage?.created_by_id || auth.user.id,
-        created_by_nom: existingPointage?.created_by_nom || auth.user.nom,
-        created_at: existingPointage?.created_at || item.created_at || now,
-        updated_at: item.updated_at || now,
-      };
+        const pointagePayload = {
+          id: pointageId,
+          company_id: companyId,
+          ouvrier_id: item.ouvrier_id,
+          matricule: String(item.matricule || ''),
+          nom_complet: String(item.nom_complet || ''),
+          date: dateClean,
+          present: isPresent,
+          domaine_id: targetDomaineId,
+          serre_id: item.serre_id || null,
+          serres_ids: Array.isArray(item.serres_ids) ? item.serres_ids : undefined,
+          serres_noms: Array.isArray(item.serres_noms) ? item.serres_noms : undefined,
+          serres_texte: item.serres_texte ?? null,
+          montant_total_jour: montantTotal,
+          created_by_id: item.created_by_id || auth.user.id,
+          created_by_nom: item.created_by_nom || auth.user.nom,
+          created_at: item.created_at || nowIso,
+          updated_at: item.updated_at || nowIso,
+        };
 
-      const formattedActs = isPresent && Array.isArray(item.activites)
-        ? item.activites.map((act: any, idx: number) => ({
-            id: act.id || `ca_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
-            pointage_id: pointageId,
-            company_id: companyId,
-            ouvrier_id: item.ouvrier_id,
-            nom_complet: String(item.nom_complet || ''),
-            matricule: String(item.matricule || ''),
-            date: dateClean,
-            contrat_id: act.contrat_id || null,
-            contrat_nom: act.contrat_nom || null,
-            tache_id: String(act.tache_id || 'tch_contractuel'),
-            tache_nom: String(act.tache_nom || 'Tâche contractuelle'),
-            domaine_id: String(act.domaine_id || item.domaine_id || 'dom_d2'),
-            serre_id: String(act.serre_id || serresIds[0] || 'serre_1'),
-            serre_nom: String(act.serre_nom || item.serres_texte || 'Serre'),
-            serres_ids: serresIds,
-            serres_noms: serresNoms,
-            serres_texte: pointageRecord.serres_texte,
-            heure_debut: heureDebutClean,
-            heure_fin: heureFinClean,
-            duree_heures: dureeHeures,
-            tarif_initial: tarifInitial,
-            montant_propose: montantPropose,
-            montant_valide: montantValide,
-            statut_validation: safeStatut,
-            mode_remuneration: act.mode_remuneration || 'JOUR',
-            quantite: Number(act.quantite) || 1,
-            unite: String(act.unite || 'JOUR'),
-            prix_unitaire: Number(act.prix_unitaire) || 0,
-            montant_total: Number(act.montant_total) || 0,
-            observation: act.observation || null,
-            created_by_id: auth.user?.id || 'usr_admin',
-            created_by_nom: auth.user?.nom || 'Admin',
-            created_at: act.created_at || now,
-            updated_at: now,
-          }))
-        : [];
+        const { error: pErr } = await actionClient
+          .from('contractuels_pointages')
+          .upsert(pointagePayload, { onConflict: 'id' });
+        if (pErr) throw new Error('Erreur sync pointage contractuel: ' + pErr.message);
 
-      await persistPointageResilient(
-        actionClient,
-        pointageRecord,
-        formattedActs,
-        null,
-        companyId,
-        dateClean,
-        item.ouvrier_id
-      );
+        const pIdx = db.contractuels_pointages.findIndex((p: any) => p.id === pointageId);
+        if (pIdx >= 0) db.contractuels_pointages[pIdx] = pointagePayload;
+        else db.contractuels_pointages.push(pointagePayload);
 
-      syncedPointages.push({ ...pointageRecord, activites: formattedActs });
-      synced++;
+        if (Array.isArray(item.activites)) {
+          for (const act of item.activites) {
+            const actId = act.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+            const sIds = Array.isArray(act.serres_ids) && act.serres_ids.length > 0
+              ? act.serres_ids
+              : act.serre_id
+                ? [String(act.serre_id)]
+                : [];
+            const sNoms = Array.isArray(act.serres_noms) && act.serres_noms.length > 0
+              ? act.serres_noms
+              : act.serre_nom
+                ? [String(act.serre_nom)]
+                : [];
+            const sTexte = act.serres_texte || (sNoms.length > 0 ? sNoms.join(', ') : act.serre_nom || 'Serre');
+
+            const actPayload = {
+              id: actId,
+              pointage_id: pointageId,
+              company_id: companyId,
+              ouvrier_id: item.ouvrier_id,
+              nom_complet: String(item.nom_complet || ''),
+              matricule: String(item.matricule || ''),
+              date: dateClean,
+              contrat_id: act.contrat_id ? String(act.contrat_id) : null,
+              contrat_nom: act.contrat_nom ? String(act.contrat_nom) : null,
+              tache_id: String(act.tache_id || act.contrat_id || 'tache_libre'),
+              tache_nom: String(act.tache_nom || act.contrat_nom || 'Tâche contractuelle'),
+              domaine_id: String(act.domaine_id || targetDomaineId),
+              serre_id: String(sIds[0] || act.serre_id || 'serre_1'),
+              serre_nom: String(sTexte),
+              serres_ids: sIds,
+              serres_noms: sNoms,
+              serres_texte: sTexte,
+              mode_remuneration: act.mode_remuneration || 'JOUR',
+              quantite: Number(act.quantite) || 1,
+              unite: String(act.unite || 'JOUR'),
+              prix_unitaire: Number(act.prix_unitaire) || 0,
+              montant_total: Number(act.montant_total) || 0,
+              observation: act.observation || null,
+              created_by_id: act.created_by_id || auth.user.id,
+              created_by_nom: act.created_by_nom || auth.user.nom,
+              created_at: act.created_at || nowIso,
+              updated_at: act.updated_at || nowIso,
+            };
+
+            const { error: aErr } = await actionClient
+              .from('contractuels_activites')
+              .upsert(actPayload, { onConflict: 'id' });
+            if (aErr) throw new Error('Erreur sync activité contractuelle: ' + aErr.message);
+
+            const aIdx = db.contractuels_activites.findIndex((a: any) => a.id === actId);
+            if (aIdx >= 0) db.contractuels_activites[aIdx] = actPayload;
+            else db.contractuels_activites.push(actPayload);
+          }
+        }
+        synced++;
+      }
     }
 
-    return res.json({ success: true, count: synced, pointages: syncedPointages });
+    if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+      for (const rawId of deletedIds) {
+        const delId = String(rawId || '').trim();
+        if (!delId) continue;
+        const { error: delActErr } = await actionClient
+          .from('contractuels_activites')
+          .delete()
+          .eq('pointage_id', delId)
+          .eq('company_id', companyId);
+        if (delActErr) throw new Error('Erreur suppression sync activités: ' + delActErr.message);
+
+        const { error: delPtgErr } = await actionClient
+          .from('contractuels_pointages')
+          .delete()
+          .eq('id', delId)
+          .eq('company_id', companyId);
+        if (delPtgErr) throw new Error('Erreur suppression sync pointage: ' + delPtgErr.message);
+
+        db.contractuels_pointages = db.contractuels_pointages.filter((p: any) => p.id !== delId || p.company_id !== companyId);
+        db.contractuels_activites = db.contractuels_activites.filter((a: any) => a.pointage_id !== delId || a.company_id !== companyId);
+        deletedCount++;
+      }
+    }
+
+    writeDB(db);
+    return res.json({ success: true, count: synced, deletedCount });
   } catch (err: any) {
     console.error('Erreur POST /api/contractuels/sync:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -7538,14 +6563,14 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    const projectId = process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).hostname.split('.')[0] : 'non-défini';
+    const projectId = supabaseUrl ? new URL(supabaseUrl).hostname.split('.')[0] : 'non-défini';
     console.log(`Serveur Lahcen Pointeur prêt sur http://0.0.0.0:${PORT}. Projet Supabase backend : ${projectId}`);
   });
 }
 
 export { app };
 
-if (process.env.DISABLE_AUTO_LISTEN !== '1') {
+if (process.env.SKIP_AUTO_START !== 'true') {
   startServer().catch((err) => {
     console.error('Erreur démarrage serveur:', err);
   });

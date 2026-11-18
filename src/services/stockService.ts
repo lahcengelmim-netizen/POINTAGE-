@@ -8,7 +8,6 @@
 
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
-import { getCurrentUser } from './storage';
 import {
   StockProduitSynthese,
   StockKPIs,
@@ -16,6 +15,32 @@ import {
   StockFilter,
   StockProduit,
 } from '../types';
+import {
+  OUTBOX_KEYS,
+  enqueueOutboxOp,
+  getOutboxOps,
+  dequeueOutboxOpsById,
+  markOutboxOpsFailed,
+  safeReadJson,
+  safeWriteJson,
+} from './syncOutbox';
+
+const STOCK_CACHE_SYNTHESE_KEY = 'agripointage_stock_synthese_v1';
+const STOCK_CACHE_MOUVEMENTS_KEY = 'agripointage_stock_mouvements_v1';
+
+const EMPTY_KPIS: StockKPIs = {
+  totalProduits: 0,
+  totalEntrees: 0,
+  totalSorties: 0,
+  produitsStockFaible: 0,
+  produitsRupture: 0,
+};
+
+function isOfflineOrTransientStatus(status?: number): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  if (status === undefined || status === 0) return true;
+  return status >= 500 || status === 408 || status === 429;
+}
 
 // Génération d'une clé d'idempotence unique avant envoi de la requête
 export function generateIdempotencyKey(): string {
@@ -25,63 +50,130 @@ export function generateIdempotencyKey(): string {
   return `idem_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
-// Récupération de l'en-tête d'autorisation
-async function getAuthHeaders(): Promise<HeadersInit> {
+function getActiveCompanyId(): string | null {
+  try {
+    const rawUser = localStorage.getItem('agripointage_current_user_v1');
+    if (rawUser) {
+      const parsed = JSON.parse(rawUser);
+      if (parsed?.company_id) return String(parsed.company_id).trim();
+    }
+    const rawComp = localStorage.getItem('agripointage_active_company_v1');
+    if (rawComp) {
+      const parsed = JSON.parse(rawComp);
+      if (typeof parsed === 'string') return parsed.trim();
+      if (parsed?.id) return String(parsed.id).trim();
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function readCachedSynthese(companyId: string): { produits: StockProduitSynthese[]; kpis: StockKPIs } {
+  const map = safeReadJson<Record<string, { produits: StockProduitSynthese[]; kpis: StockKPIs }>>(
+    STOCK_CACHE_SYNTHESE_KEY,
+    {}
+  );
+  return map[companyId] || { produits: [], kpis: { ...EMPTY_KPIS } };
+}
+
+function writeCachedSynthese(
+  companyId: string,
+  payload: { produits: StockProduitSynthese[]; kpis: StockKPIs }
+): void {
+  const map = safeReadJson<Record<string, any>>(STOCK_CACHE_SYNTHESE_KEY, {});
+  map[companyId] = payload;
+  safeWriteJson(STOCK_CACHE_SYNTHESE_KEY, map);
+}
+
+function readCachedMouvements(companyId: string): StockMouvement[] {
+  const map = safeReadJson<Record<string, StockMouvement[]>>(STOCK_CACHE_MOUVEMENTS_KEY, {});
+  return Array.isArray(map[companyId]) ? map[companyId] : [];
+}
+
+function writeCachedMouvements(companyId: string, list: StockMouvement[]): void {
+  const map = safeReadJson<Record<string, StockMouvement[]>>(STOCK_CACHE_MOUVEMENTS_KEY, {});
+  map[companyId] = list;
+  safeWriteJson(STOCK_CACHE_MOUVEMENTS_KEY, map);
+}
+
+// Récupération de l'en-tête d'autorisation (session Supabase obligatoire)
+async function getAuthHeaders(overrides?: { accessToken?: string; companyId?: string }): Promise<HeadersInit> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
+
+  const companyId = overrides?.companyId || getActiveCompanyId();
+  if (companyId) {
+    headers['x-company-id'] = companyId;
+  }
+
+  if (overrides?.accessToken) {
+    headers['Authorization'] = `Bearer ${overrides.accessToken}`;
+    return headers;
+  }
 
   try {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       headers['Authorization'] = `Bearer ${session.access_token}`;
-      return headers;
     }
   } catch {
-    // ignore
+    // Aucune session active : le serveur rejettera avec HTTP 401
   }
 
-  // Fallback dev local uniquement si Supabase n'est pas configuré
-  if (!import.meta.env.VITE_SUPABASE_URL) {
-    const user = getCurrentUser();
-    if (user?.role === 'lecteur') {
-      headers['Authorization'] = 'Bearer dev_lecteur_token';
-    } else if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') {
-      headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
-    } else if (user?.role === 'caporal') {
-      headers['Authorization'] = 'Bearer dev_caporal_token';
-    } else {
-      headers['Authorization'] = 'Bearer dev_admin_token';
-    }
-  }
   return headers;
 }
 
 // 1. Récupération du stock consolidé et des KPIs
-export async function getStockSynthese(): Promise<{
+export async function getStockSynthese(options?: {
+  accessToken?: string;
+  companyId?: string;
+  baseUrl?: string;
+}): Promise<{
   success: boolean;
   produits: StockProduitSynthese[];
   kpis: StockKPIs;
   error?: string;
 }> {
+  const companyId = options?.companyId || getActiveCompanyId() || 'cie_lahcen_pointeur';
   try {
-    const headers = await getAuthHeaders();
-    const res = await fetch('/api/stock', { headers });
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders(options);
+    const prefix = options?.baseUrl || '';
+    const res = await fetch(`${prefix}/api/stock`, { headers });
     const data = await res.json();
     if (!res.ok || !data.success) {
+      const cached = readCachedSynthese(companyId);
       return {
         success: false,
-        produits: [],
-        kpis: { totalProduits: 0, totalEntrees: 0, totalSorties: 0, produitsStockFaible: 0, produitsRupture: 0 },
+        produits: cached.produits,
+        kpis: cached.kpis,
         error: data.error || 'Erreur lors de la récupération du stock.',
       };
     }
+    if (Array.isArray(data.produits)) {
+      writeCachedSynthese(companyId, {
+        produits: data.produits,
+        kpis: data.kpis || { ...EMPTY_KPIS },
+      });
+    }
     return data;
   } catch (err: any) {
+    const cached = readCachedSynthese(companyId);
+    if (cached.produits.length > 0) {
+      return {
+        success: true,
+        produits: cached.produits,
+        kpis: cached.kpis,
+      };
+    }
     return {
       success: false,
       produits: [],
-      kpis: { totalProduits: 0, totalEntrees: 0, totalSorties: 0, produitsStockFaible: 0, produitsRupture: 0 },
+      kpis: { ...EMPTY_KPIS },
       error: err.message || 'Erreur réseau.',
     };
   }
@@ -122,20 +214,57 @@ export async function createProduit(
   unite: string,
   seuil_minimum: number = 5,
   stock_initial: number = 0
-): Promise<{ success: boolean; produit?: StockProduit; error?: string }> {
+): Promise<{ success: boolean; produit?: StockProduit; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/stock/produit', {
       method: 'POST',
       headers,
       body: JSON.stringify({ nom, unite, seuil_minimum, stock_initial }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur création produit.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus) && nom && unite) {
+      const tempId = `stk_prod_off_${Date.now()}`;
+      const localProduit: StockProduit = {
+        id: tempId,
+        company_id: companyId,
+        nom: nom.trim().toUpperCase(),
+        unite: unite.trim().toUpperCase(),
+        seuil_minimum,
+        actif: true,
+        created_at: new Date().toISOString(),
+      };
+      const cached = readCachedSynthese(companyId);
+      cached.produits.push({
+        produit: localProduit,
+        stock_initial,
+        total_entrees: 0,
+        total_sorties: 0,
+        stock_actuel: stock_initial,
+        etat: stock_initial <= 0 ? 'RUPTURE' : stock_initial <= seuil_minimum ? 'STOCK_FAIBLE' : 'DISPONIBLE',
+      });
+      cached.kpis.totalProduits = cached.produits.length;
+      writeCachedSynthese(companyId, cached);
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_produits',
+        entityId: tempId,
+        action: 'upsert',
+        data: { nom, unite, seuil_minimum, stock_initial },
+        companyId,
+      });
+      return { success: true, produit: localProduit, offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -146,20 +275,36 @@ export async function updateProduit(
   nom: string,
   unite: string,
   seuil_minimum: number = 5
-): Promise<{ success: boolean; produit?: StockProduit; error?: string; message?: string }> {
+): Promise<{ success: boolean; produit?: StockProduit; error?: string; message?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch(`/api/stock/produit/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ nom, unite, seuil_minimum }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur modification produit.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_produits',
+        entityId: id,
+        action: 'upsert',
+        data: { id, nom, unite, seuil_minimum },
+        companyId,
+      });
+      return { success: true, message: 'Modification mise en file hors ligne.', offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -167,19 +312,38 @@ export async function updateProduit(
 // 3c. Suppression manuelle d'un produit et de son historique
 export async function deleteProduit(
   id: string
-): Promise<{ success: boolean; message?: string; error?: string }> {
+): Promise<{ success: boolean; message?: string; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch(`/api/stock/produit/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers,
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur suppression produit.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      const cached = readCachedSynthese(companyId);
+      cached.produits = cached.produits.filter((p) => p.produit.id !== id);
+      writeCachedSynthese(companyId, cached);
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_produits',
+        entityId: id,
+        action: 'delete',
+        data: { id, company_id: companyId },
+        companyId,
+      });
+      return { success: true, message: 'Suppression mise en file hors ligne.', offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -206,7 +370,7 @@ export async function resetStockCatalogue(): Promise<{
   }
 }
 
-// 4. Enregistrement d'une entrée de marchandise (idempotent)
+// 4. Enregistrement d'une entrée de marchandise (idempotent + offline outbox)
 export async function addEntree(params: {
   produit_id: string;
   quantite: number;
@@ -216,28 +380,42 @@ export async function addEntree(params: {
   motif?: string;
   observation?: string;
   idempotencyKey?: string;
-}): Promise<{ success: boolean; mouvement?: StockMouvement; nouveau_stock?: number; error?: string }> {
+}): Promise<{ success: boolean; mouvement?: StockMouvement; nouveau_stock?: number; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const idempotencyKey = params.idempotencyKey || generateIdempotencyKey();
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/stock/entree', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        ...params,
-        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
-      }),
+      body: JSON.stringify({ ...params, idempotencyKey }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur enregistrement entrée.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_mouvements',
+        entityId: idempotencyKey,
+        action: 'upsert',
+        data: { endpoint: '/api/stock/entree', payload: { ...params, idempotencyKey } },
+        companyId,
+      });
+      return { success: true, offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
 
-// 5. Enregistrement d'une sortie de marchandise (idempotent + contrôle strict)
+// 5. Enregistrement d'une sortie de marchandise (idempotent + contrôle strict y compris hors ligne)
 export async function addSortie(params: {
   produit_id: string;
   quantite: number;
@@ -248,23 +426,46 @@ export async function addSortie(params: {
   motif?: string;
   observation?: string;
   idempotencyKey?: string;
-}): Promise<{ success: boolean; mouvement?: StockMouvement; nouveau_stock?: number; error?: string }> {
+}): Promise<{ success: boolean; mouvement?: StockMouvement; nouveau_stock?: number; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const idempotencyKey = params.idempotencyKey || generateIdempotencyKey();
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/stock/sortie', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        ...params,
-        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
-      }),
+      body: JSON.stringify({ ...params, idempotencyKey }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur enregistrement sortie.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      // Vérification de sécurité sur le cache local avant d'autoriser une sortie hors ligne
+      const cached = readCachedSynthese(companyId);
+      const prodSynth = cached.produits.find((p) => p.produit.id === params.produit_id);
+      if (prodSynth && Number(params.quantite) > prodSynth.stock_actuel) {
+        return {
+          success: false,
+          error: `Stock insuffisant en cache pour ${prodSynth.produit.nom} (${prodSynth.stock_actuel} ${prodSynth.produit.unite} disponible).`,
+        };
+      }
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_mouvements',
+        entityId: idempotencyKey,
+        action: 'upsert',
+        data: { endpoint: '/api/stock/sortie', payload: { ...params, idempotencyKey } },
+        companyId,
+      });
+      return { success: true, offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -278,23 +479,37 @@ export async function addEntreeBatch(params: {
   motif?: string;
   observation?: string;
   idempotencyKey?: string;
-}): Promise<{ success: boolean; count?: number; reference_document?: string; message?: string; error?: string }> {
+}): Promise<{ success: boolean; count?: number; reference_document?: string; message?: string; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const idempotencyKey = params.idempotencyKey || generateIdempotencyKey();
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/stock/entree-batch', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        ...params,
-        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
-      }),
+      body: JSON.stringify({ ...params, idempotencyKey }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur lors de l\'entrée multi-produits.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_mouvements',
+        entityId: idempotencyKey,
+        action: 'upsert',
+        data: { endpoint: '/api/stock/entree-batch', payload: { ...params, idempotencyKey } },
+        companyId,
+      });
+      return { success: true, count: params.items.length, offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -310,23 +525,47 @@ export async function addSortieBatch(params: {
   motif?: string;
   observation?: string;
   idempotencyKey?: string;
-}): Promise<{ success: boolean; count?: number; reference_document?: string; message?: string; error?: string }> {
+}): Promise<{ success: boolean; count?: number; reference_document?: string; message?: string; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const idempotencyKey = params.idempotencyKey || generateIdempotencyKey();
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/stock/sortie-batch', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        ...params,
-        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
-      }),
+      body: JSON.stringify({ ...params, idempotencyKey }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur lors de la sortie multi-produits.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      const cached = readCachedSynthese(companyId);
+      for (const item of params.items) {
+        const prodSynth = cached.produits.find((p) => p.produit.id === item.produit_id);
+        if (prodSynth && Number(item.quantite) > prodSynth.stock_actuel) {
+          return {
+            success: false,
+            error: `Stock insuffisant en cache pour ${prodSynth.produit.nom}.`,
+          };
+        }
+      }
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_mouvements',
+        entityId: idempotencyKey,
+        action: 'upsert',
+        data: { endpoint: '/api/stock/sortie-batch', payload: { ...params, idempotencyKey } },
+        companyId,
+      });
+      return { success: true, count: params.items.length, offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -339,35 +578,56 @@ export async function addCorrection(params: {
   motif: string;
   observation?: string;
   idempotencyKey?: string;
-}): Promise<{ success: boolean; mouvement?: StockMouvement; nouveau_stock?: number; error?: string }> {
+}): Promise<{ success: boolean; mouvement?: StockMouvement; nouveau_stock?: number; error?: string; offlineQueued?: boolean }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const idempotencyKey = params.idempotencyKey || generateIdempotencyKey();
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/stock/correction', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        ...params,
-        idempotencyKey: params.idempotencyKey || generateIdempotencyKey(),
-      }),
+      body: JSON.stringify({ ...params, idempotencyKey }),
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       return { success: false, error: data.error || 'Erreur enregistrement correction.' };
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      enqueueOutboxOp(OUTBOX_KEYS.STOCK, {
+        table: 'stock_mouvements',
+        entityId: idempotencyKey,
+        action: 'upsert',
+        data: { endpoint: '/api/stock/correction', payload: { ...params, idempotencyKey } },
+        companyId,
+      });
+      return { success: true, offlineQueued: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
 
-// 7. Récupération de l'historique des mouvements
-export async function getMouvements(filter?: StockFilter): Promise<{
+// 7. Récupération de l'historique des mouvements (avec cache local par entreprise)
+export async function getMouvements(
+  filter?: StockFilter,
+  options?: { accessToken?: string; companyId?: string; baseUrl?: string }
+): Promise<{
   success: boolean;
   mouvements: StockMouvement[];
   error?: string;
 }> {
+  const companyId = options?.companyId || getActiveCompanyId() || 'cie_lahcen_pointeur';
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders(options);
     const params = new URLSearchParams();
     if (filter?.produit_id) params.set('produit_id', filter.produit_id);
     if (filter?.type && filter.type !== 'ALL') params.set('type', filter.type);
@@ -375,16 +635,118 @@ export async function getMouvements(filter?: StockFilter): Promise<{
     if (filter?.startDate) params.set('startDate', filter.startDate);
     if (filter?.endDate) params.set('endDate', filter.endDate);
 
-    const url = `/api/stock/mouvements?${params.toString()}`;
+    const prefix = options?.baseUrl || '';
+    const url = `${prefix}/api/stock/mouvements?${params.toString()}`;
     const res = await fetch(url, { headers });
     const data = await res.json();
     if (!res.ok || !data.success) {
-      return { success: false, mouvements: [], error: data.error };
+      const cached = readCachedMouvements(companyId);
+      return { success: false, mouvements: cached, error: data.error };
+    }
+    const hasFilter = Boolean(
+      filter?.produit_id ||
+        (filter?.type && filter.type !== 'ALL') ||
+        (filter?.domaine_id && filter.domaine_id !== 'ALL') ||
+        filter?.startDate ||
+        filter?.endDate
+    );
+    if (!hasFilter && Array.isArray(data.mouvements) && data.mouvements.length > 0) {
+      writeCachedMouvements(companyId, data.mouvements);
     }
     return data;
   } catch (err: any) {
+    let cached = readCachedMouvements(companyId);
+    if (cached.length > 0) {
+      if (filter?.produit_id) cached = cached.filter((m) => m.produit_id === filter.produit_id);
+      if (filter?.type && filter.type !== 'ALL') cached = cached.filter((m) => m.type === filter.type);
+      if (filter?.domaine_id && filter.domaine_id !== 'ALL') cached = cached.filter((m) => m.domaine_id === filter.domaine_id);
+      if (filter?.startDate && filter?.endDate) {
+        cached = cached.filter((m) => m.date >= filter.startDate! && m.date <= filter.endDate!);
+      }
+      return { success: true, mouvements: cached };
+    }
     return { success: false, mouvements: [], error: err.message };
   }
+}
+
+export async function flushStockSyncQueue(options?: {
+  accessToken?: string;
+  companyId?: string;
+  baseUrl?: string;
+  ignoreNavigatorOnline?: boolean;
+}): Promise<{ syncedCount: number; failedCount: number; errors: string[] }> {
+  const summary = { syncedCount: 0, failedCount: 0, errors: [] as string[] };
+  if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return summary;
+  }
+
+  const targetCompany = options?.companyId || getActiveCompanyId() || undefined;
+  const ops = getOutboxOps(OUTBOX_KEYS.STOCK).filter(
+    (op) => !targetCompany || !op.companyId || op.companyId === targetCompany
+  );
+  if (ops.length === 0) return summary;
+
+  const prefix = options?.baseUrl || '';
+  const confirmedIds: string[] = [];
+
+  for (const op of ops) {
+    try {
+      const headers = await getAuthHeaders({
+        accessToken: options?.accessToken,
+        companyId: op.companyId || targetCompany,
+      });
+
+      if (op.table === 'stock_produits') {
+        if (op.action === 'delete') {
+          const res = await fetch(`${prefix}/api/stock/produit/${encodeURIComponent(op.entityId)}`, {
+            method: 'DELETE',
+            headers,
+          });
+          if (!res.ok && res.status !== 404) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${res.status}`);
+          }
+        } else {
+          const isTemp = op.entityId.startsWith('stk_prod_off_');
+          const url = isTemp
+            ? `${prefix}/api/stock/produit`
+            : `${prefix}/api/stock/produit/${encodeURIComponent(op.entityId)}`;
+          const res = await fetch(url, {
+            method: isTemp ? 'POST' : 'PUT',
+            headers,
+            body: JSON.stringify(op.data),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${res.status}`);
+          }
+        }
+      } else if (op.table === 'stock_mouvements' && op.data?.endpoint) {
+        const res = await fetch(`${prefix}${op.data.endpoint}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(op.data.payload),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+      }
+
+      confirmedIds.push(op.opId);
+      summary.syncedCount += 1;
+    } catch (err: any) {
+      const msg = err?.message || 'Erreur synchronisation Stock';
+      summary.failedCount += 1;
+      summary.errors.push(msg);
+      markOutboxOpsFailed(OUTBOX_KEYS.STOCK, [op.opId], msg);
+    }
+  }
+
+  if (confirmedIds.length > 0) {
+    dequeueOutboxOpsById(OUTBOX_KEYS.STOCK, confirmedIds);
+  }
+  return summary;
 }
 
 // 8. Analyse du fichier Excel à 3 colonnes exactes (NOM PRODUIT | UNITE | QTE)

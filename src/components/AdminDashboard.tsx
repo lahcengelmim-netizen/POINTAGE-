@@ -39,8 +39,15 @@ export const AdminDashboard: React.FC = () => {
   const checkConfig = async () => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        alert('Session administrateur requise.');
+        return;
+      }
       const response = await fetch('/api/debug-config', {
-        headers: { 'Authorization': `Bearer ${session?.access_token}` }
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          ...(user?.company_id ? { 'x-company-id': user.company_id } : {}),
+        }
       });
       const data = await response.json();
       
@@ -63,12 +70,17 @@ export const AdminDashboard: React.FC = () => {
     
     try {
       const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        alert('Session administrateur requise.');
+        return;
+      }
       
       const response = await fetch('/api/create-caporal', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token}`
+          'Authorization': `Bearer ${session.access_token}`,
+          ...(user?.company_id ? { 'x-company-id': user.company_id } : {}),
         },
         body: JSON.stringify({
           username: trimmedUsername,

@@ -9,7 +9,6 @@
 
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
-import { getCurrentUser, getTaches } from './storage';
 import {
   ContractuelContrat,
   ContractuelOuvrier,
@@ -17,41 +16,27 @@ import {
   ContractuelActivite,
   ContractuelFilter,
   ModeRemuneration,
-  StatutValidationContractuel,
-  Tache,
 } from '../types';
 import {
-  buildContractuellesWorkbook,
-  normalizeStatutValidation,
-} from '../utils/contractuelWorkflow';
-export { buildContractuellesWorkbook };
+  OUTBOX_KEYS,
+  enqueueOutboxOp,
+  getOutboxOps,
+  dequeueOutboxOpsById,
+  markOutboxOpsFailed,
+  mergeCollectionWithConflictLog,
+  isDeletedTombstone,
+} from './syncOutbox';
 
 const STORAGE_KEYS_CONTRACTUELS = {
   CONTRATS: 'agripointage_contractuels_contrats_v1',
   OUVRIERS: 'agripointage_contractuels_ouvriers_v1',
   POINTAGES: 'agripointage_contractuels_pointages_v1',
   ACTIVITES: 'agripointage_contractuels_activites_v1',
-  PENDING_POINTAGES: 'agripointage_contractuels_pending_sync_v1',
-  LAST_SYNC_AT: 'agripointage_contractuels_last_sync_v1',
 };
 
-function isNetworkUnavailable(err?: any): boolean {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
-  if (!err) return false;
-  if (err instanceof TypeError) return true;
-  const msg = String(err?.message || '').toLowerCase();
-  return (
-    msg.includes('failed to fetch') ||
-    msg.includes('networkerror') ||
-    msg.includes('load failed') ||
-    msg.includes('network request failed') ||
-    msg.includes('err_internet_disconnected')
-  );
-}
-
-function readPendingPointagesQueue(): any[] {
+function readLocalList<T>(key: string): T[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.PENDING_POINTAGES);
+    const raw = localStorage.getItem(key);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -59,167 +44,154 @@ function readPendingPointagesQueue(): any[] {
   }
 }
 
-function writePendingPointagesQueue(queue: any[]): void {
+function writeLocalList<T>(key: string, list: T[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.PENDING_POINTAGES, JSON.stringify(queue));
+    localStorage.setItem(key, JSON.stringify(list));
+  } catch (err) {
+    console.warn(`[contractuelService] Erreur écriture locale ${key}:`, err);
+  }
+}
+
+function getActiveCompanyId(): string | null {
+  try {
+    const rawUser = localStorage.getItem('agripointage_current_user_v1');
+    if (rawUser) {
+      const parsed = JSON.parse(rawUser);
+      if (parsed?.company_id) return String(parsed.company_id).trim();
+    }
+    const rawComp = localStorage.getItem('agripointage_active_company_v1');
+    if (rawComp) {
+      const parsed = JSON.parse(rawComp);
+      if (typeof parsed === 'string') return parsed.trim();
+      if (parsed?.id) return String(parsed.id).trim();
+    }
   } catch {
     // ignore
   }
+  return null;
 }
 
-function enqueuePendingPointage(payload: any): void {
-  const queue = readPendingPointagesQueue();
-  const keyOuv = payload.ouvrier_id;
-  const keyDate = payload.date;
-  const filtered = queue.filter((q) => !(q.ouvrier_id === keyOuv && q.date === keyDate));
-  filtered.push({
-    ...payload,
-    queued_at: new Date().toISOString(),
-    updated_at: payload.updated_at || new Date().toISOString(),
-  });
-  writePendingPointagesQueue(filtered);
+function isOfflineOrTransientStatus(status?: number): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  if (status === undefined || status === 0) return true;
+  return status >= 500 || status === 408 || status === 429;
 }
 
-export function getPendingContractuelPointagesCount(): number {
-  return readPendingPointagesQueue().length;
-}
-
-export function getContractuelsLastSyncAt(): string | null {
-  try {
-    return localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.LAST_SYNC_AT);
-  } catch {
-    return null;
-  }
-}
-
-function markContractuelsSynced(): void {
-  try {
-    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.LAST_SYNC_AT, new Date().toISOString());
-  } catch {
-    // ignore
-  }
-}
-
-// Récupération des en-têtes d'autorisation avec Bearer Token (respect strict du rôle)
-async function getAuthHeaders(): Promise<HeadersInit> {
+// Récupération des en-têtes d'autorisation avec Bearer Token (session Supabase obligatoire)
+async function getAuthHeaders(overrides?: { accessToken?: string; companyId?: string }): Promise<HeadersInit> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
+
+  const companyId = overrides?.companyId || getActiveCompanyId();
+  if (companyId) {
+    headers['x-company-id'] = companyId;
+  }
+
+  if (overrides?.accessToken) {
+    headers['Authorization'] = `Bearer ${overrides.accessToken}`;
+    return headers;
+  }
 
   try {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       headers['Authorization'] = `Bearer ${session.access_token}`;
-      return headers;
     }
   } catch {
-    // ignore
-  }
-
-  // Fallback dev local UNIQUEMENT quand Supabase n'est pas configuré
-  if (!import.meta.env.VITE_SUPABASE_URL) {
-    try {
-      const user = getCurrentUser();
-      if (user?.role === 'lecteur') {
-        headers['Authorization'] = 'Bearer dev_lecteur_token';
-        return headers;
-      }
-      if (user?.role === 'caporal_contractuelles' || user?.module_attribue === 'contractuelles') {
-        headers['Authorization'] = 'Bearer dev_caporal_contractuel_token';
-        return headers;
-      }
-      if (user?.role === 'caporal') {
-        headers['Authorization'] = 'Bearer dev_caporal_token';
-        return headers;
-      }
-    } catch {
-      // ignore
-    }
-    headers['Authorization'] = 'Bearer dev_admin_token';
+    // Aucune session active : le serveur rejettera avec HTTP 401
   }
 
   return headers;
 }
 
-// 0a. RÉCUPÉRATION DES TÂCHES RÉELLES DE L'APPLICATION (Supabase prioritaire, sans doublons)
-export async function getContractuelTaches(
-  companyId: string = 'cie_lahcen_pointeur'
-): Promise<{ success: boolean; taches: Tache[]; fromCache?: boolean; error?: string }> {
-  const localTaches = getTaches(companyId);
-  try {
-    const headers = await getAuthHeaders();
-    const res = await fetch('/api/contractuels/taches', { headers });
-    const data = await res.json();
-    if (res.ok && data.success && Array.isArray(data.taches)) {
-      const map = new Map<string, Tache>();
-      data.taches.forEach((t: Tache) => {
-        if (t && t.id && !map.has(t.id)) {
-          map.set(t.id, t);
-        }
-      });
-      return { success: true, taches: Array.from(map.values()), fromCache: false };
-    }
-    if (res.status >= 400 && res.status < 500) {
-      return { success: false, taches: [], error: data.error || 'Accès refusé aux tâches.' };
-    }
-    throw new Error(data.error || 'Erreur lors de la récupération des tâches.');
-  } catch (err: any) {
-    if (isNetworkUnavailable(err)) {
-      return { success: true, taches: localTaches, fromCache: true };
-    }
-    return { success: false, taches: localTaches, fromCache: true, error: err?.message };
-  }
-}
-
 // 0. CATALOGUE DES CONTRATS & TARIFS DE RÉFÉRENCE
 
-export async function getContractuelContrats(filter?: {
-  actif?: boolean;
-  searchQuery?: string;
-}): Promise<{ success: boolean; contrats: ContractuelContrat[]; fromCache?: boolean; error?: string }> {
+export async function getContractuelContrats(
+  filter?: {
+    actif?: boolean;
+    searchQuery?: string;
+  },
+  options?: {
+    accessToken?: string;
+    companyId?: string;
+    baseUrl?: string;
+    ignoreNavigatorOnline?: boolean;
+  }
+): Promise<{ success: boolean; contrats: ContractuelContrat[]; error?: string }> {
+  const companyId = options?.companyId || getActiveCompanyId();
   try {
-    const headers = await getAuthHeaders();
+    if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({
+      accessToken: options?.accessToken,
+      companyId: companyId || undefined,
+    });
     const params = new URLSearchParams();
     if (filter?.actif) params.set('actif', 'true');
     if (filter?.searchQuery) params.set('searchQuery', filter.searchQuery);
 
-    const res = await fetch(`/api/contractuels/contrats?${params.toString()}`, { headers });
+    const prefix = options?.baseUrl || '';
+    const res = await fetch(`${prefix}/api/contractuels/contrats?${params.toString()}`, { headers });
     const data = await res.json();
 
     if (res.ok && data.success && Array.isArray(data.contrats)) {
-      if (!filter?.searchQuery && !filter?.actif) {
-        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS, JSON.stringify(data.contrats));
-      }
-      return { success: true, contrats: data.contrats, fromCache: false };
-    }
+      const localList = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
+      const merged =
+        data.contrats.length > 0
+          ? mergeCollectionWithConflictLog<ContractuelContrat>({
+              table: 'contractuels_contrats',
+              queueKey: OUTBOX_KEYS.CONTRACTUELS,
+              localItems: localList,
+              remoteItems: data.contrats,
+              getId: (c) => c.id,
+              getCompanyId: (c) => c.company_id,
+              scopedCompanyId: companyId || undefined,
+              preserveLocalNotInRemote: true,
+            })
+          : localList;
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.CONTRATS, merged);
 
-    if (res.status >= 400 && res.status < 500) {
-      return { success: false, contrats: [], error: data.error || 'Accès refusé aux contrats.' };
+      let result = merged;
+      if (companyId) result = result.filter((c) => !c.company_id || c.company_id === companyId);
+      if (filter?.actif) result = result.filter((c) => c.actif);
+      if (filter?.searchQuery) {
+        const q = filter.searchQuery.toLowerCase();
+        result = result.filter((c) => c.designation.toLowerCase().includes(q) || c.code?.toLowerCase().includes(q));
+      }
+      return { success: true, contrats: result };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des contrats.');
   } catch (err: any) {
-    if (!isNetworkUnavailable(err)) {
-      return { success: false, contrats: [], error: err.message || 'Erreur serveur contrats.' };
-    }
-    console.warn('Mode hors ligne - cache local getContractuelContrats:', err.message);
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
-    let list: ContractuelContrat[] = raw ? JSON.parse(raw) : [];
+    console.warn('Fallback stockage local getContractuelContrats:', err.message);
+    let list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS).filter(
+      (c) => !isDeletedTombstone('contractuels_contrats', c.id)
+    );
+    if (companyId) list = list.filter((c) => !c.company_id || c.company_id === companyId);
     if (filter?.actif) list = list.filter((c) => c.actif);
     if (filter?.searchQuery) {
       const q = filter.searchQuery.toLowerCase();
       list = list.filter((c) => c.designation.toLowerCase().includes(q) || c.code?.toLowerCase().includes(q));
     }
-    return { success: true, contrats: list, fromCache: true };
+    return { success: true, contrats: list };
   }
 }
 
 export async function saveContractuelContrat(
   contratData: Partial<ContractuelContrat>
 ): Promise<{ success: boolean; contrat?: ContractuelContrat; error?: string }> {
+  const companyId = contratData.company_id || getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const nowIso = new Date().toISOString();
+  const isEdit = Boolean(contratData.id);
+  let lastStatus: number | undefined;
+
   try {
-    const headers = await getAuthHeaders();
-    const isEdit = Boolean(contratData.id);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const url = isEdit
       ? `/api/contractuels/contrats/${encodeURIComponent(contratData.id!)}`
       : '/api/contractuels/contrats';
@@ -229,27 +201,53 @@ export async function saveContractuelContrat(
       headers,
       body: JSON.stringify(contratData),
     });
+    lastStatus = res.status;
 
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Erreur enregistrement contrat.');
     }
 
-    // Mise à jour cache local
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
-    const list: ContractuelContrat[] = raw ? JSON.parse(raw) : [];
+    const list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
     const saved = data.contrat as ContractuelContrat;
-
     const idx = list.findIndex((c) => c.id === saved.id);
-    if (idx >= 0) {
-      list[idx] = saved;
-    } else {
-      list.unshift(saved);
-    }
-    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS, JSON.stringify(list));
+    if (idx >= 0) list[idx] = saved;
+    else list.unshift(saved);
+    writeLocalList(STORAGE_KEYS_CONTRACTUELS.CONTRATS, list);
 
     return { success: true, contrat: saved };
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus) && contratData.designation) {
+      const localId = contratData.id || `ctr_off_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const localRecord: ContractuelContrat = {
+        id: localId,
+        company_id: companyId,
+        code: contratData.code,
+        designation: contratData.designation,
+        prix_unitaire: Number(contratData.prix_unitaire) || 0,
+        unite: contratData.unite || 'JOUR',
+        mode_remuneration: contratData.mode_remuneration || 'JOUR',
+        domaine_id: contratData.domaine_id,
+        description: contratData.description,
+        actif: contratData.actif ?? true,
+        created_at: contratData.created_at || nowIso,
+        updated_at: nowIso,
+      };
+      const list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
+      const idx = list.findIndex((c) => c.id === localId);
+      if (idx >= 0) list[idx] = localRecord;
+      else list.unshift(localRecord);
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.CONTRATS, list);
+
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_contrats',
+        entityId: localId,
+        action: 'upsert',
+        data: localRecord,
+        companyId,
+      });
+      return { success: true, contrat: localRecord };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -280,16 +278,14 @@ export async function importContractuelContrats(
       throw new Error(data.error || 'Erreur importation des contrats.');
     }
 
-    // Actualiser le cache local
     if (Array.isArray(data.contrats)) {
-      const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
-      const list: ContractuelContrat[] = raw ? JSON.parse(raw) : [];
+      const list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
       data.contrats.forEach((newC: ContractuelContrat) => {
         const idx = list.findIndex((c) => c.id === newC.id);
         if (idx >= 0) list[idx] = newC;
         else list.push(newC);
       });
-      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS, JSON.stringify(list));
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.CONTRATS, list);
     }
 
     return data;
@@ -301,86 +297,133 @@ export async function importContractuelContrats(
 export async function deleteContractuelContrat(
   id: string
 ): Promise<{ success: boolean; message?: string; error?: string }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch(`/api/contractuels/contrats/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers,
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Erreur suppression contrat.');
     }
 
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
-    if (raw) {
-      const list: ContractuelContrat[] = JSON.parse(raw);
-      localStorage.setItem(
-        STORAGE_KEYS_CONTRACTUELS.CONTRATS,
-        JSON.stringify(list.filter((c) => c.id !== id))
-      );
-    }
+    const list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
+    writeLocalList(
+      STORAGE_KEYS_CONTRACTUELS.CONTRATS,
+      list.filter((c) => c.id !== id)
+    );
 
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      const list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS);
+      writeLocalList(
+        STORAGE_KEYS_CONTRACTUELS.CONTRATS,
+        list.filter((c) => c.id !== id)
+      );
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_contrats',
+        entityId: id,
+        action: 'delete',
+        data: { id, company_id: companyId },
+        companyId,
+      });
+      return { success: true, message: 'Suppression mise en file hors ligne.' };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
 
 // 1. OUVRIERS CONTRACTUELS
 
-export async function getContractuelOuvriers(filter?: {
-  actif?: boolean;
-  domaineId?: string;
-}): Promise<{ success: boolean; ouvriers: ContractuelOuvrier[]; fromCache?: boolean; error?: string }> {
+export async function getContractuelOuvriers(
+  filter?: {
+    actif?: boolean;
+    domaineId?: string;
+  },
+  options?: {
+    accessToken?: string;
+    companyId?: string;
+    baseUrl?: string;
+    ignoreNavigatorOnline?: boolean;
+  }
+): Promise<{ success: boolean; ouvriers: ContractuelOuvrier[]; error?: string }> {
+  const companyId = options?.companyId || getActiveCompanyId();
   try {
-    const headers = await getAuthHeaders();
+    if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({
+      accessToken: options?.accessToken,
+      companyId: companyId || undefined,
+    });
     const params = new URLSearchParams();
     if (filter?.actif) params.set('actif', 'true');
     if (filter?.domaineId && filter.domaineId !== 'ALL') params.set('domaineId', filter.domaineId);
 
-    const res = await fetch(`/api/contractuels/ouvriers?${params.toString()}`, { headers });
+    const prefix = options?.baseUrl || '';
+    const res = await fetch(`${prefix}/api/contractuels/ouvriers?${params.toString()}`, { headers });
     const data = await res.json();
 
     if (res.ok && data.success && Array.isArray(data.ouvriers)) {
-      if (!filter?.actif && (!filter?.domaineId || filter.domaineId === 'ALL')) {
-        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, JSON.stringify(data.ouvriers));
-      } else {
-        // Fusionner dans le cache sans supprimer les autres domaines
-        const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
-        const existing: ContractuelOuvrier[] = raw ? JSON.parse(raw) : [];
-        const map = new Map<string, ContractuelOuvrier>(existing.map((o) => [o.id, o]));
-        data.ouvriers.forEach((o: ContractuelOuvrier) => map.set(o.id, o));
-        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, JSON.stringify(Array.from(map.values())));
-      }
-      markContractuelsSynced();
-      return { success: true, ouvriers: data.ouvriers, fromCache: false };
-    }
+      const localList = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
+      const merged =
+        data.ouvriers.length > 0
+          ? mergeCollectionWithConflictLog<ContractuelOuvrier>({
+              table: 'contractuels_ouvriers',
+              queueKey: OUTBOX_KEYS.CONTRACTUELS,
+              localItems: localList,
+              remoteItems: data.ouvriers,
+              getId: (o) => o.id,
+              getCompanyId: (o) => o.company_id,
+              scopedCompanyId: companyId || undefined,
+              preserveLocalNotInRemote: true,
+            })
+          : localList;
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, merged);
 
-    if (res.status >= 400 && res.status < 500) {
-      return { success: false, ouvriers: [], error: data.error || 'Accès refusé aux ouvriers contractuels.' };
+      let result = merged;
+      if (companyId) result = result.filter((o) => !o.company_id || o.company_id === companyId);
+      if (filter?.actif) result = result.filter((o) => o.actif);
+      if (filter?.domaineId && filter.domaineId !== 'ALL') {
+        result = result.filter((o) => o.domaine_id === filter.domaineId);
+      }
+      return { success: true, ouvriers: result };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des ouvriers contractuels.');
   } catch (err: any) {
-    if (!isNetworkUnavailable(err)) {
-      return { success: false, ouvriers: [], error: err.message || 'Erreur serveur ouvriers contractuels.' };
-    }
-    console.warn('Mode hors ligne - cache local getContractuelOuvriers:', err.message);
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
-    let list: ContractuelOuvrier[] = raw ? JSON.parse(raw) : [];
+    console.warn('Fallback stockage local getContractuelOuvriers:', err.message);
+    let list = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS).filter(
+      (o) => !isDeletedTombstone('contractuels_ouvriers', o.id)
+    );
+    if (companyId) list = list.filter((o) => !o.company_id || o.company_id === companyId);
     if (filter?.actif) list = list.filter((o) => o.actif);
     if (filter?.domaineId && filter.domaineId !== 'ALL') list = list.filter((o) => o.domaine_id === filter.domaineId);
-    return { success: true, ouvriers: list, fromCache: true };
+    return { success: true, ouvriers: list };
   }
 }
 
 export async function saveContractuelOuvrier(
   ouvrierData: Partial<ContractuelOuvrier>
 ): Promise<{ success: boolean; ouvrier?: ContractuelOuvrier; error?: string }> {
+  const companyId = ouvrierData.company_id || getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const nowIso = new Date().toISOString();
+  const isEdit = Boolean(ouvrierData.id);
+  let lastStatus: number | undefined;
+
   try {
-    const headers = await getAuthHeaders();
-    const isEdit = Boolean(ouvrierData.id);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const url = isEdit
       ? `/api/contractuels/ouvriers/${encodeURIComponent(ouvrierData.id!)}`
       : '/api/contractuels/ouvriers';
@@ -390,24 +433,60 @@ export async function saveContractuelOuvrier(
       headers,
       body: JSON.stringify(ouvrierData),
     });
+    lastStatus = res.status;
 
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Erreur enregistrement ouvrier contractuel.');
     }
 
-    // Mise à jour cache local
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
-    let list: ContractuelOuvrier[] = raw ? JSON.parse(raw) : [];
+    let list = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
     if (isEdit) {
       list = list.map((o) => (o.id === data.ouvrier.id ? data.ouvrier : o));
     } else {
       list.push(data.ouvrier);
     }
-    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, JSON.stringify(list));
+    writeLocalList(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, list);
 
     return { success: true, ouvrier: data.ouvrier };
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus) && (ouvrierData.nom || ouvrierData.nom_complet)) {
+      const localId = ouvrierData.id || `ouv_ctr_off_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const fullName = ouvrierData.nom_complet || `${ouvrierData.nom || ''} ${ouvrierData.prenom || ''}`.trim();
+      const localRecord: ContractuelOuvrier = {
+        id: localId,
+        company_id: companyId,
+        nom: ouvrierData.nom || fullName,
+        prenom: ouvrierData.prenom || '',
+        nom_complet: fullName,
+        matricule: ouvrierData.matricule || `CTR-${Date.now().toString().slice(-4)}`,
+        domaine_id: ouvrierData.domaine_id || 'dom_d2',
+        serre_id: ouvrierData.serre_id ?? null,
+        mode_remuneration: ouvrierData.mode_remuneration || 'JOUR',
+        prix_convenu: Number(ouvrierData.prix_convenu) || 0,
+        unite: ouvrierData.unite || 'JOUR',
+        actif: ouvrierData.actif ?? true,
+        telephone: ouvrierData.telephone,
+        notes: ouvrierData.notes,
+        created_at: ouvrierData.created_at || nowIso,
+        updated_at: nowIso,
+      };
+      let list = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
+      if (isEdit) {
+        list = list.map((o) => (o.id === localId ? localRecord : o));
+      } else {
+        list.push(localRecord);
+      }
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, list);
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_ouvriers',
+        entityId: localId,
+        action: 'upsert',
+        data: localRecord,
+        companyId,
+      });
+      return { success: true, ouvrier: localRecord };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -415,28 +494,46 @@ export async function saveContractuelOuvrier(
 export async function deleteContractuelOuvrier(
   id: string
 ): Promise<{ success: boolean; error?: string }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch(`/api/contractuels/ouvriers/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers,
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Erreur suppression ouvrier contractuel.');
     }
 
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
-    if (raw) {
-      const list: ContractuelOuvrier[] = JSON.parse(raw);
-      localStorage.setItem(
-        STORAGE_KEYS_CONTRACTUELS.OUVRIERS,
-        JSON.stringify(list.filter((o) => o.id !== id))
-      );
-    }
+    const list = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
+    writeLocalList(
+      STORAGE_KEYS_CONTRACTUELS.OUVRIERS,
+      list.filter((o) => o.id !== id)
+    );
 
     return { success: true };
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      const list = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS);
+      writeLocalList(
+        STORAGE_KEYS_CONTRACTUELS.OUVRIERS,
+        list.filter((o) => o.id !== id)
+      );
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_ouvriers',
+        entityId: id,
+        action: 'delete',
+        data: { id, company_id: companyId },
+        companyId,
+      });
+      return { success: true };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -445,12 +542,14 @@ export async function importContractuelOuvriers(
   ouvriers: Array<{
     nom: string;
     prenom?: string;
+    nom_complet?: string;
     serre_nom?: string;
     prix_convenu: number;
     mode_remuneration?: ModeRemuneration;
     unite?: string;
     matricule?: string;
     domaine_id?: string;
+    notes?: string;
   }>,
   modeDedoublonnage: 'update' | 'skip' = 'update'
 ): Promise<{
@@ -501,43 +600,29 @@ export async function importContractuelOuvriers(
 
 // 2. POINTAGES ET ACTIVITÉS JOURNALIÈRES
 
-function reconcilePointagesCache(fetched: ContractuelPointage[], filter?: ContractuelFilter): void {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-    const existing: ContractuelPointage[] = raw ? JSON.parse(raw) : [];
-    const fetchedIds = new Set(fetched.map((p) => p.id));
-
-    // Retirer les anciennes copies de la même fenêtre filtrée pour refléter les suppressions distantes
-    const keptOtherDates = existing.filter((p) => {
-      if (fetchedIds.has(p.id)) return false;
-      if (filter?.date && p.date !== filter.date) return true;
-      if (filter?.startDate && filter?.endDate && (p.date < filter.startDate || p.date > filter.endDate)) return true;
-      if (!filter?.date && !filter?.startDate && !filter?.domaine_id && !filter?.ouvrier_id && !filter?.statut_validation && !filter?.serre_id) {
-        return false;
-      }
-      if (filter?.domaine_id && filter.domaine_id !== 'ALL' && p.domaine_id !== filter.domaine_id) return true;
-      if (filter?.ouvrier_id && p.ouvrier_id !== filter.ouvrier_id) return true;
-      return false;
-    });
-
-    const merged = [...keptOtherDates, ...fetched];
-    localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(merged));
-  } catch {
-    // ignore
+export async function getContractuelPointages(
+  filter?: ContractuelFilter,
+  options?: {
+    accessToken?: string;
+    companyId?: string;
+    baseUrl?: string;
+    ignoreNavigatorOnline?: boolean;
   }
-}
-
-export async function getContractuelPointages(filter?: ContractuelFilter): Promise<{
+): Promise<{
   success: boolean;
   pointages: ContractuelPointage[];
   activites?: ContractuelActivite[];
-  fromCache?: boolean;
-  pendingCount?: number;
   error?: string;
 }> {
-  const pendingQueue = readPendingPointagesQueue();
+  const companyId = options?.companyId || getActiveCompanyId();
   try {
-    const headers = await getAuthHeaders();
+    if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({
+      accessToken: options?.accessToken,
+      companyId: companyId || undefined,
+    });
     const params = new URLSearchParams();
     if (filter?.date) params.set('date', filter.date);
     if (filter?.startDate) params.set('startDate', filter.startDate);
@@ -545,69 +630,73 @@ export async function getContractuelPointages(filter?: ContractuelFilter): Promi
     if (filter?.domaine_id && filter.domaine_id !== 'ALL') params.set('domaineId', filter.domaine_id);
     if (filter?.serre_id && filter.serre_id !== 'ALL') params.set('serreId', filter.serre_id);
     if (filter?.ouvrier_id) params.set('ouvrierId', filter.ouvrier_id);
-    if (filter?.statut_validation && filter.statut_validation !== 'ALL') {
-      params.set('statutValidation', filter.statut_validation);
-    }
 
-    const res = await fetch(`/api/contractuels/pointages?${params.toString()}`, { headers });
+    const prefix = options?.baseUrl || '';
+    const res = await fetch(`${prefix}/api/contractuels/pointages?${params.toString()}`, { headers });
     const data = await res.json();
 
     if (res.ok && data.success && Array.isArray(data.pointages)) {
-      reconcilePointagesCache(data.pointages, filter);
-      markContractuelsSynced();
-      return {
-        success: true,
-        pointages: data.pointages,
-        activites: data.activites || [],
-        fromCache: false,
-        pendingCount: pendingQueue.length,
-      };
-    }
+      const localList = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+      const merged =
+        data.pointages.length > 0
+          ? mergeCollectionWithConflictLog<ContractuelPointage>({
+              table: 'contractuels_pointages',
+              queueKey: OUTBOX_KEYS.CONTRACTUELS,
+              localItems: localList,
+              remoteItems: data.pointages,
+              getId: (p) => p.id,
+              getCompanyId: (p) => p.company_id,
+              scopedCompanyId: companyId || undefined,
+              preserveLocalNotInRemote: true,
+            })
+          : localList;
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.POINTAGES, merged);
 
-    if (res.status >= 400 && res.status < 500) {
-      return {
-        success: false,
-        pointages: [],
-        error: data.error || 'Accès refusé aux pointages contractuels.',
-      };
+      const serverActs = Array.isArray(data.activites) ? (data.activites as ContractuelActivite[]) : [];
+      if (serverActs.length > 0) {
+        const localActs = readLocalList<ContractuelActivite>(STORAGE_KEYS_CONTRACTUELS.ACTIVITES);
+        const mergedActs = mergeCollectionWithConflictLog<ContractuelActivite>({
+          table: 'contractuels_activites',
+          queueKey: OUTBOX_KEYS.CONTRACTUELS,
+          localItems: localActs,
+          remoteItems: serverActs,
+          getId: (a) => a.id,
+          getCompanyId: (a) => a.company_id,
+          scopedCompanyId: companyId || undefined,
+          preserveLocalNotInRemote: true,
+        });
+        writeLocalList(STORAGE_KEYS_CONTRACTUELS.ACTIVITES, mergedActs);
+      }
+
+      // Filtrer sur la vue demandée à partir de l'état fusionné
+      let viewPointages = merged.filter((p) => !isDeletedTombstone('contractuels_pointages', p.id));
+      if (companyId) viewPointages = viewPointages.filter((p) => !p.company_id || p.company_id === companyId);
+      if (filter?.date) viewPointages = viewPointages.filter((p) => p.date === filter.date);
+      if (filter?.startDate && filter?.endDate) {
+        viewPointages = viewPointages.filter((p) => p.date >= filter.startDate! && p.date <= filter.endDate!);
+      }
+      if (filter?.domaine_id && filter.domaine_id !== 'ALL') {
+        viewPointages = viewPointages.filter((p) => p.domaine_id === filter.domaine_id);
+      }
+      if (filter?.ouvrier_id) viewPointages = viewPointages.filter((p) => p.ouvrier_id === filter.ouvrier_id);
+
+      return { success: true, pointages: viewPointages, activites: serverActs };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des pointages contractuels.');
   } catch (err: any) {
-    if (!isNetworkUnavailable(err)) {
-      return {
-        success: false,
-        pointages: [],
-        error: err.message || 'Erreur serveur lors de la lecture des pointages contractuels.',
-      };
-    }
-    console.warn('Mode hors ligne - cache local getContractuelPointages:', err.message);
-    const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-    let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
+    console.warn('Fallback stockage local getContractuelPointages:', err.message);
+    let listP = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES).filter(
+      (p) => !isDeletedTombstone('contractuels_pointages', p.id)
+    );
+    if (companyId) listP = listP.filter((p) => !p.company_id || p.company_id === companyId);
     if (filter?.date) listP = listP.filter((p) => p.date === filter.date);
     if (filter?.startDate && filter?.endDate) {
       listP = listP.filter((p) => p.date >= filter.startDate! && p.date <= filter.endDate!);
     }
     if (filter?.domaine_id && filter.domaine_id !== 'ALL') listP = listP.filter((p) => p.domaine_id === filter.domaine_id);
     if (filter?.ouvrier_id) listP = listP.filter((p) => p.ouvrier_id === filter.ouvrier_id);
-    if (filter?.serre_id && filter.serre_id !== 'ALL') {
-      listP = listP.filter(
-        (p) =>
-          p.serre_id === filter.serre_id ||
-          (Array.isArray(p.serres_ids) && p.serres_ids.includes(filter.serre_id!))
-      );
-    }
-    if (filter?.statut_validation && filter.statut_validation !== 'ALL') {
-      listP = listP.filter(
-        (p) => normalizeStatutValidation(p.statut_validation) === normalizeStatutValidation(filter.statut_validation)
-      );
-    }
-    return {
-      success: true,
-      pointages: listP,
-      fromCache: true,
-      pendingCount: pendingQueue.length,
-    };
+    return { success: true, pointages: listP };
   }
 }
 
@@ -619,312 +708,115 @@ export async function saveContractuelPointage(payload: {
   present: boolean;
   domaine_id?: string;
   montant_total_jour?: number;
-  tarif_initial?: number;
-  montant_propose?: number;
-  motif_modification?: string | null;
-  statut_validation?: StatutValidationContractuel;
   serre_id?: string | null;
   serres_ids?: string[];
   serres_noms?: string[];
   serres_texte?: string | null;
-  taches_ids?: string[];
-  taches_noms?: string[];
-  taches_texte?: string | null;
-  heure_debut?: string | null;
-  heure_fin?: string | null;
-  duree_heures?: number | null;
   activites?: Partial<ContractuelActivite>[];
-}): Promise<{
-  success: boolean;
-  pointage?: ContractuelPointage;
-  message?: string;
-  queuedOffline?: boolean;
-  error?: string;
-}> {
-  const queueOfflineDraft = () => {
-    const nowIso = new Date().toISOString();
-    const draftPayload = { ...payload, updated_at: nowIso };
-    enqueuePendingPointage(draftPayload);
-    try {
-      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-      let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
-      const existing = listP.find(
-        (p) => p.date === payload.date && p.ouvrier_id === payload.ouvrier_id
-      );
-      const draftPointage: ContractuelPointage = {
-        ...(existing || {}),
-        id: existing?.id || `cp_${payload.date}_${payload.ouvrier_id}`,
-        company_id: existing?.company_id || 'cie_lahcen_pointeur',
-        ouvrier_id: payload.ouvrier_id,
-        matricule: payload.matricule || existing?.matricule || '',
-        nom_complet: payload.nom_complet || existing?.nom_complet || '',
-        date: payload.date,
-        present: payload.present,
-        domaine_id: payload.domaine_id || existing?.domaine_id || 'dom_d2',
-        serre_id: payload.serre_id ?? existing?.serre_id ?? null,
-        serres_ids: payload.serres_ids || existing?.serres_ids || [],
-        serres_noms: payload.serres_noms || existing?.serres_noms || [],
-        serres_texte: payload.serres_texte ?? existing?.serres_texte ?? null,
-        taches_ids: payload.taches_ids || existing?.taches_ids || [],
-        taches_noms: payload.taches_noms || existing?.taches_noms || [],
-        taches_texte: payload.taches_texte ?? existing?.taches_texte ?? null,
-        heure_debut: payload.heure_debut ?? existing?.heure_debut ?? null,
-        heure_fin: payload.heure_fin ?? existing?.heure_fin ?? null,
-        duree_heures: payload.duree_heures ?? existing?.duree_heures ?? null,
-        tarif_initial: payload.tarif_initial ?? existing?.tarif_initial ?? 0,
-        montant_propose: payload.present ? (payload.montant_propose ?? payload.tarif_initial ?? 0) : 0,
-        statut_validation: payload.statut_validation || existing?.statut_validation || 'BROUILLON',
-        montant_total_jour: existing?.statut_validation === 'VALIDE' ? existing.montant_total_jour : 0,
-        created_at: existing?.created_at || nowIso,
-        updated_at: nowIso,
-      };
-      listP = listP.filter(
-        (p) => !(p.date === payload.date && p.ouvrier_id === payload.ouvrier_id)
-      );
-      listP.push(draftPointage);
-      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(listP));
-      return draftPointage;
-    } catch {
-      return undefined;
-    }
-  };
-
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    const draft = queueOfflineDraft();
-    return {
-      success: false,
-      queuedOffline: true,
-      pointage: draft,
-      error: 'Mode hors ligne : pointage mis en file d\'attente locale et sera synchronisé automatiquement dès le retour du réseau.',
-    };
-  }
+}): Promise<{ success: boolean; pointage?: ContractuelPointage; message?: string; error?: string }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const nowIso = new Date().toISOString();
+  let lastStatus: number | undefined;
 
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch('/api/contractuels/pointages', {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
     });
+    lastStatus = res.status;
 
     const data = await res.json();
     if (!res.ok || !data.success) {
-      // NE JAMAIS masquer une erreur HTTP serveur (400/401/403/409/500) en file offline !
-      return {
-        success: false,
-        error: data.error || `Erreur serveur HTTP ${res.status} lors de l'enregistrement.`,
-      };
+      throw new Error(data.error || 'Erreur enregistrement pointage contractuel.');
     }
 
-    // Retirer de la file d'attente si précédemment en attente
-    const pending = readPendingPointagesQueue();
-    const cleanedPending = pending.filter(
-      (q) => !(q.ouvrier_id === payload.ouvrier_id && q.date === payload.date)
-    );
-    if (cleanedPending.length !== pending.length) {
-      writePendingPointagesQueue(cleanedPending);
+    let listP = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+    listP = listP.filter((p) => !(p.date === payload.date && p.ouvrier_id === payload.ouvrier_id));
+    if (data.pointage) {
+      listP.push(data.pointage);
     }
-
-    // Miroir local
-    try {
-      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-      let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
-      listP = listP.filter(
-        (p) => !(p.date === payload.date && p.ouvrier_id === payload.ouvrier_id)
-      );
-      if (data.pointage) {
-        listP.push(data.pointage);
-      }
-      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(listP));
-      markContractuelsSynced();
-    } catch {
-      // ignore
-    }
+    writeLocalList(STORAGE_KEYS_CONTRACTUELS.POINTAGES, listP);
 
     return data;
   } catch (err: any) {
-    if (isNetworkUnavailable(err)) {
-      const draft = queueOfflineDraft();
+    if (isOfflineOrTransientStatus(lastStatus) && payload.ouvrier_id && payload.date) {
+      const pointageId = `ptg_ctr_off_${payload.date}_${payload.ouvrier_id}`;
+      const builtActs: ContractuelActivite[] = (payload.activites || []).map((a, idx) => {
+        const q = Number(a.quantite) || 0;
+        const pu = Number(a.prix_unitaire) || 0;
+        return {
+          id: a.id || `act_ctr_off_${Date.now()}_${idx}`,
+          pointage_id: pointageId,
+          company_id: companyId,
+          ouvrier_id: payload.ouvrier_id,
+          nom_complet: payload.nom_complet || '',
+          matricule: payload.matricule || '',
+          date: payload.date,
+          contrat_id: a.contrat_id || null,
+          contrat_nom: a.contrat_nom || null,
+          tache_id: a.tache_id || a.contrat_id || 'tache_libre',
+          tache_nom: a.tache_nom || a.contrat_nom || 'Tâche contractuelle',
+          domaine_id: a.domaine_id || payload.domaine_id || 'dom_d2',
+          serre_id: a.serre_id ?? payload.serre_id ?? null,
+          serre_nom: a.serre_nom || a.serres_texte || undefined,
+          serres_ids: a.serres_ids || payload.serres_ids,
+          serres_noms: a.serres_noms || payload.serres_noms,
+          serres_texte: a.serres_texte ?? payload.serres_texte ?? null,
+          mode_remuneration: a.mode_remuneration || 'JOUR',
+          quantite: q,
+          unite: a.unite || 'JOUR',
+          prix_unitaire: pu,
+          montant_total: a.montant_total ?? Math.round(q * pu * 100) / 100,
+          observation: a.observation ?? null,
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+      });
+
+      const localPointage: ContractuelPointage = {
+        id: pointageId,
+        company_id: companyId,
+        ouvrier_id: payload.ouvrier_id,
+        matricule: payload.matricule || '',
+        nom_complet: payload.nom_complet || '',
+        date: payload.date,
+        present: payload.present,
+        domaine_id: payload.domaine_id || 'dom_d2',
+        serre_id: payload.serre_id ?? null,
+        serres_ids: payload.serres_ids,
+        serres_noms: payload.serres_noms,
+        serres_texte: payload.serres_texte ?? null,
+        activites: builtActs,
+        montant_total_jour:
+          payload.montant_total_jour ??
+          builtActs.reduce((sum, a) => sum + (Number(a.montant_total) || 0), 0),
+        created_at: nowIso,
+        updated_at: nowIso,
+      };
+
+      let listP = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+      listP = listP.filter((p) => !(p.date === payload.date && p.ouvrier_id === payload.ouvrier_id));
+      listP.push(localPointage);
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.POINTAGES, listP);
+
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_pointages',
+        entityId: pointageId,
+        action: 'upsert',
+        data: payload,
+        companyId,
+      });
       return {
-        success: false,
-        queuedOffline: true,
-        pointage: draft,
-        error: 'Connexion interrompue : pointage enregistré en file locale en attente de synchronisation.',
+        success: true,
+        pointage: localPointage,
+        message: 'Enregistré localement (synchronisation en attente).',
       };
     }
-    return { success: false, error: err.message || 'Erreur réseau.' };
-  }
-}
-
-export async function syncPendingContractuelPointages(): Promise<{
-  success: boolean;
-  syncedCount: number;
-  conflictCount: number;
-  remainingCount: number;
-  error?: string;
-}> {
-  const queue = readPendingPointagesQueue();
-  if (queue.length === 0) {
-    return { success: true, syncedCount: 0, conflictCount: 0, remainingCount: 0 };
-  }
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    return {
-      success: false,
-      syncedCount: 0,
-      conflictCount: 0,
-      remainingCount: queue.length,
-      error: 'Hors connexion',
-    };
-  }
-
-  try {
-    const headers = await getAuthHeaders();
-    const res = await fetch('/api/contractuels/sync', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ pointages: queue }),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      return {
-        success: false,
-        syncedCount: 0,
-        conflictCount: 0,
-        remainingCount: queue.length,
-        error: data.error || `Erreur synchronisation (${res.status})`,
-      };
-    }
-
-    const results: any[] = Array.isArray(data.results) ? data.results : [];
-    const remaining: any[] = [];
-    let conflictCount = 0;
-
-    for (const qItem of queue) {
-      const r = results.find(
-        (resItem) =>
-          resItem.ouvrier_id === qItem.ouvrier_id &&
-          resItem.date === qItem.date
-      );
-      if (!r) {
-        remaining.push(qItem);
-      } else if (r.status === 'conflict_valide' || r.status === 'conflict_stale') {
-        conflictCount++;
-        // Ne pas renvoyer en boucle une donnée locale obsolète qui perd contre le serveur VALIDE/plus récent
-      } else if (r.status === 'error') {
-        remaining.push(qItem);
-      }
-    }
-
-    writePendingPointagesQueue(remaining);
-
-    if (Array.isArray(data.pointages) && data.pointages.length > 0) {
-      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-      const listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
-      const map = new Map<string, ContractuelPointage>(listP.map((p) => [p.id, p]));
-      data.pointages.forEach((p: ContractuelPointage) => map.set(p.id, p));
-      localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(Array.from(map.values())));
-    }
-    markContractuelsSynced();
-
-    return {
-      success: true,
-      syncedCount: Number(data.syncedCount || 0),
-      conflictCount,
-      remainingCount: remaining.length,
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      syncedCount: 0,
-      conflictCount: 0,
-      remainingCount: queue.length,
-      error: err.message || 'Erreur réseau lors de la synchronisation.',
-    };
-  }
-}
-
-export async function validateContractuelPointage(
-  id: string,
-  params: {
-    decision: 'VALIDE' | 'REFUSE';
-    montant_valide?: number;
-    motif?: string;
-  }
-): Promise<{ success: boolean; pointage?: ContractuelPointage; message?: string; error?: string }> {
-  try {
-    const headers = await getAuthHeaders();
-    const res = await fetch(`/api/contractuels/pointages/${encodeURIComponent(id)}/validate`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(params),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Erreur lors de la validation administrateur.');
-    }
-
-    try {
-      const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-      let listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
-      if (data.pointage) {
-        listP = listP.map((p) => (p.id === id ? data.pointage : p));
-        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(listP));
-      }
-      markContractuelsSynced();
-    } catch {
-      // ignore
-    }
-
-    return data;
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Erreur réseau.' };
-  }
-}
-
-export async function validateContractuelPointagesBatch(
-  items: Array<{
-    id: string;
-    decision: 'VALIDE' | 'REFUSE';
-    montant_valide?: number;
-    motif?: string;
-  }>
-): Promise<{
-  success: boolean;
-  count?: number;
-  pointages?: ContractuelPointage[];
-  message?: string;
-  error?: string;
-}> {
-  try {
-    const headers = await getAuthHeaders();
-    const res = await fetch('/api/contractuels/pointages/validate-batch', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ items }),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Erreur validation en lot.');
-    }
-
-    if (Array.isArray(data.pointages)) {
-      try {
-        const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-        const listP: ContractuelPointage[] = rawP ? JSON.parse(rawP) : [];
-        const map = new Map<string, ContractuelPointage>(listP.map((p) => [p.id, p]));
-        data.pointages.forEach((p: ContractuelPointage) => map.set(p.id, p));
-        localStorage.setItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES, JSON.stringify(Array.from(map.values())));
-        markContractuelsSynced();
-      } catch {
-        // ignore
-      }
-    }
-
-    return data;
-  } catch (err: any) {
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -932,28 +824,46 @@ export async function validateContractuelPointagesBatch(
 export async function deleteContractuelPointage(
   id: string
 ): Promise<{ success: boolean; message?: string; error?: string }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch(`/api/contractuels/pointages/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers,
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Erreur suppression pointage contractuel.');
     }
 
-    const rawP = localStorage.getItem(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
-    if (rawP) {
-      const listP: ContractuelPointage[] = JSON.parse(rawP);
-      localStorage.setItem(
-        STORAGE_KEYS_CONTRACTUELS.POINTAGES,
-        JSON.stringify(listP.filter((p) => p.id !== id))
-      );
-    }
+    const listP = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+    writeLocalList(
+      STORAGE_KEYS_CONTRACTUELS.POINTAGES,
+      listP.filter((p) => p.id !== id)
+    );
 
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      const listP = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+      writeLocalList(
+        STORAGE_KEYS_CONTRACTUELS.POINTAGES,
+        listP.filter((p) => p.id !== id)
+      );
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_pointages',
+        entityId: id,
+        action: 'delete',
+        data: { id, company_id: companyId },
+        companyId,
+      });
+      return { success: true, message: 'Suppression pointage mise en file hors ligne.' };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
@@ -961,29 +871,609 @@ export async function deleteContractuelPointage(
 export async function deleteContractuelActivite(
   id: string
 ): Promise<{ success: boolean; message?: string; error?: string }> {
+  const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
+  let lastStatus: number | undefined;
   try {
-    const headers = await getAuthHeaders();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Hors connexion');
+    }
+    const headers = await getAuthHeaders({ companyId });
     const res = await fetch(`/api/contractuels/activites/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers,
     });
+    lastStatus = res.status;
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Erreur suppression activité contractuelle.');
     }
     return data;
   } catch (err: any) {
+    if (isOfflineOrTransientStatus(lastStatus)) {
+      enqueueOutboxOp(OUTBOX_KEYS.CONTRACTUELS, {
+        table: 'contractuels_activites',
+        entityId: id,
+        action: 'delete',
+        data: { id, company_id: companyId },
+        companyId,
+      });
+      return { success: true, message: 'Suppression activité mise en file hors ligne.' };
+    }
     return { success: false, error: err.message || 'Erreur réseau.' };
   }
 }
 
-// 3. EXPORT EXCEL DÉDIÉ (5 FEUILLES SHEETJS — MONTANTS OFFICIELS VALIDÉS UNIQUEMENT)
+export async function flushContractuelsSyncQueue(options?: {
+  accessToken?: string;
+  companyId?: string;
+  baseUrl?: string;
+  ignoreNavigatorOnline?: boolean;
+}): Promise<{ syncedCount: number; failedCount: number; errors: string[] }> {
+  const resSummary = { syncedCount: 0, failedCount: 0, errors: [] as string[] };
+  if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return resSummary;
+  }
+
+  const allOps = getOutboxOps(OUTBOX_KEYS.CONTRACTUELS);
+  if (allOps.length === 0) return resSummary;
+
+  const targetCompany = options?.companyId || getActiveCompanyId() || undefined;
+  const scopedOps = allOps.filter((op) => !targetCompany || !op.companyId || op.companyId === targetCompany);
+  if (scopedOps.length === 0) return resSummary;
+
+  const prefix = options?.baseUrl || '';
+  const confirmedIds: string[] = [];
+
+  for (const op of scopedOps) {
+    try {
+      const headers = await getAuthHeaders({
+        accessToken: options?.accessToken,
+        companyId: op.companyId || targetCompany,
+      });
+
+      let url = '';
+      let method: 'POST' | 'PUT' | 'DELETE' = 'POST';
+      let body: string | undefined;
+
+      if (op.table === 'contractuels_contrats') {
+        if (op.action === 'delete') {
+          url = `${prefix}/api/contractuels/contrats/${encodeURIComponent(op.entityId)}`;
+          method = 'DELETE';
+        } else {
+          const isOfflineTemp = op.entityId.startsWith('ctr_off_');
+          url = isOfflineTemp
+            ? `${prefix}/api/contractuels/contrats`
+            : `${prefix}/api/contractuels/contrats/${encodeURIComponent(op.entityId)}`;
+          method = isOfflineTemp ? 'POST' : 'PUT';
+          const payload = isOfflineTemp ? { ...op.data, id: undefined } : op.data;
+          body = JSON.stringify(payload);
+        }
+      } else if (op.table === 'contractuels_ouvriers') {
+        if (op.action === 'delete') {
+          url = `${prefix}/api/contractuels/ouvriers/${encodeURIComponent(op.entityId)}`;
+          method = 'DELETE';
+        } else {
+          const isOfflineTemp = op.entityId.startsWith('ouv_ctr_off_');
+          url = isOfflineTemp
+            ? `${prefix}/api/contractuels/ouvriers`
+            : `${prefix}/api/contractuels/ouvriers/${encodeURIComponent(op.entityId)}`;
+          method = isOfflineTemp ? 'POST' : 'PUT';
+          const payload = isOfflineTemp ? { ...op.data, id: undefined } : op.data;
+          body = JSON.stringify(payload);
+        }
+      } else if (op.table === 'contractuels_pointages') {
+        if (op.action === 'delete') {
+          url = `${prefix}/api/contractuels/pointages/${encodeURIComponent(op.entityId)}`;
+          method = 'DELETE';
+        } else {
+          url = `${prefix}/api/contractuels/pointages`;
+          method = 'POST';
+          body = JSON.stringify(op.data);
+        }
+      } else if (op.table === 'contractuels_activites' && op.action === 'delete') {
+        url = `${prefix}/api/contractuels/activites/${encodeURIComponent(op.entityId)}`;
+        method = 'DELETE';
+      } else {
+        confirmedIds.push(op.opId);
+        continue;
+      }
+
+      const resJson = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 404 && op.action === 'delete') {
+          confirmedIds.push(op.opId);
+          resSummary.syncedCount += 1;
+          continue;
+        }
+        throw new Error(resJson.error || `HTTP ${response.status}`);
+      }
+
+      // Réconcilier l'ID provisoire hors ligne vers l'ID serveur canonique dans le cache local
+      if (op.action === 'upsert') {
+        if (op.table === 'contractuels_contrats' && resJson.contrat) {
+          const list = readLocalList<ContractuelContrat>(STORAGE_KEYS_CONTRACTUELS.CONTRATS)
+            .filter((c) => c.id !== op.entityId && c.id !== resJson.contrat.id);
+          list.unshift(resJson.contrat);
+          writeLocalList(STORAGE_KEYS_CONTRACTUELS.CONTRATS, list);
+        } else if (op.table === 'contractuels_ouvriers' && resJson.ouvrier) {
+          const list = readLocalList<ContractuelOuvrier>(STORAGE_KEYS_CONTRACTUELS.OUVRIERS)
+            .filter((o) => o.id !== op.entityId && o.id !== resJson.ouvrier.id);
+          list.push(resJson.ouvrier);
+          writeLocalList(STORAGE_KEYS_CONTRACTUELS.OUVRIERS, list);
+        } else if (op.table === 'contractuels_pointages' && resJson.pointage) {
+          const list = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES).filter(
+            (p) =>
+              p.id !== op.entityId &&
+              p.id !== resJson.pointage.id &&
+              !(p.date === resJson.pointage.date && p.ouvrier_id === resJson.pointage.ouvrier_id)
+          );
+          list.push(resJson.pointage);
+          writeLocalList(STORAGE_KEYS_CONTRACTUELS.POINTAGES, list);
+        }
+      }
+
+      confirmedIds.push(op.opId);
+      resSummary.syncedCount += 1;
+    } catch (err: any) {
+      const msg = err?.message || 'Erreur synchronisation contractuels';
+      resSummary.failedCount += 1;
+      resSummary.errors.push(msg);
+      markOutboxOpsFailed(OUTBOX_KEYS.CONTRACTUELS, [op.opId], msg);
+    }
+  }
+
+  if (confirmedIds.length > 0) {
+    dequeueOutboxOpsById(OUTBOX_KEYS.CONTRACTUELS, confirmedIds);
+  }
+  return resSummary;
+}
+
+// 3. HELPERS MÉTIER & EXPORT EXCEL DÉDIÉ (5 FEUILLES SHEETJS)
+
+function stripAccentsUpper(value?: string | null): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .trim();
+}
+
+export function normalizeContractuelDomaineShort(domaineId?: string | null): string {
+  const clean = stripAccentsUpper(domaineId).replace(/^DOM_/, '');
+  const match = clean.match(/^D0*(\d+)$/);
+  if (match) return `D${parseInt(match[1], 10)}`;
+  if (/^\d+$/.test(clean)) return `D${parseInt(clean, 10)}`;
+  return clean || 'D2';
+}
+
+export function normalizeContractuelDomaineFull(domaineId?: string | null): string {
+  const shortCode = normalizeContractuelDomaineShort(domaineId);
+  const match = shortCode.match(/^D(\d+)$/);
+  if (match) return `D${match[1].padStart(3, '0')}`;
+  return shortCode;
+}
+
+export function formatContractuelOuvrierId(
+  matricule?: string | null,
+  domaineId?: string | null,
+  workerFallback?: Partial<ContractuelOuvrier>
+): string {
+  const domShort = normalizeContractuelDomaineShort(domaineId || workerFallback?.domaine_id);
+  const raw = String(matricule || workerFallback?.matricule || '').trim().toUpperCase();
+
+  if (!raw) {
+    const idDigits = String(workerFallback?.id || '').match(/\d+/);
+    const numPart = idDigits ? String(parseInt(idDigits[0], 10)) : '0';
+    return `${numPart}-${domShort}`;
+  }
+
+  const alreadyWithDomain = raw.match(/^(.+?)-(?:DOM_)?D0*(\d+)$/i);
+  if (alreadyWithDomain) {
+    const prefix = alreadyWithDomain[1].trim();
+    const domNum = parseInt(alreadyWithDomain[2], 10);
+    return `${prefix}-D${domNum}`;
+  }
+
+  if (/^\d+$/.test(raw)) {
+    return `${parseInt(raw, 10)}-${domShort}`;
+  }
+
+  return `${raw}-${domShort}`;
+}
+
+function isUnassignedSerreLabel(value?: string | null): boolean {
+  const norm = stripAccentsUpper(value);
+  return (
+    !norm ||
+    norm === 'NON AFFECTEE' ||
+    norm === 'AUCUNE' ||
+    norm === 'AUCUNE SERRE' ||
+    norm === 'SERRE NON DEFINIE' ||
+    norm === '—' ||
+    norm === '-' ||
+    norm === 'TOUTES LES SERRES'
+  );
+}
+
+function formatSingleContractuelSerreCode(rawSerre: string, domaineFull: string): string {
+  const clean = stripAccentsUpper(rawSerre);
+  if (!clean) return '';
+
+  // Déjà au format D00XS12 ou D2-S12 / D5S23 -> normaliser sans double préfixe
+  const fullMatch = clean.match(/^D0*(\d+)[-_\s]*S0*(\d+)$/);
+  if (fullMatch) {
+    return `D${String(parseInt(fullMatch[1], 10)).padStart(3, '0')}S${parseInt(fullMatch[2], 10)}`;
+  }
+
+  // Format serre_d5_23 -> extraire domaine & numéro
+  const serreDomIdMatch = clean.match(/^SERRE[_-]D0*(\d+)[_-](\d+)$/);
+  if (serreDomIdMatch) {
+    return `D${String(parseInt(serreDomIdMatch[1], 10)).padStart(3, '0')}S${parseInt(serreDomIdMatch[2], 10)}`;
+  }
+
+  // Format SERRE 1, S01, S1, serre_1
+  const numMatch = clean.match(/(?:SERRE[_\s]*|S0*)(\d+)$/) || clean.match(/(\d+)/);
+  if (numMatch) {
+    return `${domaineFull}S${parseInt(numMatch[1], 10)}`;
+  }
+
+  return clean;
+}
+
+export function formatContractuelSerreCell(act: Partial<ContractuelActivite>): string {
+  const domFull = normalizeContractuelDomaineFull(act.domaine_id);
+
+  const hasExplicitIds = Array.isArray(act.serres_ids) && act.serres_ids.length > 0;
+  const hasExplicitNoms = Array.isArray(act.serres_noms) && act.serres_noms.some((s) => !isUnassignedSerreLabel(s));
+
+  const rawTextCandidates: string[] = [];
+  if (hasExplicitNoms) {
+    act.serres_noms!.forEach((s) => {
+      if (!isUnassignedSerreLabel(s)) rawTextCandidates.push(String(s));
+    });
+  } else if (hasExplicitIds) {
+    act.serres_ids!.forEach((id) => {
+      if (!isUnassignedSerreLabel(id)) rawTextCandidates.push(String(id));
+    });
+  } else {
+    const textSource = !isUnassignedSerreLabel(act.serres_texte)
+      ? act.serres_texte!
+      : !isUnassignedSerreLabel(act.serre_nom)
+        ? act.serre_nom!
+        : (act.serre_id && !isUnassignedSerreLabel(act.serre_id) && (act.serre_nom || act.serres_texte) && !isUnassignedSerreLabel(act.serre_nom || act.serres_texte))
+          ? act.serre_id
+          : '';
+
+    if (textSource) {
+      String(textSource)
+        .split(/[,;/+&]+/)
+        .map((t) => t.trim())
+        .filter((t) => t && !isUnassignedSerreLabel(t))
+        .forEach((t) => rawTextCandidates.push(t));
+    }
+  }
+
+  if (rawTextCandidates.length === 0) {
+    return 'Toutes les serres';
+  }
+
+  const formatted: string[] = [];
+  const seen = new Set<string>();
+  for (const item of rawTextCandidates) {
+    const code = formatSingleContractuelSerreCode(item, domFull);
+    if (code && !seen.has(code)) {
+      seen.add(code);
+      formatted.push(code);
+    }
+  }
+
+  return formatted.length > 0 ? formatted.join('+') : 'Toutes les serres';
+}
+
+function normalizeTimeValue(raw?: string | null): string | null {
+  if (!raw) return null;
+  const m = String(raw).trim().match(/^(\d{1,2})\s*[:hH]\s*(\d{0,2})$/);
+  if (!m) return null;
+  const hh = String(parseInt(m[1], 10)).padStart(2, '0');
+  const mm = String(m[2] ? parseInt(m[2], 10) : 0).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+function extractScheduleTimes(act: Partial<ContractuelActivite> & Record<string, any>): {
+  heureDeb: string;
+  heureFin: string;
+  dureeRep: 0 | 1;
+} {
+  let deb = normalizeTimeValue(act.heureDeb || act.heure_debut);
+  let fin = normalizeTimeValue(act.heureFin || act.heure_fin);
+
+  if (!deb || !fin) {
+    const searchText = `${act.observation || ''} ${act.tache_nom || ''} ${act.contrat_nom || ''}`;
+    const rangeMatch = searchText.match(/(\d{1,2}\s*[:hH]\s*\d{0,2})\s*[-–àa/]+\s*(\d{1,2}\s*[:hH]\s*\d{0,2})/);
+    if (rangeMatch) {
+      deb = deb || normalizeTimeValue(rangeMatch[1]);
+      fin = fin || normalizeTimeValue(rangeMatch[2]);
+    }
+  }
+
+  const heureDeb = deb || '07:00';
+  const heureFin = fin || '16:00';
+
+  let dureeRep: 0 | 1 = 1;
+  if (heureDeb === '07:00' && heureFin === '14:00') {
+    dureeRep = 0;
+  } else if (heureDeb === '07:00' && heureFin === '16:00') {
+    dureeRep = 1;
+  } else if (act.dureeRep === 0 || act.dureeRep === '0') {
+    dureeRep = 0;
+  }
+
+  return { heureDeb, heureFin, dureeRep };
+}
+
+export function computeContractuelExportFields(
+  act: Partial<ContractuelActivite> & Record<string, any>,
+  workerMap?: Map<string, ContractuelOuvrier>
+) {
+  const worker = act.ouvrier_id && workerMap ? workerMap.get(act.ouvrier_id) : undefined;
+  const domShort = normalizeContractuelDomaineShort(act.domaine_id || worker?.domaine_id);
+  const ouvrierId = formatContractuelOuvrierId(act.matricule, act.domaine_id, worker);
+  const serre = formatContractuelSerreCell({
+    ...act,
+    domaine_id: act.domaine_id || worker?.domaine_id || 'dom_d2',
+  });
+  const ruban = 'Tous les Rubans';
+  const { heureDeb, heureFin, dureeRep } = extractScheduleTimes(act);
+
+  const taskText = stripAccentsUpper(`${act.tache_nom || ''} ${act.contrat_nom || ''}`);
+  const modeRaw = stripAccentsUpper(act.mode_remuneration || worker?.mode_remuneration || 'JOUR');
+
+  const isEbourgeonnageD5 =
+    taskText.includes('EBOURGEON') && (domShort === 'D5' || /\bD0*5\b/.test(taskText));
+  const isTTT = /\bTTT\b/.test(taskText) || taskText.includes('TRAITEMENT');
+  const isTTTD3 = isTTT && (domShort === 'D3' || /\bD0*3\b/.test(taskText));
+  const isRecolte = taskText.includes('RECOLTE');
+  const isRecolteCerise = isRecolte && taskText.includes('CERISE');
+  const isRecolteRonde = isRecolte && taskText.includes('RONDE');
+
+  let tarifExcep = Number(act.prix_unitaire) || 0;
+  let unite = '';
+  let effectiveMode = act.mode_remuneration || 'JOUR';
+
+  if (isEbourgeonnageD5) {
+    tarifExcep = 150;
+    unite = '1';
+    effectiveMode = 'FORFAIT' as any;
+  } else if (isTTTD3) {
+    tarifExcep = 16;
+    unite = '';
+  } else if (isTTT) {
+    unite = '';
+  } else if (isRecolteCerise) {
+    tarifExcep = 3.8;
+    unite = '';
+  } else if (isRecolteRonde) {
+    tarifExcep = 1.1875;
+    unite = '';
+  } else if (isRecolte) {
+    tarifExcep = Number(act.prix_unitaire) > 0 ? Number(act.prix_unitaire) : 1.1875;
+    unite = '';
+  } else if (modeRaw === 'UNITE') {
+    unite = act.unite ? String(act.unite).trim() : '';
+  } else if (modeRaw === 'JOUR' || modeRaw === 'HEURE') {
+    unite = '';
+    if (heureDeb === '07:00' && heureFin === '16:00') {
+      tarifExcep = 95;
+    } else if (tarifExcep <= 0) {
+      tarifExcep = 95;
+    }
+  } else {
+    unite = '';
+  }
+
+  return {
+    ouvrierId,
+    domShort,
+    serre,
+    ruban,
+    effectiveMode,
+    unite,
+    qteMetrique: '',
+    quantite: '',
+    heureDeb,
+    heureFin,
+    dureeRep,
+    tarifExcep,
+  };
+}
+
+export function buildContractuellesRemunerationRows(
+  allActivites: ContractuelActivite[],
+  allOuvriers: ContractuelOuvrier[]
+) {
+  const workerMap = new Map<string, ContractuelOuvrier>();
+  allOuvriers.forEach((o) => workerMap.set(o.id, o));
+
+  return allActivites.map((act) => {
+    const computed = computeContractuelExportFields(act, workerMap);
+    return {
+      'Date': act.date,
+      'ouvrierId': computed.ouvrierId,
+      'Ouvrier': act.nom_complet,
+      'Contrat': act.contrat_nom || '—',
+      'Domaine': computed.domShort,
+      'Serre': computed.serre,
+      'Ruban': computed.ruban,
+      'Tâche Réalisée': act.tache_nom || act.contrat_nom || '',
+      'Mode': computed.effectiveMode,
+      'Unité': computed.unite,
+      'qteMetrique': computed.qteMetrique,
+      'quantite': computed.quantite,
+      'heureDeb': computed.heureDeb,
+      'heureFin': computed.heureFin,
+      'dureeRep': computed.dureeRep,
+      'tarifExcep': computed.tarifExcep,
+      'Montant Total (DH)': act.montant_total,
+      'Observation': act.observation || '',
+      'Saisi par': act.created_by_nom || 'Caporal',
+    };
+  });
+}
+
 export function exportContractuellesExcel(params: {
   pointages: ContractuelPointage[];
   allOuvriers: ContractuelOuvrier[];
   date?: string;
   filterDesc?: string;
 }) {
-  const { wb, fileName } = buildContractuellesWorkbook(params);
+  const { pointages, allOuvriers, date, filterDesc } = params;
+  const dateFormatted = date || new Date().toISOString().slice(0, 10);
+
+  // Tous les ouvriers actifs pour cette sélection
+  const totalOuvriers = allOuvriers.length;
+  const presentsCount = pointages.filter((p) => p.present).length;
+  const absentsCount = totalOuvriers - presentsCount;
+
+  // Extraire toutes les activités à plat
+  const allActivites: ContractuelActivite[] = [];
+  pointages.forEach((p) => {
+    if (p.present && p.activites && p.activites.length > 0) {
+      p.activites.forEach((a) => allActivites.push(a));
+    }
+  });
+
+  const montantTotalJourDH = pointages.reduce(
+    (sum, p) => sum + (Number(p.montant_total_jour) || 0),
+    0
+  );
+
+  const wb = XLSX.utils.book_new();
+
+  // -------------------------------------------------------------
+  // FEUILLE 1 : RÉCAPITULATIF
+  // -------------------------------------------------------------
+  const recapData = [
+    { 'Indicateur': 'Exploitation Agricole', 'Valeur': 'Lahcen Pointeur' },
+    { 'Indicateur': 'Module', 'Valeur': 'Gestion des Contractuelles' },
+    { 'Indicateur': 'Date d\'analyse', 'Valeur': dateFormatted },
+    { 'Indicateur': 'Période / Filtre', 'Valeur': filterDesc || 'Tous les domaines' },
+    { 'Indicateur': 'Total Ouvriers Contractuels', 'Valeur': totalOuvriers },
+    { 'Indicateur': 'Nombre de Présents', 'Valeur': presentsCount },
+    { 'Indicateur': 'Nombre d\'Absents', 'Valeur': absentsCount > 0 ? absentsCount : 0 },
+    { 'Indicateur': 'Nombre de Tâches Réalisées', 'Valeur': allActivites.length },
+    { 'Indicateur': 'Montant Total Journalier (DH)', 'Valeur': Math.round(montantTotalJourDH * 100) / 100 },
+  ];
+  const wsRecap = XLSX.utils.json_to_sheet(recapData);
+  XLSX.utils.book_append_sheet(wb, wsRecap, '1. Récapitulatif');
+
+  // -------------------------------------------------------------
+  // FEUILLE 2 : POINTAGE DÉTAILLÉ
+  // -------------------------------------------------------------
+  const detailPointageData = allOuvriers.map((ouvrier) => {
+    const ptg = pointages.find((p) => p.ouvrier_id === ouvrier.id);
+    const isPresent = ptg ? ptg.present : false;
+    const domNom = ptg?.domaine_id ? ptg.domaine_id.replace('dom_', '').toUpperCase() : ouvrier.domaine_id.replace('dom_', '').toUpperCase();
+    const serre = ptg?.serres_texte || ptg?.serre_id || ouvrier.serre_id || '—';
+    const nbTaches = ptg?.activites?.length || 0;
+    const montant = ptg?.montant_total_jour || 0;
+
+    return {
+      'Date': dateFormatted,
+      'Matricule': ouvrier.matricule,
+      'Nom de l\'Ouvrier': ouvrier.nom,
+      'Prénom': ouvrier.prenom,
+      'Nom Complet': ouvrier.nom_complet,
+      'Domaine': domNom,
+      'Serres': serre,
+      'Présence': isPresent ? 'Présent' : 'Absent',
+      'Nb Tâches': nbTaches,
+      'Mode Rémunération': ouvrier.mode_remuneration,
+      'Tarif Convenu (DH)': ouvrier.prix_convenu,
+      'Total Jour (DH)': montant,
+    };
+  });
+  const wsPointage = XLSX.utils.json_to_sheet(detailPointageData);
+  XLSX.utils.book_append_sheet(wb, wsPointage, '2. Pointage Détaillé');
+
+  // -------------------------------------------------------------
+  // FEUILLE 3 : DÉTAIL DES RÉMUNÉRATIONS (12 RÈGLES MÉTIER STRICTES)
+  // -------------------------------------------------------------
+  const detailRemunerationsData = buildContractuellesRemunerationRows(allActivites, allOuvriers);
+
+  const wsRemun = XLSX.utils.json_to_sheet(
+    detailRemunerationsData.length > 0
+      ? detailRemunerationsData
+      : [{ 'Information': 'Aucune activité enregistrée pour cette sélection.' }]
+  );
+  XLSX.utils.book_append_sheet(wb, wsRemun, '3. Rémunérations');
+
+  // -------------------------------------------------------------
+  // FEUILLE 4 : RÉCAPITULATIF PAR SERRE
+  // -------------------------------------------------------------
+  const serreMap = new Map<string, { ouvriers: Set<string>; tachesCount: number; totalDH: number; domaine: string }>();
+  allActivites.forEach((act) => {
+    // Si l'activité a plusieurs serres, l'attribuer à chaque serre sélectionnée
+    const serreNames = (Array.isArray(act.serres_noms) && act.serres_noms.length > 0)
+      ? act.serres_noms
+      : [act.serre_nom || act.serre_id || 'Serre Non Définie'];
+
+    serreNames.forEach((sName) => {
+      if (!serreMap.has(sName)) {
+        serreMap.set(sName, {
+          ouvriers: new Set<string>(),
+          tachesCount: 0,
+          totalDH: 0,
+          domaine: act.domaine_id.replace('dom_', '').toUpperCase(),
+        });
+      }
+      const entry = serreMap.get(sName)!;
+      entry.ouvriers.add(act.ouvrier_id);
+      entry.tachesCount += 1;
+      // Note : répartition comptable par serre
+      entry.totalDH = Math.round((entry.totalDH + act.montant_total / serreNames.length) * 100) / 100;
+    });
+  });
+
+  const recapSerreData: any[] = [];
+  serreMap.forEach((val, serreName) => {
+    recapSerreData.push({
+      'Serre': serreName,
+      'Domaine': val.domaine,
+      'Nombre d\'Ouvriers Distincts': val.ouvriers.size,
+      'Nombre de Tâches': val.tachesCount,
+      'Total Rémunération Estimé (DH)': val.totalDH,
+    });
+  });
+
+  const wsSerre = XLSX.utils.json_to_sheet(
+    recapSerreData.length > 0 ? recapSerreData : [{ 'Information': 'Aucune serre affectée.' }]
+  );
+  XLSX.utils.book_append_sheet(wb, wsSerre, '4. Récapitulatif Serres');
+
+  // -------------------------------------------------------------
+  // FEUILLE 5 : HISTORIQUE PAR OUVRIER
+  // -------------------------------------------------------------
+  const histoWorkerData = allOuvriers.map((ouvrier) => {
+    const workerActs = allActivites.filter((a) => a.ouvrier_id === ouvrier.id);
+    const workerTotalDH = workerActs.reduce((sum, a) => sum + (Number(a.montant_total) || 0), 0);
+    const ptg = pointages.find((p) => p.ouvrier_id === ouvrier.id);
+    const isPresent = ptg ? ptg.present : false;
+
+    return {
+      'Matricule': ouvrier.matricule,
+      'Nom Complet': ouvrier.nom_complet,
+      'Téléphone': ouvrier.telephone || '—',
+      'Statut Jour': isPresent ? 'Présent' : 'Absent',
+      'Nombre Tâches Aujourd\'hui': workerActs.length,
+      'Mode Habituel': ouvrier.mode_remuneration,
+      'Tarif Convenu (DH)': ouvrier.prix_convenu,
+      'Total Rémunération Jour (DH)': Math.round(workerTotalDH * 100) / 100,
+    };
+  });
+  const wsWorker = XLSX.utils.json_to_sheet(histoWorkerData);
+  XLSX.utils.book_append_sheet(wb, wsWorker, '5. Historique Ouvrier');
+
+  // Téléchargement du fichier
+  const fileName = `contractuelles-lahcen-${dateFormatted}.xlsx`;
   XLSX.writeFile(wb, fileName);
 }
