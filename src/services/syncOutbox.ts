@@ -366,9 +366,11 @@ export function recordSyncConflict(
   return entry;
 }
 
-export function getSyncConflicts(): SyncConflictRecord[] {
+export function getSyncConflicts(companyId?: string): SyncConflictRecord[] {
   const raw = safeReadJson<SyncConflictRecord[]>(OUTBOX_KEYS.CONFLICTS, []);
-  return Array.isArray(raw) ? raw : [];
+  if (!Array.isArray(raw)) return [];
+  if (!companyId) return raw;
+  return raw.filter((c) => !c.companyId || c.companyId === companyId);
 }
 
 export function clearResolvedConflicts(): void {

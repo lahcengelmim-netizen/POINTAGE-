@@ -26,13 +26,16 @@ interface ContractuelCaporalManagementProps {
   domaines: Domaine[];
   serres: Serre[];
   currentUser: UserAccount;
+  isReadOnly?: boolean;
 }
 
 export const ContractuelCaporalManagement: React.FC<ContractuelCaporalManagementProps> = ({
   domaines,
   serres,
   currentUser,
+  isReadOnly = false,
 }) => {
+  const effectiveReadOnly = isReadOnly || currentUser.role === 'lecteur';
   const [caporaux, setCaporaux] = useState<UserAccount[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -99,6 +102,7 @@ export const ContractuelCaporalManagement: React.FC<ContractuelCaporalManagement
 
   const handleCreateCaporal = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (effectiveReadOnly) return;
     setErrorMsg(null);
     setSuccessMsg(null);
 
@@ -300,7 +304,7 @@ export const ContractuelCaporalManagement: React.FC<ContractuelCaporalManagement
           <div className="pt-2 flex justify-end">
             <button
               type="submit"
-              disabled={creating}
+              disabled={creating || effectiveReadOnly}
               className="bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer"
             >
               {creating ? 'Création en cours...' : 'Créer le compte Caporal'}

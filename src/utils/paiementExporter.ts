@@ -53,7 +53,8 @@ import {
 export const PAIEMENT_SHEET_POINTAGE = 'Pointage';
 export const PAIEMENT_SHEET_TOTAUX = 'Totaux par Ouvrier';
 export const PAIEMENT_RUBAN_LABEL = 'Tous les Rubans';
-export const PAIEMENT_ALL_SERRES_LABEL = 'Toutes les serres';
+export const PAIEMENT_ALL_SERRES_LABEL = 'TOUTES LES SERRES';
+const THRESHOLD_TARIFFS_RESERVED_KEY = '__threshold_tariffs';
 
 export const PAIEMENT_TEMPLATE_FILENAME = ADMIN_EXPORT_TEMPLATE_FILENAME;
 export const PAIEMENT_TEMPLATE_PUBLIC_URL = ADMIN_EXPORT_TEMPLATE_PUBLIC_URL;
@@ -76,6 +77,10 @@ export const DEFAULT_PAIEMENT_TARIFFS = {
   stationnaireJour: 100,
   gardienJour: 100,
   ebourgeonnageD5Jour: 150,
+  chariotTarifRef: 95,
+  chariotQuantiteRef: 400,
+  transfertCaisseTarifRef: 95,
+  transfertCaisseQuantiteRef: 400,
 } as const;
 
 export type PaiementTariffMode =
@@ -83,7 +88,8 @@ export type PaiementTariffMode =
   | 'FORFAIT_JOUR'
   | 'HEURE'
   | 'RECOLTE_COEFF'
-  | 'RECOLTE_UNITE';
+  | 'RECOLTE_UNITE'
+  | 'CAISSE_SEUIL';
 
 export type PaiementTaskCategory =
   | 'RECOLTE_CERISE'
@@ -95,6 +101,8 @@ export type PaiementTaskCategory =
   | 'STATIONNAIRE'
   | 'GARDIEN'
   | 'EBOURGEONNAGE_D5'
+  | 'CHARIOT'
+  | 'TRANSFERT_CAISSE'
   | 'CUSTOM';
 
 export type RecolteVarietyChoice = 'CERISE' | 'RONDE';
@@ -104,6 +112,10 @@ export interface CustomTaskTariffRule {
   label: string;
   mode: PaiementTariffMode;
   value: number;
+  unite?: string;
+  quantiteRef?: number;
+  coefficient?: number;
+  actif?: boolean;
 }
 
 export interface PaiementTariffsConfig {
@@ -115,6 +127,10 @@ export interface PaiementTariffsConfig {
   stationnaireJour: number;
   gardienJour: number;
   ebourgeonnageD5Jour: number;
+  chariotTarifRef: number;
+  chariotQuantiteRef: number;
+  transfertCaisseTarifRef: number;
+  transfertCaisseQuantiteRef: number;
   customTaskTariffs: Record<string, CustomTaskTariffRule>;
   version: number;
   updatedAt: string;
@@ -126,6 +142,7 @@ export interface PaiementHoursOverride {
   heureFin?: string;
   dureeRep?: number;
   heures?: number;
+  caisses?: number;
 }
 
 export interface PaiementExcelRow {
@@ -140,6 +157,7 @@ export interface PaiementExcelRow {
   domaineId: string;
   domaineShort: string;
   serreId: string;
+  hasMissingSerre?: boolean;
   rubanId: string;
   cultureId: string;
   tacheTypeId: string;
@@ -163,6 +181,8 @@ export interface PaiementExcelRow {
   remuneration: number;
   needsVarietySelection?: boolean;
   varietyBlockedReason?: string;
+  missingQuantityBlocked?: boolean;
+  missingQuantityReason?: string;
   notes: string[];
 }
 
@@ -201,6 +221,13 @@ export interface PaiementPreviewResult {
   isHistoricalFrozen: boolean;
   frozenSnapshot?: PaiementExportSnapshot | null;
   blockedVarietyRowsCount: number;
+  blockedMissingQuantityRowsCount: number;
+  blockedMissingQuantityWorkers: Array<{
+    ouvrierId: string;
+    nomOuvrier: string;
+    tache: string;
+    reason: string;
+  }>;
   warnings: string[];
 }
 
@@ -560,6 +587,41 @@ function parseTariffsConfigObject(parsed: any): PaiementTariffsConfig {
     const n = Number(val);
     return Number.isFinite(n) && n >= 0 ? n : fallback;
   };
+  const posNumOr = (val: unknown, fallback: number): number => {
+    if (val === undefined || val === null || val === '') return fallback;
+    const n = Number(val);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+
+  const rawCustomObj = parsed?.customTaskTariffs ?? parsed?.custom_task_tariffs;
+  const thresholdMeta =
+    rawCustomObj && typeof rawCustomObj === 'object'
+      ? (rawCustomObj as Record<string, any>)[THRESHOLD_TARIFFS_RESERVED_KEY]
+      : undefined;
+
+  const cleanCustomMap: Record<string, CustomTaskTariffRule> = {};
+  if (rawCustomObj && typeof rawCustomObj === 'object') {
+    for (const [k, rule] of Object.entries(rawCustomObj as Record<string, any>)) {
+      if (k === THRESHOLD_TARIFFS_RESERVED_KEY || !rule || typeof rule !== 'object') continue;
+      cleanCustomMap[k] = {
+        tacheKey: String(rule.tacheKey || k),
+        label: String(rule.label || k),
+        mode: rule.mode || 'FORFAIT_JOUR',
+        value: numOr(rule.value, 0),
+        unite: typeof rule.unite === 'string' && rule.unite.trim() ? rule.unite.trim() : undefined,
+        quantiteRef:
+          rule.quantiteRef !== undefined && Number(rule.quantiteRef) > 0
+            ? Number(rule.quantiteRef)
+            : undefined,
+        coefficient:
+          rule.coefficient !== undefined && Number(rule.coefficient) >= 0
+            ? Number(rule.coefficient)
+            : undefined,
+        actif: rule.actif !== false,
+      };
+    }
+  }
+
   return {
     recolteCeriseCoeff: numOr(parsed?.recolteCeriseCoeff ?? parsed?.recolte_cerise_coeff, defaults.recolteCeriseCoeff),
     recolteRondeTarif: numOr(parsed?.recolteRondeTarif ?? parsed?.recolte_ronde_tarif, defaults.recolteRondeTarif),
@@ -569,11 +631,27 @@ function parseTariffsConfigObject(parsed: any): PaiementTariffsConfig {
     stationnaireJour: numOr(parsed?.stationnaireJour ?? parsed?.stationnaire_jour, defaults.stationnaireJour),
     gardienJour: numOr(parsed?.gardienJour ?? parsed?.gardien_jour, defaults.gardienJour),
     ebourgeonnageD5Jour: numOr(parsed?.ebourgeonnageD5Jour ?? parsed?.ebourgeonnage_d5_jour, defaults.ebourgeonnageD5Jour),
-    customTaskTariffs:
-      (parsed?.customTaskTariffs ?? parsed?.custom_task_tariffs) &&
-      typeof (parsed?.customTaskTariffs ?? parsed?.custom_task_tariffs) === 'object'
-        ? (parsed?.customTaskTariffs ?? parsed?.custom_task_tariffs)
-        : {},
+    chariotTarifRef: numOr(
+      parsed?.chariotTarifRef ?? parsed?.chariot_tarif_ref ?? thresholdMeta?.chariotTarifRef,
+      defaults.chariotTarifRef
+    ),
+    chariotQuantiteRef: posNumOr(
+      parsed?.chariotQuantiteRef ?? parsed?.chariot_quantite_ref ?? thresholdMeta?.chariotQuantiteRef,
+      defaults.chariotQuantiteRef
+    ),
+    transfertCaisseTarifRef: numOr(
+      parsed?.transfertCaisseTarifRef ??
+        parsed?.transfert_caisse_tarif_ref ??
+        thresholdMeta?.transfertCaisseTarifRef,
+      defaults.transfertCaisseTarifRef
+    ),
+    transfertCaisseQuantiteRef: posNumOr(
+      parsed?.transfertCaisseQuantiteRef ??
+        parsed?.transfert_caisse_quantite_ref ??
+        thresholdMeta?.transfertCaisseQuantiteRef,
+      defaults.transfertCaisseQuantiteRef
+    ),
+    customTaskTariffs: cleanCustomMap,
     version:
       Number.isInteger(Number(parsed?.version)) && Number(parsed?.version) >= 1
         ? Number(parsed.version)
@@ -620,9 +698,32 @@ export function savePaiementTariffs(
     if (!Number.isFinite(n) || n < 0) return fallback;
     return n;
   };
+  const validatePositive = (val: unknown, fallback: number): number => {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return n;
+  };
   const nextVersion = options?.preserveTimestampAndVersion
     ? Math.max(1, Number(nextTariffs.version || current.version || 1))
     : Math.max(1, Number(current.version || 1)) + 1;
+
+  const rawCustomInput =
+    nextTariffs.customTaskTariffs !== undefined
+      ? nextTariffs.customTaskTariffs
+      : current.customTaskTariffs;
+  const cleanedCustom: Record<string, CustomTaskTariffRule> = {};
+  if (rawCustomInput && typeof rawCustomInput === 'object') {
+    for (const [k, rule] of Object.entries(rawCustomInput)) {
+      if (k === THRESHOLD_TARIFFS_RESERVED_KEY || !rule || typeof rule !== 'object') continue;
+      cleanedCustom[k] = {
+        ...rule,
+        tacheKey: String(rule.tacheKey || k),
+        label: String(rule.label || k),
+        value: validateRate(rule.value, 0),
+        actif: rule.actif !== false,
+      };
+    }
+  }
 
   const merged: PaiementTariffsConfig = {
     recolteCeriseCoeff: validateRate(nextTariffs.recolteCeriseCoeff, current.recolteCeriseCoeff),
@@ -633,10 +734,17 @@ export function savePaiementTariffs(
     stationnaireJour: validateRate(nextTariffs.stationnaireJour, current.stationnaireJour),
     gardienJour: validateRate(nextTariffs.gardienJour, current.gardienJour),
     ebourgeonnageD5Jour: validateRate(nextTariffs.ebourgeonnageD5Jour, current.ebourgeonnageD5Jour),
-    customTaskTariffs:
-      nextTariffs.customTaskTariffs !== undefined
-        ? nextTariffs.customTaskTariffs
-        : current.customTaskTariffs,
+    chariotTarifRef: validateRate(nextTariffs.chariotTarifRef, current.chariotTarifRef),
+    chariotQuantiteRef: validatePositive(nextTariffs.chariotQuantiteRef, current.chariotQuantiteRef),
+    transfertCaisseTarifRef: validateRate(
+      nextTariffs.transfertCaisseTarifRef,
+      current.transfertCaisseTarifRef
+    ),
+    transfertCaisseQuantiteRef: validatePositive(
+      nextTariffs.transfertCaisseQuantiteRef,
+      current.transfertCaisseQuantiteRef
+    ),
+    customTaskTariffs: cleanedCustom,
     version: nextVersion,
     updatedAt:
       options?.preserveTimestampAndVersion && typeof nextTariffs.updatedAt === 'string'
@@ -879,7 +987,15 @@ export async function syncSavePaiementTariffsToSupabase(
     stationnaire_jour: localRes.config.stationnaireJour,
     gardien_jour: localRes.config.gardienJour,
     ebourgeonnage_d5_jour: localRes.config.ebourgeonnageD5Jour,
-    custom_task_tariffs: localRes.config.customTaskTariffs || {},
+    custom_task_tariffs: {
+      ...(localRes.config.customTaskTariffs || {}),
+      [THRESHOLD_TARIFFS_RESERVED_KEY]: {
+        chariotTarifRef: localRes.config.chariotTarifRef,
+        chariotQuantiteRef: localRes.config.chariotQuantiteRef,
+        transfertCaisseTarifRef: localRes.config.transfertCaisseTarifRef,
+        transfertCaisseQuantiteRef: localRes.config.transfertCaisseQuantiteRef,
+      },
+    },
     version: localRes.config.version,
     updated_at: localRes.config.updatedAt,
     updated_by_id: user?.id || null,
@@ -1123,8 +1239,14 @@ export async function syncLoadPaiementDayOverridesFromSupabase(
         }
         if (row.override_type === 'hours' && row.payload && typeof row.payload === 'object') {
           nextHours[row.row_key] = row.payload as PaiementHoursOverride;
-        } else if (row.override_type === 'variety' && row.payload?.choice) {
-          nextVarieties[row.row_key] = row.payload.choice as RecolteVarietyChoice;
+        } else if (row.override_type === 'variety') {
+          const choice =
+            typeof row.payload === 'string'
+              ? row.payload
+              : row.payload?.choice;
+          if (choice === 'CERISE' || choice === 'RONDE') {
+            nextVarieties[row.row_key] = choice;
+          }
         }
       }
       saveHoursOverridesForDate(companyId, dateIso, nextHours);
@@ -1442,12 +1564,43 @@ export function saveVarietyOverridesForDate(
 export interface ResolvedTaskTariff {
   category: PaiementTaskCategory;
   mode: PaiementTariffMode;
-  tarifValue: number; // Coefficient (si RECOLTE_COEFF) ou DH/jour ou DH/h ou DH/unité
+  tarifValue: number; // Coefficient (si RECOLTE_COEFF) ou DH/jour ou DH/h ou DH/unité ou tarifRef (CAISSE_SEUIL)
+  quantiteRef?: number;
   coefficient: number | '';
   tarifAppliqueLabel: string;
   uniteMetrique: string;
   needsVarietySelection?: boolean;
   varietyBlockedReason?: string;
+}
+
+function findMatchingCustomRule(
+  tache: Tache | null | undefined,
+  customMap: Record<string, CustomTaskTariffRule>
+): CustomTaskTariffRule | null {
+  if (!tache || !customMap || typeof customMap !== 'object') return null;
+
+  const directKeys = [tache.id, tache.code, tache.nom].filter(Boolean) as string[];
+  for (const k of directKeys) {
+    const r = customMap[k];
+    if (r && r.actif !== false) return r;
+  }
+
+  const nomNorm = normalizeText(tache.nom);
+  const codeNorm = normalizeText(tache.code);
+  const idNorm = normalizeText(tache.id);
+
+  for (const rule of Object.values(customMap)) {
+    if (!rule || rule.actif === false) continue;
+    const ruleKeyNorm = normalizeText(rule.tacheKey);
+    const ruleLabelNorm = normalizeText(rule.label);
+    if (
+      (ruleKeyNorm && (ruleKeyNorm === idNorm || ruleKeyNorm === codeNorm || ruleKeyNorm === nomNorm)) ||
+      (ruleLabelNorm && (ruleLabelNorm === nomNorm || ruleLabelNorm === codeNorm))
+    ) {
+      return rule;
+    }
+  }
+  return null;
 }
 
 export function resolvePaiementTaskTariff(params: {
@@ -1473,33 +1626,90 @@ export function resolvePaiementTaskTariff(params: {
   const fullTask = `${nomNorm} ${codeNorm}`.trim();
   const domNorm = (domaineShort || '').trim().toUpperCase();
 
-  // 0. Tarif personnalisé configuré pour une tâche spécifique par l'Admin
+  // 0. Tarif personnalisé actif configuré pour une tâche spécifique par l'Admin
   const customMap = tariffs.customTaskTariffs || {};
-  const customRule =
-    (tache?.id && customMap[tache.id]) ||
-    (tache?.code && customMap[tache.code]) ||
-    (tache?.nom && customMap[tache.nom]);
+  const customRule = findMatchingCustomRule(tache, customMap);
   if (customRule && Number(customRule.value) >= 0) {
     const v = Number(customRule.value);
+    const refQty =
+      customRule.quantiteRef && Number(customRule.quantiteRef) > 0
+        ? Number(customRule.quantiteRef)
+        : 400;
+    const coeff =
+      customRule.mode === 'RECOLTE_COEFF'
+        ? Number(customRule.coefficient ?? v)
+        : '';
+    const effectiveValue =
+      customRule.mode === 'RECOLTE_COEFF' && typeof coeff === 'number' ? coeff : v;
+    const unite =
+      customRule.unite?.trim() ||
+      (customRule.mode === 'CAISSE_SEUIL'
+        ? 'CAISSES'
+        : customRule.mode === 'RECOLTE_COEFF' || customRule.mode === 'RECOLTE_UNITE'
+        ? 'PLATEAUX'
+        : customRule.mode === 'HEURE'
+        ? 'HEURE'
+        : 'JOUR');
+
     return {
       category: 'CUSTOM',
       mode: customRule.mode,
-      tarifValue: v,
-      coefficient: customRule.mode === 'RECOLTE_COEFF' ? v : '',
+      tarifValue: effectiveValue,
+      quantiteRef: customRule.mode === 'CAISSE_SEUIL' ? refQty : undefined,
+      coefficient: coeff,
       tarifAppliqueLabel:
-        customRule.mode === 'RECOLTE_COEFF'
-          ? `Coeff ${v}`
+        customRule.mode === 'CAISSE_SEUIL'
+          ? `${effectiveValue} DH / ${refQty} c. (prorata > ${refQty})`
+          : customRule.mode === 'RECOLTE_COEFF'
+          ? `Coeff ${effectiveValue}`
           : customRule.mode === 'HEURE'
-          ? `${v} DH / heure`
+          ? `${effectiveValue} DH / heure`
           : customRule.mode === 'RECOLTE_UNITE'
-          ? `${v} DH / caisse`
-          : `${v} DH / jour`,
-      uniteMetrique:
-        customRule.mode === 'RECOLTE_COEFF' || customRule.mode === 'RECOLTE_UNITE'
-          ? 'PLATEAUX'
-          : customRule.mode === 'HEURE'
-          ? 'HEURE'
-          : 'JOUR',
+          ? `${effectiveValue} DH / ${unite.toLowerCase()}`
+          : `${effectiveValue} DH / jour`,
+      uniteMetrique: unite,
+    };
+  }
+
+  // 0b. TRANSFERT CAISSE & CHARIOT (règles à seuil indépendantes : 400 c. = 95 DH, > 400 = prorata, jamais 95 DH forfait normal)
+  const isTransfertCaisse =
+    (fullTask.includes('transfert') && fullTask.includes('caisse')) ||
+    fullTask.includes('transfert_caisse') ||
+    /^tc0*\d*$/i.test(codeNorm);
+  if (isTransfertCaisse) {
+    const refTarif = tariffs.transfertCaisseTarifRef ?? DEFAULT_PAIEMENT_TARIFFS.transfertCaisseTarifRef;
+    const refQty =
+      tariffs.transfertCaisseQuantiteRef && tariffs.transfertCaisseQuantiteRef > 0
+        ? tariffs.transfertCaisseQuantiteRef
+        : DEFAULT_PAIEMENT_TARIFFS.transfertCaisseQuantiteRef;
+    return {
+      category: 'TRANSFERT_CAISSE',
+      mode: 'CAISSE_SEUIL',
+      tarifValue: refTarif,
+      quantiteRef: refQty,
+      coefficient: '',
+      tarifAppliqueLabel: `${refTarif} DH / ${refQty} c. (prorata > ${refQty})`,
+      uniteMetrique: 'CAISSES',
+    };
+  }
+
+  const isChariot =
+    fullTask.includes('chariot') ||
+    /^ch0*\d*$/i.test(codeNorm);
+  if (isChariot) {
+    const refTarif = tariffs.chariotTarifRef ?? DEFAULT_PAIEMENT_TARIFFS.chariotTarifRef;
+    const refQty =
+      tariffs.chariotQuantiteRef && tariffs.chariotQuantiteRef > 0
+        ? tariffs.chariotQuantiteRef
+        : DEFAULT_PAIEMENT_TARIFFS.chariotQuantiteRef;
+    return {
+      category: 'CHARIOT',
+      mode: 'CAISSE_SEUIL',
+      tarifValue: refTarif,
+      quantiteRef: refQty,
+      coefficient: '',
+      tarifAppliqueLabel: `${refTarif} DH / ${refQty} c. (prorata > ${refQty})`,
+      uniteMetrique: 'CAISSES',
     };
   }
 
@@ -1772,6 +1982,8 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
         isHistoricalFrozen: true,
         frozenSnapshot: frozen,
         blockedVarietyRowsCount: 0,
+        blockedMissingQuantityRowsCount: 0,
+        blockedMissingQuantityWorkers: [],
         warnings: [],
       };
     }
@@ -1818,8 +2030,12 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
     });
 
   const dayAffectations = affectations.filter((a) => a && a.date === dateIso);
-  const dayRecoltes = recoltes.filter(
-    (r) => r && r.date === dateIso && (!r.type_operation || r.type_operation === 'RECOLTE')
+  const dayRecoltesAll = recoltes.filter((r) => r && r.date === dateIso);
+  const dayRecoltesHarvest = dayRecoltesAll.filter(
+    (r) => !r.type_operation || r.type_operation === 'RECOLTE'
+  );
+  const dayRecoltesTransport = dayRecoltesAll.filter(
+    (r) => r.type_operation === 'CHARGEMENT' || r.type_operation === 'DECHARGEMENT'
   );
 
   interface GroupedWork {
@@ -1843,6 +2059,9 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
     recolteVarietes: string[];
     recolteCaisses: number;
     recolteEntriesCount: number;
+    transportCaisses: number;
+    transportEntriesCount: number;
+    explicitCaisses?: number;
     explicitHeureDeb?: string;
     explicitHeureFin?: string;
     explicitDureeRep?: number | '';
@@ -1907,12 +2126,13 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
         (resolvedOuvrier?.id && a.ouvrier_id === resolvedOuvrier.id)
     );
 
-    const workerRecoltes = dayRecoltes.filter(
-      (r) =>
-        (numeroOuvrier > 0 && Number(r.numero_ouvrier) === numeroOuvrier) ||
-        (ptg.ouvrier_id && r.ouvrier_id === ptg.ouvrier_id) ||
-        (resolvedOuvrier?.id && r.ouvrier_id === resolvedOuvrier.id)
-    );
+    const matchesWorker = (r: RecolteEntry) =>
+      (numeroOuvrier > 0 && Number(r.numero_ouvrier) === numeroOuvrier) ||
+      (ptg.ouvrier_id && r.ouvrier_id === ptg.ouvrier_id) ||
+      (resolvedOuvrier?.id && r.ouvrier_id === resolvedOuvrier.id);
+
+    const workerHarvestRecoltes = dayRecoltesHarvest.filter(matchesWorker);
+    const workerTransportRecoltes = dayRecoltesTransport.filter(matchesWorker);
 
     interface SourceItem {
       tacheObj: Tache | null;
@@ -1921,6 +2141,7 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
       cultureId: string;
       equipeId: string;
       rawStatut: string;
+      caisses?: number;
       heureDeb?: string;
       heureFin?: string;
       dureeRep?: number | '';
@@ -1958,6 +2179,7 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
         }
         const anyAff = aff as any;
         const affRawStatut = String(anyAff.statut ?? anyAff.status ?? '').trim();
+        const rawQty = anyAff.caisses ?? anyAff.quantite ?? anyAff.quantite_caisses;
         items.push({
           tacheObj: tObj,
           domaineId: domId,
@@ -1965,6 +2187,10 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
           cultureId: String(anyAff.culture_id || anyAff.culture || '').trim(),
           equipeId: String(anyAff.equipe_id || '').trim(),
           rawStatut: affRawStatut || ptgRawStatut || 'BROUILLON',
+          caisses:
+            rawQty !== undefined && rawQty !== '' && Number(rawQty) > 0
+              ? Number(rawQty)
+              : undefined,
           heureDeb: anyAff.heure_debut || anyAff.heureDeb,
           heureFin: anyAff.heure_fin || anyAff.heureFin,
           dureeRep:
@@ -2004,6 +2230,7 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
         }
       }
       const anyPtg = ptg as any;
+      const rawQty = anyPtg.caisses ?? anyPtg.quantite ?? anyPtg.quantite_caisses;
       items.push({
         tacheObj: tObj,
         domaineId: domId,
@@ -2011,6 +2238,10 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
         cultureId: String(anyPtg.culture_id || anyPtg.culture || '').trim(),
         equipeId: String(anyPtg.equipe_id || '').trim(),
         rawStatut: ptgRawStatut || 'BROUILLON',
+        caisses:
+          rawQty !== undefined && rawQty !== '' && Number(rawQty) > 0
+            ? Number(rawQty)
+            : undefined,
         heureDeb: anyPtg.heure_debut || anyPtg.heureDeb,
         heureFin: anyPtg.heure_fin || anyPtg.heureFin,
         dureeRep:
@@ -2058,6 +2289,9 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
           recolteVarietes: [],
           recolteCaisses: 0,
           recolteEntriesCount: 0,
+          transportCaisses: 0,
+          transportEntriesCount: 0,
+          explicitCaisses: undefined,
           explicitHeureDeb: item.heureDeb,
           explicitHeureFin: item.heureFin,
           explicitDureeRep: item.dureeRep,
@@ -2077,24 +2311,41 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
       if (item.cultureId) grp.cultureSet.add(item.cultureId);
       if (item.equipeId) grp.equipeSet.add(item.equipeId);
       if (!grp.rawStatut && item.rawStatut) grp.rawStatut = item.rawStatut;
+      if (item.caisses !== undefined && item.caisses > 0) {
+        grp.explicitCaisses = (grp.explicitCaisses || 0) + item.caisses;
+      }
       if (!grp.explicitHeureDeb && item.heureDeb) grp.explicitHeureDeb = item.heureDeb;
       if (!grp.explicitHeureFin && item.heureFin) grp.explicitHeureFin = item.heureFin;
       if (grp.explicitDureeRep === undefined && item.dureeRep !== undefined) grp.explicitDureeRep = item.dureeRep;
       if (grp.explicitHeures === undefined && item.heures !== undefined) grp.explicitHeures = item.heures;
     });
 
-    // Attacher les quantités de récolte réelles UNIQUEMENT aux tâches de récolte
-    if (workerRecoltes.length > 0) {
-      const workerGroups = Array.from(groupsMap.values()).filter((g) => g.workerKey === workerKey);
-      const recolteGroups = workerGroups.filter((g) => {
-        const nomL = normalizeText(g.tacheNom);
-        const codeL = normalizeText(g.tacheTypeId);
-        return nomL.includes('recolte') || nomL.includes('cueillette') || /^r0*\d+$/i.test(codeL);
-      });
+    const workerGroups = Array.from(groupsMap.values()).filter((g) => g.workerKey === workerKey);
+    const isTransportGroup = (g: GroupedWork) => {
+      const nomL = normalizeText(g.tacheNom);
+      const codeL = normalizeText(g.tacheTypeId);
+      return (
+        nomL.includes('chariot') ||
+        (nomL.includes('transfert') && nomL.includes('caisse')) ||
+        /^ch0*\d*$/i.test(codeL) ||
+        /^tc0*\d*$/i.test(codeL)
+      );
+    };
+    const isRecolteGroup = (g: GroupedWork) => {
+      if (isTransportGroup(g)) return false;
+      const nomL = normalizeText(g.tacheNom);
+      const codeL = normalizeText(g.tacheTypeId);
+      return nomL.includes('recolte') || nomL.includes('cueillette') || /^r0*\d+$/i.test(codeL);
+    };
 
+    const recolteGroups = workerGroups.filter(isRecolteGroup);
+    const transportGroups = workerGroups.filter(isTransportGroup);
+
+    // Attacher les quantités de récolte réelles UNIQUEMENT aux tâches de récolte (ou au groupe transport s'il n'y a aucune tâche de récolte pour cet ouvrier)
+    if (workerHarvestRecoltes.length > 0) {
       const seenRecolteIds = new Set<string>();
       if (recolteGroups.length > 0) {
-        workerRecoltes.forEach((rec) => {
+        workerHarvestRecoltes.forEach((rec) => {
           if (rec.id && seenRecolteIds.has(rec.id)) return;
           if (rec.id) seenRecolteIds.add(rec.id);
 
@@ -2118,7 +2369,55 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
           );
           recTokens.forEach((tok) => attachSerreToken(target, tok));
         });
+      } else if (transportGroups.length > 0 && workerTransportRecoltes.length === 0) {
+        workerHarvestRecoltes.forEach((rec) => {
+          if (rec.id && seenRecolteIds.has(rec.id)) return;
+          if (rec.id) seenRecolteIds.add(rec.id);
+          const recDomShort = normalizePaiementDomaineShort(null, rec.domaine_id || '');
+          const target =
+            (recDomShort && transportGroups.find((g) => g.domaineShort === recDomShort)) ||
+            transportGroups[0];
+          target.transportCaisses += Number(rec.caisses) || 0;
+          target.transportEntriesCount += 1;
+          if (rec.notes) target.recolteNotes.push(rec.notes);
+          if (rec.created_by_nom) target.equipeSet.add(rec.created_by_nom);
+          const recTokens = resolveSerreTokens(
+            rec.serre_id,
+            rec.serre_nom,
+            undefined,
+            undefined,
+            serreById,
+            serreByCodeOrName
+          );
+          recTokens.forEach((tok) => attachSerreToken(target, tok));
+        });
       }
+    }
+
+    // Attacher les entrées CHARGEMENT / DECHARGEMENT aux tâches Chariot / Transfert Caisse
+    if (workerTransportRecoltes.length > 0 && transportGroups.length > 0) {
+      const seenTransIds = new Set<string>();
+      workerTransportRecoltes.forEach((rec) => {
+        if (rec.id && seenTransIds.has(rec.id)) return;
+        if (rec.id) seenTransIds.add(rec.id);
+        const recDomShort = normalizePaiementDomaineShort(null, rec.domaine_id || '');
+        const target =
+          (recDomShort && transportGroups.find((g) => g.domaineShort === recDomShort)) ||
+          transportGroups[0];
+        target.transportCaisses += Number(rec.caisses) || 0;
+        target.transportEntriesCount += 1;
+        if (rec.notes) target.recolteNotes.push(rec.notes);
+        if (rec.created_by_nom) target.equipeSet.add(rec.created_by_nom);
+        const recTokens = resolveSerreTokens(
+          rec.serre_id,
+          rec.serre_nom,
+          undefined,
+          undefined,
+          serreById,
+          serreByCodeOrName
+        );
+        recTokens.forEach((tok) => attachSerreToken(target, tok));
+      });
     }
   });
 
@@ -2139,6 +2438,12 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
     });
 
   const warnings: string[] = [];
+  const blockedMissingQuantityWorkers: Array<{
+    ouvrierId: string;
+    nomOuvrier: string;
+    tache: string;
+    reason: string;
+  }> = [];
 
   const rows: PaiementExcelRow[] = filteredGroups.map((g, idx) => {
     const resolvedRule = resolvePaiementTaskTariff({
@@ -2150,41 +2455,101 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
       tariffs,
     });
 
-    const ovr = hoursOverrides[g.groupKey];
-    const heureDeb = (ovr?.heureDeb ?? g.explicitHeureDeb ?? '07:00').trim() || '07:00';
-    const heureFin = (ovr?.heureFin ?? g.explicitHeureFin ?? '16:00').trim() || '16:00';
-    const dureeRep = resolvePauseHours(
-      heureDeb,
-      heureFin,
-      ovr?.dureeRep !== undefined ? ovr.dureeRep : g.explicitDureeRep
-    );
+    const isRecolteTask =
+      resolvedRule.category === 'RECOLTE_CERISE' ||
+      resolvedRule.category === 'RECOLTE_RONDE' ||
+      resolvedRule.category === 'RECOLTE_AMBIGUE' ||
+      (resolvedRule.category === 'CUSTOM' &&
+        (resolvedRule.mode === 'RECOLTE_COEFF' || resolvedRule.mode === 'RECOLTE_UNITE') &&
+        (normalizeText(g.tacheNom).includes('recolte') ||
+          normalizeText(g.tacheNom).includes('cueillette') ||
+          /^r0*\d+$/i.test(normalizeText(g.tacheTypeId))));
 
-    let dureeTravaillee = computeEffectiveWorkedHours(heureDeb, heureFin, dureeRep);
-    if (ovr?.heures !== undefined && Number(ovr.heures) >= 0) {
-      dureeTravaillee = roundPaiementAmount(Number(ovr.heures));
-    } else if (
-      !ovr?.heureDeb &&
-      !ovr?.heureFin &&
-      !g.explicitHeureDeb &&
-      !g.explicitHeureFin &&
-      g.explicitHeures !== undefined &&
-      g.explicitHeures >= 0
-    ) {
-      dureeTravaillee = roundPaiementAmount(g.explicitHeures);
+    const ovr = hoursOverrides[g.groupKey];
+    let heureDeb: string;
+    let heureFin: string;
+    let dureeRep: number;
+    let dureeTravaillee: number;
+
+    if (isRecolteTask) {
+      // Horaires fixes 07:00–14:00 (pause 0h, 7h) pour toute tâche de Récolte, sans jamais être écrasés par 16:00 par défaut
+      heureDeb = (ovr?.heureDeb ?? '07:00').trim() || '07:00';
+      heureFin = (ovr?.heureFin ?? '14:00').trim() || '14:00';
+      dureeRep = resolvePauseHours(heureDeb, heureFin, ovr?.dureeRep);
+      dureeTravaillee =
+        ovr?.heures !== undefined && Number(ovr.heures) >= 0
+          ? roundPaiementAmount(Number(ovr.heures))
+          : computeEffectiveWorkedHours(heureDeb, heureFin, dureeRep);
+    } else {
+      heureDeb = (ovr?.heureDeb ?? g.explicitHeureDeb ?? '07:00').trim() || '07:00';
+      heureFin = (ovr?.heureFin ?? g.explicitHeureFin ?? '16:00').trim() || '16:00';
+      dureeRep = resolvePauseHours(
+        heureDeb,
+        heureFin,
+        ovr?.dureeRep !== undefined ? ovr.dureeRep : g.explicitDureeRep
+      );
+      dureeTravaillee = computeEffectiveWorkedHours(heureDeb, heureFin, dureeRep);
+      if (ovr?.heures !== undefined && Number(ovr.heures) >= 0) {
+        dureeTravaillee = roundPaiementAmount(Number(ovr.heures));
+      } else if (
+        !ovr?.heureDeb &&
+        !ovr?.heureFin &&
+        !g.explicitHeureDeb &&
+        !g.explicitHeureFin &&
+        g.explicitHeures !== undefined &&
+        g.explicitHeures >= 0
+      ) {
+        dureeTravaillee = roundPaiementAmount(g.explicitHeures);
+      }
     }
 
-    const isRecolteMode =
-      resolvedRule.mode === 'RECOLTE_COEFF' || resolvedRule.mode === 'RECOLTE_UNITE';
+    const isCrateBasedMode =
+      resolvedRule.mode === 'RECOLTE_COEFF' ||
+      resolvedRule.mode === 'RECOLTE_UNITE' ||
+      resolvedRule.mode === 'CAISSE_SEUIL';
+
+    const sourceCaisses =
+      resolvedRule.mode === 'CAISSE_SEUIL' ||
+      resolvedRule.category === 'CHARIOT' ||
+      resolvedRule.category === 'TRANSFERT_CAISSE'
+        ? g.transportCaisses > 0
+          ? g.transportCaisses
+          : g.explicitCaisses || 0
+        : g.recolteCaisses > 0
+        ? g.recolteCaisses
+        : g.explicitCaisses || 0;
+
+    const effectiveCaisses = isCrateBasedMode
+      ? ovr?.caisses !== undefined && Number.isFinite(Number(ovr.caisses))
+        ? Math.max(0, Number(ovr.caisses))
+        : Math.max(0, sourceCaisses)
+      : 0;
 
     // Pour tout travail payé au temps (heure/jour), quantiteMetrique reste strictement vide
     const quantiteMetrique: number | '' =
-      isRecolteMode && g.recolteCaisses > 0 ? roundPaiementAmount(g.recolteCaisses) : '';
+      isCrateBasedMode && effectiveCaisses > 0 ? roundPaiementAmount(effectiveCaisses) : '';
+
+    const ouvrierId = formatPaiementOuvrierId(g.numeroOuvrier, g.domaineShort) || String(g.numeroOuvrier || '');
+
+    let missingQuantityBlocked = false;
+    let missingQuantityReason: string | undefined;
 
     if (resolvedRule.needsVarietySelection && resolvedRule.varietyBlockedReason) {
       warnings.push(`${g.nomOuvrier} : ${resolvedRule.varietyBlockedReason}`);
-    } else if (isRecolteMode && g.recolteCaisses <= 0) {
+    }
+    if (isRecolteTask && effectiveCaisses <= 0) {
+      missingQuantityBlocked = true;
+      missingQuantityReason = `Aucune caisse saisie pour "${g.nomOuvrier}" (${g.tacheNom}) le ${dateIso}. Saisie individuelle obligatoire (> 0).`;
+      warnings.push(missingQuantityReason);
+      blockedMissingQuantityWorkers.push({
+        ouvrierId,
+        nomOuvrier: g.nomOuvrier,
+        tache: g.tacheNom,
+        reason: missingQuantityReason,
+      });
+    } else if (resolvedRule.mode === 'CAISSE_SEUIL' && effectiveCaisses <= 0) {
       warnings.push(
-        `${g.nomOuvrier} (${g.tacheNom}) : aucune quantité de récolte enregistrée pour le ${dateIso}.`
+        `${g.nomOuvrier} (${g.tacheNom}) : nombre de caisses manquant (0). Aucun repli vers 95 DH normal.`
       );
     }
 
@@ -2192,9 +2557,11 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
     let tarifExcep: number | '' = resolvedRule.tarifValue;
     let tarifAppliqueLabel = resolvedRule.tarifAppliqueLabel;
 
-    if (resolvedRule.needsVarietySelection) {
+    if (resolvedRule.needsVarietySelection || missingQuantityBlocked) {
       remuneration = 0;
-      tarifExcep = '';
+      if (resolvedRule.needsVarietySelection) {
+        tarifExcep = '';
+      }
     } else {
       switch (resolvedRule.mode) {
         case 'RECOLTE_COEFF': {
@@ -2205,6 +2572,25 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
         case 'RECOLTE_UNITE': {
           const qty = typeof quantiteMetrique === 'number' ? quantiteMetrique : 0;
           remuneration = roundPaiementAmount(qty * resolvedRule.tarifValue);
+          break;
+        }
+        case 'CAISSE_SEUIL': {
+          const qty = typeof quantiteMetrique === 'number' ? quantiteMetrique : 0;
+          const refQty =
+            resolvedRule.quantiteRef && resolvedRule.quantiteRef > 0
+              ? resolvedRule.quantiteRef
+              : 400;
+          const refTarif = resolvedRule.tarifValue;
+          if (qty <= 0) {
+            remuneration = 0;
+            tarifExcep = refTarif;
+          } else if (qty <= refQty) {
+            remuneration = roundPaiementAmount(refTarif);
+            tarifExcep = refTarif;
+          } else {
+            remuneration = roundPaiementAmount((qty * refTarif) / refQty);
+            tarifExcep = roundPaiementAmount(refTarif / refQty);
+          }
           break;
         }
         case 'HEURE': {
@@ -2233,9 +2619,19 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
       }
     }
 
-    const ouvrierId = formatPaiementOuvrierId(g.numeroOuvrier, g.domaineShort) || String(g.numeroOuvrier || '');
+    const hasMissingSerre = g.serreCodesOrder.length === 0;
     const serreId =
-      g.serreCodesOrder.length > 0 ? g.serreCodesOrder.join('+') : PAIEMENT_ALL_SERRES_LABEL;
+      g.serreCodesOrder.length > 1
+        ? PAIEMENT_ALL_SERRES_LABEL
+        : g.serreCodesOrder.length === 1
+        ? g.serreCodesOrder[0]
+        : '';
+    if (hasMissingSerre) {
+      warnings.push(
+        `${g.nomOuvrier} (${g.tacheNom}) : aucune serre renseignée pour le ${dateIso}.`
+      );
+    }
+
     const docId = `${g.dtCode}_${dateIso}_${ouvrierId || 'NA'}_${idx + 1}`;
 
     return {
@@ -2250,6 +2646,7 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
       domaineId: g.domaineId,
       domaineShort: g.domaineShort,
       serreId,
+      hasMissingSerre,
       rubanId: PAIEMENT_RUBAN_LABEL,
       cultureId: Array.from(g.cultureSet).join('+'),
       tacheTypeId: g.tacheTypeId,
@@ -2273,12 +2670,15 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
       remuneration,
       needsVarietySelection: Boolean(resolvedRule.needsVarietySelection),
       varietyBlockedReason: resolvedRule.varietyBlockedReason,
+      missingQuantityBlocked,
+      missingQuantityReason,
       notes: g.recolteNotes,
     };
   });
 
   const aggregated = aggregatePaiementTotals(rows);
   const blockedVarietyRowsCount = rows.filter((r) => r.needsVarietySelection).length;
+  const blockedMissingQuantityRowsCount = rows.filter((r) => r.missingQuantityBlocked).length;
 
   return {
     dateIso,
@@ -2291,6 +2691,8 @@ export function buildPaiementRows(params: BuildPaiementParams): PaiementPreviewR
     isHistoricalFrozen: false,
     frozenSnapshot: null,
     blockedVarietyRowsCount,
+    blockedMissingQuantityRowsCount,
+    blockedMissingQuantityWorkers,
     warnings,
   };
 }
@@ -2711,6 +3113,19 @@ export async function exportPaiementExcel(params: {
       grandTotalDH: 0,
       usedTemplateFile: false,
       error: `Export bloqué : ${blockedRows.length} ligne(s) de récolte générique nécessitent une sélection explicite de variété (Cerise 3,8 DH ou Ronde 1,1875 DH).`,
+    };
+  }
+
+  const missingQtyRows = preview.rows.filter((r) => r.missingQuantityBlocked);
+  if (missingQtyRows.length > 0) {
+    const workersList = missingQtyRows.map((r) => `${r.nomOuvrier} (${r.tache})`).join(', ');
+    return {
+      success: false,
+      filename: '',
+      totalLignes: 0,
+      grandTotalDH: 0,
+      usedTemplateFile: false,
+      error: `Export bloqué : saisie individuelle des caisses de récolte obligatoire (> 0) pour : ${workersList}.`,
     };
   }
 

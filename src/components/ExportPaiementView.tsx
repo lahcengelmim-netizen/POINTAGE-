@@ -29,6 +29,9 @@ import {
   History,
   Upload,
   WifiOff,
+  Plus,
+  Edit2,
+  Power,
 } from 'lucide-react';
 import {
   AffectationTache,
@@ -45,12 +48,15 @@ import {
 import * as storage from '../services/storage';
 import { isSupabaseConfigured, supabase } from '../services/supabaseClient';
 import {
+  CustomTaskTariffRule,
   DEFAULT_PAIEMENT_TARIFFS,
+  PAIEMENT_ALL_SERRES_LABEL,
   PAIEMENT_TEMPLATE_FILENAME,
   PAIEMENT_TEMPLATE_PUBLIC_URL,
   PAIEMENT_TEMPLATE_STORAGE_KEY,
   PaiementExportSnapshot,
   PaiementHoursOverride,
+  PaiementTariffMode,
   PaiementTariffsConfig,
   RecolteVarietyChoice,
   buildPaiementRows,
@@ -206,6 +212,17 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
   const [editHeureDeb, setEditHeureDeb] = useState<string>('07:00');
   const [editHeureFin, setEditHeureFin] = useState<string>('16:00');
   const [editPause, setEditPause] = useState<string>('1');
+  const [editCaisses, setEditCaisses] = useState<string>('');
+
+  // Éditeur de règles tarifaires personnalisées
+  const [editingCustomKey, setEditingCustomKey] = useState<string | null>(null);
+  const [customRuleSelectedTacheId, setCustomRuleSelectedTacheId] = useState<string>('');
+  const [customRuleLabel, setCustomRuleLabel] = useState<string>('');
+  const [customRuleMode, setCustomRuleMode] = useState<PaiementTariffMode>('FORFAIT_JOUR');
+  const [customRuleValue, setCustomRuleValue] = useState<string>('');
+  const [customRuleUnite, setCustomRuleUnite] = useState<string>('');
+  const [customRuleQuantiteRef, setCustomRuleQuantiteRef] = useState<string>('400');
+  const [customRuleCoeff, setCustomRuleCoeff] = useState<string>('');
 
   // Historique & export
   const [exportHistory, setExportHistory] = useState<PaiementExportSnapshot[]>(() =>
@@ -614,11 +631,25 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
     }
   };
 
-  const handleSaveTariffs = async () => {
+  const handleSaveTariffs = async (overrideDraft?: PaiementTariffsConfig) => {
+    const configToSave = overrideDraft || draftTariffs;
+    if (
+      !Number.isFinite(configToSave.chariotQuantiteRef) ||
+      configToSave.chariotQuantiteRef <= 0 ||
+      !Number.isFinite(configToSave.transfertCaisseQuantiteRef) ||
+      configToSave.transfertCaisseQuantiteRef <= 0
+    ) {
+      setTariffFeedback({
+        type: 'error',
+        message: 'La quantité de référence (Chariot / Transfert Caisse) doit être strictement supérieure à 0.',
+      });
+      return;
+    }
+
     const res = await syncSavePaiementTariffsToSupabase(
       currentUser,
       companyId,
-      draftTariffs,
+      configToSave,
       isSupabaseConfigured ? supabase : null
     );
     if (res.success && res.config) {
@@ -636,6 +667,115 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
         message: res.error || 'Erreur lors de la sauvegarde des tarifs.',
       });
     }
+  };
+
+  const resetCustomRuleForm = () => {
+    setEditingCustomKey(null);
+    setCustomRuleSelectedTacheId('');
+    setCustomRuleLabel('');
+    setCustomRuleMode('FORFAIT_JOUR');
+    setCustomRuleValue('');
+    setCustomRuleUnite('');
+    setCustomRuleQuantiteRef('400');
+    setCustomRuleCoeff('');
+  };
+
+  const handleSaveCustomRule = async () => {
+    const linkedTask = mergedTaches.find((t) => t.id === customRuleSelectedTacheId);
+    const label = (customRuleLabel || linkedTask?.nom || '').trim();
+    const key = (editingCustomKey || linkedTask?.id || label).trim();
+    if (!key || !label) {
+      setTariffFeedback({
+        type: 'error',
+        message: 'Sélectionnez une tâche ou saisissez un libellé pour la règle personnalisée.',
+      });
+      return;
+    }
+    const valNum = Number(customRuleValue.replace(',', '.'));
+    if (!Number.isFinite(valNum) || valNum < 0) {
+      setTariffFeedback({
+        type: 'error',
+        message: 'Montant/tarif invalide pour la règle personnalisée.',
+      });
+      return;
+    }
+    const qRefNum = Number(customRuleQuantiteRef.replace(',', '.'));
+    if (customRuleMode === 'CAISSE_SEUIL' && (!Number.isFinite(qRefNum) || qRefNum <= 0)) {
+      setTariffFeedback({
+        type: 'error',
+        message: 'La quantité de référence du seuil doit être supérieure à 0.',
+      });
+      return;
+    }
+    const coeffNum = customRuleCoeff.trim()
+      ? Number(customRuleCoeff.replace(',', '.'))
+      : undefined;
+    if (customRuleMode === 'RECOLTE_COEFF' && coeffNum !== undefined && (!Number.isFinite(coeffNum) || coeffNum < 0)) {
+      setTariffFeedback({
+        type: 'error',
+        message: 'Coefficient invalide.',
+      });
+      return;
+    }
+
+    const existingRule = draftTariffs.customTaskTariffs?.[key];
+    const newRule: CustomTaskTariffRule = {
+      tacheKey: key,
+      label,
+      mode: customRuleMode,
+      value: valNum,
+      unite: customRuleUnite.trim() || undefined,
+      quantiteRef: customRuleMode === 'CAISSE_SEUIL' ? qRefNum : undefined,
+      coefficient:
+        customRuleMode === 'RECOLTE_COEFF'
+          ? coeffNum !== undefined
+            ? coeffNum
+            : valNum
+          : undefined,
+      actif: existingRule ? existingRule.actif !== false : true,
+    };
+
+    const nextDraft: PaiementTariffsConfig = {
+      ...draftTariffs,
+      customTaskTariffs: {
+        ...(draftTariffs.customTaskTariffs || {}),
+        [key]: newRule,
+      },
+    };
+    setDraftTariffs(nextDraft);
+    resetCustomRuleForm();
+    await handleSaveTariffs(nextDraft);
+  };
+
+  const handleToggleCustomRuleActive = async (key: string) => {
+    const existing = draftTariffs.customTaskTariffs?.[key];
+    if (!existing) return;
+    const nextDraft: PaiementTariffsConfig = {
+      ...draftTariffs,
+      customTaskTariffs: {
+        ...(draftTariffs.customTaskTariffs || {}),
+        [key]: {
+          ...existing,
+          actif: existing.actif === false,
+        },
+      },
+    };
+    setDraftTariffs(nextDraft);
+    await handleSaveTariffs(nextDraft);
+  };
+
+  const handleEditCustomRule = (key: string, rule: CustomTaskTariffRule) => {
+    setEditingCustomKey(key);
+    const linkedTask = mergedTaches.find(
+      (t) => t.id === rule.tacheKey || t.nom === rule.label || t.code === rule.tacheKey
+    );
+    setCustomRuleSelectedTacheId(linkedTask?.id || '');
+    setCustomRuleLabel(rule.label || '');
+    setCustomRuleMode(rule.mode);
+    setCustomRuleValue(String(rule.value ?? ''));
+    setCustomRuleUnite(rule.unite || '');
+    setCustomRuleQuantiteRef(String(rule.quantiteRef || 400));
+    setCustomRuleCoeff(rule.coefficient !== undefined ? String(rule.coefficient) : '');
   };
 
   const handleResetTariffs = async () => {
@@ -731,27 +871,40 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
       selectedDate,
       'variety',
       rowKey,
-      variety,
+      { choice: variety },
       isSupabaseConfigured ? supabase : null
     ).catch(() => {});
   };
 
-  const openHoursEditor = (rowKey: string, heureDeb: string, heureFin: string, dureeRep: number | '') => {
+  const openHoursEditor = (
+    rowKey: string,
+    heureDeb: string,
+    heureFin: string,
+    dureeRep: number | '',
+    caisses?: number | ''
+  ) => {
     if (preview.isHistoricalFrozen) return;
     setEditingRowKey(rowKey);
     setEditHeureDeb(heureDeb || '07:00');
     setEditHeureFin(heureFin || '16:00');
     setEditPause(dureeRep === '' ? '0' : String(dureeRep));
+    setEditCaisses(caisses !== undefined && caisses !== '' ? String(caisses) : '');
   };
 
-  const saveRowHours = (rowKey: string) => {
+  const saveRowHours = (rowKey: string, allowCaissesOverride: boolean) => {
     if (preview.isHistoricalFrozen) return;
     const pauseNum = Math.max(0, Number(editPause) || 0);
-    const overridePayload = {
+    const overridePayload: PaiementHoursOverride = {
       heureDeb: editHeureDeb || '07:00',
       heureFin: editHeureFin || '16:00',
       dureeRep: pauseNum,
     };
+    if (allowCaissesOverride && editCaisses.trim() !== '') {
+      const parsedCaisses = Number(editCaisses.replace(',', '.'));
+      if (Number.isFinite(parsedCaisses) && parsedCaisses >= 0) {
+        overridePayload.caisses = parsedCaisses;
+      }
+    }
     const next = {
       ...hoursOverrides,
       [rowKey]: overridePayload,
@@ -802,7 +955,8 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
     templateStatus.state === 'ready' &&
     Boolean(templateBuffer) &&
     preview.rows.length > 0 &&
-    preview.blockedVarietyRowsCount === 0;
+    preview.blockedVarietyRowsCount === 0 &&
+    preview.blockedMissingQuantityRowsCount === 0;
 
   return (
     <div className="space-y-3 pb-24">
@@ -994,6 +1148,24 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
           </div>
         )}
 
+        {preview.blockedMissingQuantityRowsCount > 0 && (
+          <div className="rounded-xl bg-red-50 border border-red-300 p-3 text-xs text-red-950 space-y-1.5">
+            <div className="flex items-start gap-2 font-black">
+              <AlertTriangle className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
+              <span>
+                Export bloqué : {preview.blockedMissingQuantityRowsCount} ouvrier(s) en Récolte sans saisie individuelle de caisses (&gt; 0).
+              </span>
+            </div>
+            <ul className="list-disc pl-5 space-y-0.5 text-[11px] font-semibold text-red-900">
+              {preview.blockedMissingQuantityWorkers.map((w, i) => (
+                <li key={`${w.ouvrierId}_${i}`}>
+                  <strong>{w.nomOuvrier}</strong> ({w.tache}) : {w.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {preview.warnings.length > 0 && (
           <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 space-y-1">
             {preview.warnings.map((w, idx) => (
@@ -1086,7 +1258,35 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                 unit="DH / jour"
                 onChange={(val) => handleTariffInput('ebourgeonnageD5Jour', val)}
               />
+              <TariffInput
+                label="Chariot (Tarif réf)"
+                value={draftTariffs.chariotTarifRef}
+                unit="DH"
+                onChange={(val) => handleTariffInput('chariotTarifRef', val)}
+              />
+              <TariffInput
+                label="Chariot (Qté réf)"
+                value={draftTariffs.chariotQuantiteRef}
+                unit="caisses"
+                onChange={(val) => handleTariffInput('chariotQuantiteRef', val)}
+              />
+              <TariffInput
+                label="Transfert Caisse (Tarif réf)"
+                value={draftTariffs.transfertCaisseTarifRef}
+                unit="DH"
+                onChange={(val) => handleTariffInput('transfertCaisseTarifRef', val)}
+              />
+              <TariffInput
+                label="Transfert Caisse (Qté réf)"
+                value={draftTariffs.transfertCaisseQuantiteRef}
+                unit="caisses"
+                onChange={(val) => handleTariffInput('transfertCaisseQuantiteRef', val)}
+              />
             </div>
+
+            <p className="text-[11px] text-slate-500">
+              Règle Chariot &amp; Transfert Caisse : 0 &lt; qté ≤ Qté réf ⇒ Tarif réf (ex. 400 c. = 95 DH) ; qté &gt; Qté réf ⇒ prorata (500 c. = 118,75 DH ; 600 c. = 142,50 DH).
+            </p>
 
             {tariffFeedback && (
               <div
@@ -1103,7 +1303,7 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={handleSaveTariffs}
+                onClick={() => handleSaveTariffs()}
                 className="flex-1 min-h-[44px] px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
               >
                 <Save className="w-4 h-4" />
@@ -1118,6 +1318,227 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                 <RotateCcw className="w-4 h-4" />
                 <span>Défaut</span>
               </button>
+            </div>
+
+            {/* Règles tarifaires personnalisées par tâche (sans recalcul rétroactif des snapshots) */}
+            <div className="pt-3 border-t border-slate-200 space-y-2.5">
+              <div>
+                <h3 className="text-xs font-black text-slate-900">
+                  Règles tarifaires personnalisées (tâche spécifique)
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Ajoutez, modifiez ou désactivez un tarif dédié à une tâche sans affecter l’historique déjà exporté.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                      Tâche existante
+                    </label>
+                    <select
+                      value={customRuleSelectedTacheId}
+                      onChange={(e) => {
+                        const tid = e.target.value;
+                        setCustomRuleSelectedTacheId(tid);
+                        const found = mergedTaches.find((t) => t.id === tid);
+                        if (found) {
+                          setCustomRuleLabel(found.nom);
+                        }
+                      }}
+                      className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                    >
+                      <option value="">-- Saisie libre ou choisir une tâche --</option>
+                      {mergedTaches.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.nom} {t.code ? `(${t.code})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                      Libellé / Nom de tâche
+                    </label>
+                    <input
+                      type="text"
+                      value={customRuleLabel}
+                      onChange={(e) => setCustomRuleLabel(e.target.value)}
+                      placeholder="Ex: PALISSAGE D2"
+                      className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                      Mode de calcul
+                    </label>
+                    <select
+                      value={customRuleMode}
+                      onChange={(e) => setCustomRuleMode(e.target.value as PaiementTariffMode)}
+                      className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                    >
+                      <option value="FORFAIT_JOUR">Forfait fixe / jour</option>
+                      <option value="NORMAL_JOUR">Normal / jour (prorata 8h)</option>
+                      <option value="HEURE">Taux horaire (DH / heure)</option>
+                      <option value="RECOLTE_UNITE">À l’unité / caisse</option>
+                      <option value="RECOLTE_COEFF">Coefficient récolte</option>
+                      <option value="CAISSE_SEUIL">Seuil caisses + prorata</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                      Tarif / Valeur (DH)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      value={customRuleValue}
+                      onChange={(e) => setCustomRuleValue(e.target.value)}
+                      placeholder="Ex: 120"
+                      className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                      Unité (optionnel)
+                    </label>
+                    <input
+                      type="text"
+                      value={customRuleUnite}
+                      onChange={(e) => setCustomRuleUnite(e.target.value)}
+                      placeholder="JOUR, HEURE, CAISSES..."
+                      className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                    />
+                  </div>
+
+                  {customRuleMode === 'CAISSE_SEUIL' && (
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                        Quantité référence (seuil)
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        min="1"
+                        value={customRuleQuantiteRef}
+                        onChange={(e) => setCustomRuleQuantiteRef(e.target.value)}
+                        className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                  )}
+
+                  {customRuleMode === 'RECOLTE_COEFF' && (
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                        Coefficient (si différent du tarif)
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        value={customRuleCoeff}
+                        onChange={(e) => setCustomRuleCoeff(e.target.value)}
+                        placeholder="Ex: 3.8"
+                        className="w-full min-h-[38px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleSaveCustomRule}
+                    className="flex-1 min-h-[38px] px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>
+                      {editingCustomKey ? 'Mettre à jour la règle' : 'Ajouter la règle'}
+                    </span>
+                  </button>
+                  {editingCustomKey && (
+                    <button
+                      type="button"
+                      onClick={resetCustomRuleForm}
+                      className="min-h-[38px] px-3 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold text-xs cursor-pointer"
+                    >
+                      Annuler
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {Object.entries(draftTariffs.customTaskTariffs || {}).filter(
+                ([k, r]) => k !== '__threshold_tariffs' && r && typeof r === 'object'
+              ).length > 0 && (
+                <div className="space-y-1.5">
+                  {Object.entries(draftTariffs.customTaskTariffs || {})
+                    .filter(([k, r]) => k !== '__threshold_tariffs' && r && typeof r === 'object')
+                    .map(([key, rule]) => {
+                      const isActive = rule.actif !== false;
+                      return (
+                        <div
+                          key={key}
+                          className={`rounded-xl border p-2.5 flex items-center justify-between gap-2 text-xs ${
+                            isActive
+                              ? 'bg-white border-slate-200'
+                              : 'bg-slate-100 border-slate-200 opacity-75'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-slate-900 truncate">{rule.label}</span>
+                              <span
+                                className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+                                  isActive
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                    : 'bg-slate-200 border-slate-300 text-slate-700'
+                                }`}
+                              >
+                                {isActive ? 'Actif' : 'Désactivé'}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-600 tabular-nums">
+                              {rule.mode} · {rule.value} DH
+                              {rule.quantiteRef ? ` / ${rule.quantiteRef} c.` : ''}
+                              {rule.unite ? ` (${rule.unite})` : ''}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleEditCustomRule(key, rule)}
+                              className="min-h-[32px] px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                              title="Modifier cette règle"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                              <span>Modifier</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleCustomRuleActive(key)}
+                              className={`min-h-[32px] px-2 rounded-lg font-bold text-[11px] flex items-center gap-1 cursor-pointer ${
+                                isActive
+                                  ? 'bg-amber-100 hover:bg-amber-200 text-amber-900'
+                                  : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-900'
+                              }`}
+                              title={isActive ? 'Désactiver cette règle' : 'Réactiver cette règle'}
+                            >
+                              <Power className="w-3 h-3" />
+                              <span>{isActive ? 'Désactiver' : 'Activer'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1176,20 +1597,41 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                           {row.statut}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-600 mt-0.5">
-                        {row.tache} · {row.domaineShort}
-                        {row.serreId && row.serreId !== 'Toutes les serres' ? ` · ${row.serreId}` : ''}
+                      <p className="text-xs text-slate-600 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                        <span>{row.tache} · {row.domaineShort}</span>
+                        {row.serreId === PAIEMENT_ALL_SERRES_LABEL ? (
+                          <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-900">
+                            {PAIEMENT_ALL_SERRES_LABEL}
+                          </span>
+                        ) : row.serreId ? (
+                          <span>· {row.serreId}</span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-50 border border-amber-300 text-amber-900">
+                            Aucune serre renseignée
+                          </span>
+                        )}
                       </p>
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-black text-slate-900 tabular-nums">
-                        {row.needsVarietySelection ? 'À définir' : `${formatDHDisplay(row.remuneration)} DH`}
+                        {row.needsVarietySelection || row.missingQuantityBlocked
+                          ? 'Bloqué'
+                          : `${formatDHDisplay(row.remuneration)} DH`}
                       </p>
                       <p className="text-[11px] text-slate-500 tabular-nums">
                         {row.tarifAppliqueLabel}
                       </p>
                     </div>
                   </div>
+
+                  {row.missingQuantityBlocked && (
+                    <div className="rounded-xl bg-red-50 border border-red-300 p-2 text-[11px] font-bold text-red-900 flex items-start gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-700 shrink-0 mt-0.5" />
+                      <span>
+                        {row.missingQuantityReason || 'Saisie individuelle des caisses obligatoire (> 0).'}
+                      </span>
+                    </div>
+                  )}
 
                   {/* Sélection explicite requise uniquement si tâche générique RECOLTE sans variété certaine */}
                   {row.needsVarietySelection && !preview.isHistoricalFrozen && (
@@ -1223,7 +1665,7 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                       </span>
                       {typeof row.quantiteMetrique === 'number' && (
                         <span className="font-bold text-emerald-800">
-                          Récolte : {row.quantiteMetrique}
+                          {row.mode === 'CAISSE_SEUIL' ? 'Caisses' : 'Récolte'} : {row.quantiteMetrique}
                         </span>
                       )}
                       {row.coefficient !== '' && (
@@ -1239,12 +1681,18 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                         onClick={() =>
                           isEditing
                             ? setEditingRowKey(null)
-                            : openHoursEditor(row.rowKey, row.heureDeb, row.heureFin, row.dureeRep)
+                            : openHoursEditor(
+                                row.rowKey,
+                                row.heureDeb,
+                                row.heureFin,
+                                row.dureeRep,
+                                hoursOverrides[row.rowKey]?.caisses ?? row.quantiteMetrique
+                              )
                         }
                         className="min-h-[34px] px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold flex items-center gap-1 cursor-pointer"
                       >
                         <Clock className="w-3.5 h-3.5" />
-                        <span>{hasCustomHours ? 'Heures ajustées' : 'Heures'}</span>
+                        <span>{hasCustomHours ? 'Ajusté' : row.mode === 'CAISSE_SEUIL' ? 'Heures / Caisses' : 'Heures'}</span>
                       </button>
                     )}
                   </div>
@@ -1288,6 +1736,24 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                           />
                         </div>
                       </div>
+                      {(row.mode === 'CAISSE_SEUIL' ||
+                        (row.category === 'CUSTOM' &&
+                          (row.mode === 'RECOLTE_UNITE' || row.mode === 'RECOLTE_COEFF'))) && (
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
+                            Nombre de caisses ({row.tache})
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={editCaisses}
+                            onChange={(e) => setEditCaisses(e.target.value)}
+                            placeholder="Ex: 400"
+                            className="w-full min-h-[38px] px-2 rounded-lg border border-slate-300 bg-white text-xs font-bold"
+                          />
+                        </div>
+                      )}
                       <div className="flex items-center justify-between text-[11px] text-slate-600">
                         <span className="tabular-nums">
                           Durée calculée :{' '}
@@ -1312,7 +1778,14 @@ export const ExportPaiementView: React.FC<ExportPaiementViewProps> = ({
                           )}
                           <button
                             type="button"
-                            onClick={() => saveRowHours(row.rowKey)}
+                            onClick={() =>
+                              saveRowHours(
+                                row.rowKey,
+                                row.mode === 'CAISSE_SEUIL' ||
+                                  (row.category === 'CUSTOM' &&
+                                    (row.mode === 'RECOLTE_UNITE' || row.mode === 'RECOLTE_COEFF'))
+                              )
+                            }
                             className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white font-bold cursor-pointer"
                           >
                             Appliquer

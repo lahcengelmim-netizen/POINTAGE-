@@ -29,6 +29,7 @@ import {
   UserAccount,
 } from '../src/types';
 import {
+  PAIEMENT_ALL_SERRES_LABEL,
   PAIEMENT_POINTAGE_COLUMNS,
   PAIEMENT_SHEET_POINTAGE,
   PAIEMENT_SHEET_TOTAUX,
@@ -42,7 +43,10 @@ import {
   reexportPaiementSnapshotExcel,
   savePaiementExportSnapshot,
   savePaiementTariffs,
+  syncLoadPaiementDayOverridesFromSupabase,
   syncLoadPaiementTariffsFromSupabase,
+  syncSavePaiementDayOverrideToSupabase,
+  syncSavePaiementTariffsToSupabase,
 } from '../src/utils/paiementExporter';
 
 const memStore: Record<string, string> = {};
@@ -628,6 +632,387 @@ async function runTests() {
     assert.equal(errNet.hasError, true);
     assert.equal(errNet.isNetworkError, true);
     console.log('✓ Test 9 OK : RBAC strict & détection explicite session expirée / RLS / réseau Supabase');
+  }
+
+  // ---------------- TEST 10 : Règle Multi-serres (TOUTES LES SERRES / 1 serre / 0 serre) ----------------
+  {
+    const extSerres: Serre[] = [
+      ...serres,
+      { id: 'serre_2', company_id: COMPANY_ID, code: 'S02', nom: 'Serre 2', actif: true, ordre: 2, domaine_id: 'dom_d2' },
+    ];
+    const pointages: Pointage[] = [
+      { id: 'ms1', company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, date: DATE_FUTUR, present: true, tache_id: 'tch_normal', domaine_id: 'dom_d2', heure: '07:00', timestamp: 10 },
+      { id: 'ms2', company_id: COMPANY_ID, ouvrier_id: 'ouv_2', numero_ouvrier: 2, date: DATE_FUTUR, present: true, tache_id: 'tch_normal', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 11 },
+      { id: 'ms3', company_id: COMPANY_ID, ouvrier_id: 'ouv_3', numero_ouvrier: 3, date: DATE_FUTUR, present: true, tache_id: 'tch_normal', domaine_id: 'dom_d2', heure: '07:00', timestamp: 12 },
+    ];
+    const affectations: AffectationTache[] = [
+      {
+        id: 'ams1',
+        company_id: COMPANY_ID,
+        ouvrier_id: 'ouv_1',
+        numero_ouvrier: 1,
+        tache_id: 'tch_normal',
+        domaine_id: 'dom_d2',
+        serres_ids: ['serre_1', 'serre_2'],
+        serres_noms: ['Serre 1', 'Serre 2'],
+        date: DATE_FUTUR,
+        timestamp: 10,
+      },
+    ];
+    const msRes = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches,
+      domaines,
+      serres: extSerres,
+      pointages,
+      affectations,
+      recoltes: [],
+      respectFrozenSnapshot: false,
+    });
+    const rMulti = msRes.rows.find((r) => r.numeroOuvrier === 1)!;
+    const rSingle = msRes.rows.find((r) => r.numeroOuvrier === 2)!;
+    const rZero = msRes.rows.find((r) => r.numeroOuvrier === 3)!;
+    assert.equal(rMulti.serreId, PAIEMENT_ALL_SERRES_LABEL);
+    assert.equal(rMulti.serreId, 'TOUTES LES SERRES');
+    assert.equal(rSingle.serreId, 'D002S1');
+    assert.equal(rZero.serreId, '');
+    assert.equal(rZero.hasMissingSerre, true);
+    assert.ok(msRes.warnings.some((w) => w.includes('aucune serre renseignée')));
+    console.log('✓ Test 10 OK : Multi-serres = TOUTES LES SERRES, 1 serre = code exact, 0 serre = vide + alerte');
+  }
+
+  // ---------------- TEST 11 : Chariot & Transfert Caisse (400=95, 500=118.75, 600=142.50, 0=0) + Sync seuils ----------------
+  {
+    const extTaches: Tache[] = [
+      ...taches,
+      { id: 'tch_chariot', company_id: COMPANY_ID, code: 'CH01', nom: 'CHARIOT', ouvriers_autorises: 'tous', createdAt: '' },
+      { id: 'tch_tc', company_id: COMPANY_ID, code: 'TC01', nom: 'TRANSFERT CAISSE', ouvriers_autorises: 'tous', createdAt: '' },
+    ];
+    const testCases = [
+      { qty: 400, expected: 95 },
+      { qty: 500, expected: 118.75 },
+      { qty: 600, expected: 142.5 },
+      { qty: 250, expected: 95 },
+      { qty: 0, expected: 0 },
+    ];
+    const baseTariffs = createDefaultPaiementTariffs();
+
+    for (const tc of testCases) {
+      const pointages: Pointage[] = [
+        { id: `pt_ch_${tc.qty}`, company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, date: DATE_FUTUR, present: true, tache_id: 'tch_chariot', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 10 },
+        { id: `pt_tc_${tc.qty}`, company_id: COMPANY_ID, ouvrier_id: 'ouv_2', numero_ouvrier: 2, date: DATE_FUTUR, present: true, tache_id: 'tch_tc', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 11 },
+      ];
+      const recoltes: RecolteEntry[] =
+        tc.qty > 0
+          ? [
+              { id: `rc_ch_${tc.qty}`, company_id: COMPANY_ID, date: DATE_FUTUR, serre_id: 'serre_1', serre_nom: 'Serre 1', ouvrier_id: 'ouv_1', numero_ouvrier: 1, nom_ouvrier: 'Ali', caisses: tc.qty, type_operation: 'CHARGEMENT', created_by_id: 'usr_caporal', created_by_nom: 'Brahim', created_at: '' },
+              { id: `rc_tc_${tc.qty}`, company_id: COMPANY_ID, date: DATE_FUTUR, serre_id: 'serre_1', serre_nom: 'Serre 1', ouvrier_id: 'ouv_2', numero_ouvrier: 2, nom_ouvrier: 'Hassan', caisses: tc.qty, type_operation: 'DECHARGEMENT', created_by_id: 'usr_caporal', created_by_nom: 'Brahim', created_at: '' },
+            ]
+          : [];
+      const res = buildPaiementRows({
+        companyId: COMPANY_ID,
+        dateIso: DATE_FUTUR,
+        ouvriers,
+        taches: extTaches,
+        domaines,
+        serres,
+        pointages,
+        affectations: [],
+        recoltes,
+        tariffs: baseTariffs,
+        respectFrozenSnapshot: false,
+      });
+      assert.equal(res.rows.find((r) => r.numeroOuvrier === 1)!.remuneration, tc.expected, `Chariot ${tc.qty} caisses`);
+      assert.equal(res.rows.find((r) => r.numeroOuvrier === 2)!.remuneration, tc.expected, `Transfert Caisse ${tc.qty} caisses`);
+    }
+
+    // Tester personnalisation et persistance Supabase des seuils Chariot / Transfert Caisse
+    const inMemoryRows: Record<string, any> = {};
+    const roundTripClient = {
+      from: () => ({
+        upsert: async (payload: any) => {
+          inMemoryRows[payload.company_id] = payload;
+          return { data: payload, error: null };
+        },
+        select: () => ({
+          eq: (_c: string, val: string) => ({
+            maybeSingle: async () => ({ data: inMemoryRows[val] || null, error: null }),
+          }),
+        }),
+      }),
+    } as any;
+
+    const customThresholdSave = await syncSavePaiementTariffsToSupabase(
+      adminUser,
+      COMPANY_ID,
+      {
+        ...baseTariffs,
+        chariotTarifRef: 100,
+        chariotQuantiteRef: 500,
+        transfertCaisseTarifRef: 120,
+        transfertCaisseQuantiteRef: 400,
+      },
+      roundTripClient
+    );
+    assert.equal(customThresholdSave.success, true);
+    assert.equal(customThresholdSave.syncedToSupabase, true);
+
+    localStorage.removeItem(`agripointage_paiement_tariffs_v1:${COMPANY_ID}`);
+    const reloaded = await syncLoadPaiementTariffsFromSupabase(COMPANY_ID, roundTripClient);
+    assert.equal(reloaded.ok, true);
+    assert.equal(reloaded.config.chariotTarifRef, 100);
+    assert.equal(reloaded.config.chariotQuantiteRef, 500);
+    assert.equal(reloaded.config.transfertCaisseTarifRef, 120);
+    assert.equal(reloaded.config.transfertCaisseQuantiteRef, 400);
+
+    // Vérifier calcul avec les nouveaux seuils (600 / 500 * 100 = 120 DH ; 500 / 400 * 120 = 150 DH)
+    const editedThresholdRes = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches: extTaches,
+      domaines,
+      serres,
+      pointages: [
+        { id: 'pt_ch_ed', company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, date: DATE_FUTUR, present: true, tache_id: 'tch_chariot', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 10 },
+        { id: 'pt_tc_ed', company_id: COMPANY_ID, ouvrier_id: 'ouv_2', numero_ouvrier: 2, date: DATE_FUTUR, present: true, tache_id: 'tch_tc', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 11 },
+      ],
+      affectations: [],
+      recoltes: [
+        { id: 'rc_ch_ed', company_id: COMPANY_ID, date: DATE_FUTUR, serre_id: 'serre_1', serre_nom: 'Serre 1', ouvrier_id: 'ouv_1', numero_ouvrier: 1, nom_ouvrier: 'Ali', caisses: 600, type_operation: 'CHARGEMENT', created_by_id: 'usr_caporal', created_by_nom: 'Brahim', created_at: '' },
+        { id: 'rc_tc_ed', company_id: COMPANY_ID, date: DATE_FUTUR, serre_id: 'serre_1', serre_nom: 'Serre 1', ouvrier_id: 'ouv_2', numero_ouvrier: 2, nom_ouvrier: 'Hassan', caisses: 500, type_operation: 'DECHARGEMENT', created_by_id: 'usr_caporal', created_by_nom: 'Brahim', created_at: '' },
+      ],
+      tariffs: reloaded.config,
+      respectFrozenSnapshot: false,
+    });
+    assert.equal(editedThresholdRes.rows.find((r) => r.numeroOuvrier === 1)!.remuneration, 120);
+    assert.equal(editedThresholdRes.rows.find((r) => r.numeroOuvrier === 2)!.remuneration, 150);
+
+    // Vérifier absence de double comptage lorsque les caisses proviennent directement de l'affectation (explicitCaisses)
+    const affExplicitRes = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches: extTaches,
+      domaines,
+      serres,
+      pointages: [
+        { id: 'pt_ch_aff', company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, date: DATE_FUTUR, present: true, tache_id: 'tch_chariot', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 10 },
+        { id: 'pt_tc_aff', company_id: COMPANY_ID, ouvrier_id: 'ouv_2', numero_ouvrier: 2, date: DATE_FUTUR, present: true, tache_id: 'tch_tc', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 11 },
+      ],
+      affectations: [
+        { id: 'aff_ch_400', company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, tache_id: 'tch_chariot', domaine_id: 'dom_d2', serre_id: 'serre_1', date: DATE_FUTUR, caisses: 400, timestamp: 10 } as any,
+        { id: 'aff_tc_500', company_id: COMPANY_ID, ouvrier_id: 'ouv_2', numero_ouvrier: 2, tache_id: 'tch_tc', domaine_id: 'dom_d2', serre_id: 'serre_1', date: DATE_FUTUR, caisses: 500, timestamp: 11 } as any,
+      ],
+      recoltes: [],
+      tariffs: baseTariffs,
+      respectFrozenSnapshot: false,
+    });
+    const affChRow = affExplicitRes.rows.find((r) => r.numeroOuvrier === 1)!;
+    const affTcRow = affExplicitRes.rows.find((r) => r.numeroOuvrier === 2)!;
+    assert.equal(affChRow.quantiteMetrique, 400, 'Chariot affectation 400 c. ne doit jamais doubler à 800');
+    assert.equal(affChRow.remuneration, 95);
+    assert.equal(affTcRow.quantiteMetrique, 500, 'Transfert Caisse affectation 500 c. ne doit jamais doubler à 1000');
+    assert.equal(affTcRow.remuneration, 118.75);
+    console.log('✓ Test 11 OK : Chariot & Transfert Caisse (400=95, 500=118.75, 600=142.50, 0=0) + seuils éditables & anti-doublon explicitCaisses');
+  }
+
+  // ---------------- TEST 12 : Récolte horaires fixes 07:00–14:00 (0h pause, 7h) & blocage strict si caisses manquantes ----------------
+  {
+    const pointages: Pointage[] = [
+      { id: 'pr_ok', company_id: COMPANY_ID, ouvrier_id: 'ouv_8', numero_ouvrier: 8, date: DATE_FUTUR, present: true, tache_id: 'tch_rec_cerise', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 10 },
+      { id: 'pr_miss', company_id: COMPANY_ID, ouvrier_id: 'ouv_9', numero_ouvrier: 9, date: DATE_FUTUR, present: true, tache_id: 'tch_rec_ronde', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 11 },
+    ];
+    const affectations: any[] = [
+      { id: 'ar_ok', company_id: COMPANY_ID, ouvrier_id: 'ouv_8', numero_ouvrier: 8, tache_id: 'tch_rec_cerise', domaine_id: 'dom_d2', serre_id: 'serre_1', date: DATE_FUTUR, heure_debut: '07:00', heure_fin: '16:00', dureeRep: 1, timestamp: 10 },
+    ];
+    const recoltes: RecolteEntry[] = [
+      { id: 'rr_ok', company_id: COMPANY_ID, date: DATE_FUTUR, serre_id: 'serre_1', serre_nom: 'Serre 1', ouvrier_id: 'ouv_8', numero_ouvrier: 8, nom_ouvrier: 'Fatima Cerise', caisses: 25, created_by_id: 'usr_caporal', created_by_nom: 'Brahim', created_at: '' },
+    ];
+
+    const recPrev = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches,
+      domaines,
+      serres,
+      pointages,
+      affectations,
+      recoltes,
+      tariffs: createDefaultPaiementTariffs(),
+      respectFrozenSnapshot: false,
+    });
+    const rOk = recPrev.rows.find((r) => r.numeroOuvrier === 8)!;
+    const rMiss = recPrev.rows.find((r) => r.numeroOuvrier === 9)!;
+    assert.equal(rOk.heureDeb, '07:00');
+    assert.equal(rOk.heureFin, '14:00', 'Récolte doit forcer 14:00 et ignorer 16:00 par défaut');
+    assert.equal(rOk.dureeRep, 0);
+    assert.equal(rOk.dureeTravaillee, 7);
+
+    assert.equal(rMiss.missingQuantityBlocked, true);
+    assert.equal(recPrev.blockedMissingQuantityRowsCount, 1);
+    assert.equal(recPrev.blockedMissingQuantityWorkers[0].nomOuvrier, 'Khadija Ronde');
+
+    const blockedRes = await exportPaiementExcel({
+      companyId: COMPANY_ID,
+      preview: recPrev,
+      domaineFilter: 'ALL',
+      domaines,
+      currentUser: adminUser,
+      templateBuffer,
+      skipBrowserDownload: true,
+      persistSnapshot: false,
+    });
+    assert.equal(blockedRes.success, false);
+    assert.ok(blockedRes.error?.includes('Khadija Ronde'), 'Le message d erreur doit nommer l ouvrier sans caisses');
+    console.log('✓ Test 12 OK : Récolte horaires fixes 07:00–14:00 (pause 0h, 7h) & blocage strict si caisses manquantes');
+  }
+
+  // ---------------- TEST 13 : Règles personnalisées (ajout, modification, désactivation, non-rétroactivité) & variety override ----------------
+  {
+    const extTaches: Tache[] = [
+      ...taches,
+      { id: 'tch_palissage', company_id: COMPANY_ID, code: 'PAL01', nom: 'PALISSAGE D2', ouvriers_autorises: 'tous', createdAt: '' },
+    ];
+    const pointages: Pointage[] = [
+      { id: 'p_pal', company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, date: DATE_FUTUR, present: true, tache_id: 'tch_palissage', domaine_id: 'dom_d2', serre_id: 'serre_1', heure: '07:00', timestamp: 10 },
+    ];
+    const affectations: any[] = [
+      { id: 'a_pal', company_id: COMPANY_ID, ouvrier_id: 'ouv_1', numero_ouvrier: 1, tache_id: 'tch_palissage', domaine_id: 'dom_d2', serre_id: 'serre_1', date: DATE_FUTUR, heure_debut: '07:00', heure_fin: '15:00', dureeRep: 1, timestamp: 10 },
+    ];
+
+    // 1. Ajout d'une règle personnalisée FORFAIT_JOUR = 135 DH
+    const tAdd = {
+      ...createDefaultPaiementTariffs(),
+      customTaskTariffs: {
+        tch_palissage: {
+          tacheKey: 'tch_palissage',
+          label: 'PALISSAGE D2',
+          mode: 'FORFAIT_JOUR' as const,
+          value: 135,
+          unite: 'JOUR',
+          actif: true,
+        },
+      },
+    };
+    const resAdd = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches: extTaches,
+      domaines,
+      serres,
+      pointages,
+      affectations,
+      recoltes: [],
+      tariffs: tAdd,
+      respectFrozenSnapshot: false,
+    });
+    assert.equal(resAdd.rows[0].remuneration, 135);
+
+    // Enregistrer un snapshot figé pour vérifier l'immutabilité lors de modification/désactivation ultérieure
+    const snapCustom = savePaiementExportSnapshot(adminUser, {
+      companyId: COMPANY_ID,
+      dateIso: '2026-11-20',
+      domaineFilter: 'ALL',
+      filename: 'EXPORT_PAIEMENT_TOUS_DOMAINES_2026-11-20.xlsx',
+      tariffsSnapshot: tAdd,
+      rows: resAdd.rows,
+      totalByWorker: resAdd.totalByWorker,
+      grandTotalDH: 135,
+      totalOuvriersDistincts: 1,
+    });
+    assert.equal(snapCustom.success, true);
+
+    // 2. Modification de la règle personnalisée en HEURE = 20 DH/h (7h => 140 DH)
+    const tEdit = {
+      ...tAdd,
+      customTaskTariffs: {
+        tch_palissage: {
+          ...tAdd.customTaskTariffs.tch_palissage,
+          mode: 'HEURE' as const,
+          value: 20,
+          unite: 'HEURE',
+        },
+      },
+    };
+    const resEdit = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches: extTaches,
+      domaines,
+      serres,
+      pointages,
+      affectations,
+      recoltes: [],
+      tariffs: tEdit,
+      respectFrozenSnapshot: false,
+    });
+    assert.equal(resEdit.rows[0].remuneration, 140);
+
+    // 3. Désactivation de la règle (actif: false) -> repli vers tarif normal (7h/8h * 95 = 83.125)
+    const tDisabled = {
+      ...tEdit,
+      customTaskTariffs: {
+        tch_palissage: {
+          ...tEdit.customTaskTariffs.tch_palissage,
+          actif: false,
+        },
+      },
+    };
+    const resDisabled = buildPaiementRows({
+      companyId: COMPANY_ID,
+      dateIso: DATE_FUTUR,
+      ouvriers,
+      taches: extTaches,
+      domaines,
+      serres,
+      pointages,
+      affectations,
+      recoltes: [],
+      tariffs: tDisabled,
+      respectFrozenSnapshot: false,
+    });
+    assert.equal(resDisabled.rows[0].remuneration, 83.125);
+
+    // Vérifier que le snapshot du 2026-11-20 reste strictement figé à 135 DH
+    const frozenCustom = getFrozenSnapshotSafe(COMPANY_ID, '2026-11-20')!;
+    assert.equal(frozenCustom.grandTotalDH, 135);
+
+    // 4. Round-trip Supabase d'un varietyOverride ({ choice: 'CERISE' })
+    const overridesStore: any[] = [];
+    const ovrClient = {
+      from: () => ({
+        upsert: async (row: any) => {
+          overridesStore.push(row);
+          return { data: row, error: null };
+        },
+        select: () => ({
+          eq: () => ({
+            eq: async () => ({ data: overridesStore, error: null }),
+          }),
+        }),
+      }),
+    } as any;
+    const saveVar = await syncSavePaiementDayOverrideToSupabase(
+      adminUser,
+      COMPANY_ID,
+      DATE_FUTUR,
+      'variety',
+      'rk_var_1',
+      { choice: 'CERISE' },
+      ovrClient
+    );
+    assert.equal(saveVar.ok, true);
+    assert.equal(saveVar.syncedToSupabase, true);
+    const loadedOvr = await syncLoadPaiementDayOverridesFromSupabase(COMPANY_ID, DATE_FUTUR, ovrClient);
+    assert.equal(loadedOvr.ok, true);
+    assert.equal(loadedOvr.varietyOverrides.rk_var_1, 'CERISE');
+    console.log('✓ Test 13 OK : Règles personnalisées (ajout, modif, désactivation, snapshot immuable) & varietyOverride { choice }');
   }
 
   console.log('\nTOUS LES TESTS ISOLÉS PHASE 3 (EXPORT PAIEMENT EXCEL) SONT VALIDÉS À 100% !');

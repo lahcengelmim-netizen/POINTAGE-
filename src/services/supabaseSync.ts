@@ -598,3 +598,24 @@ export async function pullAllCoreModulesFromSupabase(
 
   return report;
 }
+
+export function subscribeContractuelsRealtime(companyId: string, onChange: () => void) {
+  try {
+    const channel = supabase
+      .channel(`public:contractuels:${companyId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', filter: `company_id=eq.${companyId}` },
+        () => {
+          onChange();
+        }
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  } catch {
+    return () => {};
+  }
+}
+

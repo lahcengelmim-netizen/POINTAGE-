@@ -380,11 +380,11 @@ async function runTests() {
       ['serre_test_1'],
       ['Serre Test 99']
     );
-    assert.equal(tsRes.success, true);
+    assert.ok(tsRes.id);
 
     storage.setStockInitialGazoil(companyId, 500);
     storage.addGazoilMouvement(companyId, {
-      type: 'SORTIE',
+      type: 'sortie',
       date: testDate,
       quantite: 45,
       engin_ou_tache: 'Tracteur 1',
@@ -393,22 +393,28 @@ async function runTests() {
 
     const tarConfig = {
       ...paiementExp.createDefaultPaiementTariffs(),
-      tauxHoraireNormal: 12.5,
+      travailNormalJour: 125,
       version: 4,
-      updated_at: '2026-11-18T10:00:00Z',
+      updatedAt: '2026-11-18T10:00:00Z',
     };
-    const paiTarQueue = await paiementExp.syncSavePaiementTariffsToSupabase(adminUser, companyId, tarConfig, mockSupabase);
-    assert.equal(paiTarQueue.ok, false, 'Hors ligne doit mettre en file PAIEMENT sans mentir');
+    const paiTarQueue = await paiementExp.syncSavePaiementTariffsToSupabase(
+      adminUser,
+      companyId,
+      tarConfig,
+      mockSupabase as any
+    );
+    assert.equal(paiTarQueue.syncedToSupabase, false, 'Hors ligne doit mettre en file PAIEMENT sans mentir');
 
     const snapshotTest: any = {
       id: 'snap_test_immutable_1',
-      company_id: companyId,
-      date: testDate,
-      domaine_filter: 'ALL',
-      exported_at: '2026-11-18T10:05:00Z',
-      exported_by_id: adminUser.id,
-      exported_by_nom: adminUser.nom,
-      tariffs_used: tarConfig,
+      companyId,
+      dateIso: testDate,
+      domaineFilter: 'ALL',
+      exportedAt: '2026-11-18T10:05:00Z',
+      exportedById: adminUser.id,
+      exportedByNom: adminUser.nom,
+      filename: `EXPORT_PAIEMENT_TOUS_DOMAINES_${testDate}.xlsx`,
+      tariffsSnapshot: tarConfig,
       rows: [
         {
           docId: 'D002_2026-11-18_101-D2_1',
@@ -425,9 +431,10 @@ async function runTests() {
           quantiteMetrique: 25,
           quantite: '',
           heureDeb: '07:00',
-          heureFin: '16:00',
-          dureeRep: 1,
-          periodeJo: 8,
+          heureFin: '14:00',
+          dureeRep: 0,
+          dureeTravaillee: 7,
+          periodeJo: 'JOURNEE',
           statut: 'BROUILLON',
           equipeId: 'EQ1',
           tarifExcep: 3.8,
@@ -435,15 +442,30 @@ async function runTests() {
           rowKey: 'rk_101',
           sourceType: 'RECOLTE',
           tacheNomOriginal: 'Récolte Cerise Sync',
-          effectiveHours: 8,
+          effectiveHours: 7,
           isBlockedMissingVariety: false,
         },
       ],
-      totaux_par_ouvrier: [{ ouvrierId: '101-D2', nomOuvrier: 'ALAMI RACHID', totalHeures: 8, totalQuantite: 25, totalDH: 95, nbLignes: 1 }],
-      grand_total_dh: 95,
-      total_lignes: 1,
+      totalByWorker: [
+        {
+          workerKey: 'num_101',
+          ouvrierId: '101-D2',
+          numeroOuvrier: 101,
+          nomOuvrier: 'ALAMI RACHID',
+          domaineDT: 'D002',
+          taches: ['Récolte Cerise Sync'],
+          tarifsAppliques: ['3.8 DH / caisse (Coeff 3.8)'],
+          coefficients: ['3.8'],
+          totalHeures: 7,
+          totalRecolte: 25,
+          rowsCount: 1,
+          totalDH: 95,
+        },
+      ],
+      grandTotalDH: 95,
+      totalOuvriersDistincts: 1,
     };
-    await paiementExp.syncSavePaiementSnapshotToSupabase(adminUser, snapshotTest, mockSupabase);
+    await paiementExp.syncSavePaiementSnapshotToSupabase(adminUser, snapshotTest, mockSupabase as any);
     await paiementExp.syncSavePaiementDayOverrideToSupabase(
       adminUser,
       companyId,
@@ -451,7 +473,7 @@ async function runTests() {
       'hours',
       'rk_101',
       { heureDeb: '07:30', heureFin: '16:30', dureeRep: 1 },
-      mockSupabase
+      mockSupabase as any
     );
 
     const beforeOnlineCounts = syncOutbox.getAllPendingOutboxCounts();
@@ -482,7 +504,7 @@ async function runTests() {
     syncOutbox.enqueueOutboxOp(syncOutbox.OUTBOX_KEYS.SUPPLEMENTAIRES, {
       table: 'heures_supplementaires',
       entityId: 'hsup_off_1',
-      action: 'create',
+      action: 'upsert',
       companyId,
       data: {
         ouvrier_id: 'ouv_sync_101',
@@ -500,11 +522,12 @@ async function runTests() {
     syncOutbox.enqueueOutboxOp(syncOutbox.OUTBOX_KEYS.SUPPLEMENTAIRES, {
       table: 'taches_supplementaires',
       entityId: 'tsup_off_1',
-      action: 'create',
+      action: 'upsert',
       companyId,
       data: {
         ouvrier_id: 'ouv_sync_101',
         numero_ouvrier: 101,
+        nom_ouvrier: 'ALAMI RACHID',
         date: testDate,
         nom_tache: 'Désherbage Allée',
         quantite: 4,
@@ -530,18 +553,41 @@ async function runTests() {
       },
     });
 
+    // Créer le produit stock au préalable pour disposer d'un produit_id valide
+    const createProdRes = await fetch(`${baseUrl}/api/stock/produit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer dev_admin_token',
+        'x-company-id': companyId,
+      },
+      body: JSON.stringify({
+        nom: 'Engrais NPK Sync',
+        unite: 'SAC',
+        seuil_minimum: 5,
+        stock_initial: 0,
+      }),
+    });
+    const createProdJson = await createProdRes.json();
+    assert.equal(createProdJson.success, true, `Création produit stock préalable réussie: ${JSON.stringify(createProdJson)}`);
+    const stockProduitId = createProdJson.produit.id;
+
     syncOutbox.enqueueOutboxOp(syncOutbox.OUTBOX_KEYS.STOCK, {
       table: 'stock_mouvements',
       entityId: 'stk_off_entree_1',
-      action: 'entree',
+      action: 'upsert',
       companyId,
       data: {
-        produit_nom: 'Engrais NPK Sync',
-        unite: 'SAC',
-        quantite: 20,
-        date: testDate,
-        tiers: 'Fournisseur Test',
-        idempotencyKey: 'idem_stock_test_unique_1',
+        endpoint: '/api/stock/entree',
+        payload: {
+          produit_id: stockProduitId,
+          produit_nom: 'Engrais NPK Sync',
+          unite: 'SAC',
+          quantite: 20,
+          date: testDate,
+          tiers: 'Fournisseur Test',
+          idempotencyKey: 'idem_stock_test_unique_1',
+        },
       },
     });
 
@@ -550,7 +596,7 @@ async function runTests() {
     const syncReport1 = await globalSync.syncBidirectionalAll({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -559,14 +605,15 @@ async function runTests() {
     });
 
     assert.equal(syncReport1.errors.length, 0, `Aucune erreur attendue au sync complet: ${JSON.stringify(syncReport1.errors)}`);
-    assert.equal(syncReport1.pendingCounts.total, 0, 'Toutes les outboxes doivent être vidées après confirmation serveur');
+    const totalPendingAfterSync = Object.values(syncReport1.pendingCounts).reduce((sum, n) => sum + (n || 0), 0);
+    assert.equal(totalPendingAfterSync, 0, 'Toutes les outboxes doivent être vidées après confirmation serveur');
 
     // Vérifier la persistance réelle dans MockSupabase
     assert.ok(mockSupabase.tables.domaines.some((d) => d.id === 'dom_test_1'), 'Domaine synchronisé vers Supabase');
     assert.ok(mockSupabase.tables.ouvriers.some((o) => o.id === 'ouv_sync_101'), 'Ouvrier synchronisé vers Supabase');
     assert.ok(mockSupabase.tables.pointages.some((p) => p.ouvrier_id === 'ouv_sync_101'), 'Pointage synchronisé vers Supabase');
     assert.ok(mockSupabase.tables.gazoil_mouvements.length >= 1, 'Mouvement gazoil synchronisé vers Supabase');
-    assert.equal(mockSupabase.tables.paiement_tariffs[0]?.taux_horaire_normal, 12.5, 'Tarifs Admin synchronisés');
+    assert.equal(mockSupabase.tables.paiement_tariffs[0]?.travail_normal_jour, 125, 'Tarifs Admin synchronisés');
     assert.equal(mockSupabase.tables.paiement_export_snapshots[0]?.id, 'snap_test_immutable_1', 'Snapshot figé synchronisé');
     assert.equal(mockSupabase.tables.paiement_day_overrides.length, 1, 'Override horaire synchronisé');
 
@@ -574,21 +621,25 @@ async function runTests() {
     syncOutbox.enqueueOutboxOp(syncOutbox.OUTBOX_KEYS.STOCK, {
       table: 'stock_mouvements',
       entityId: 'stk_off_entree_dup',
-      action: 'entree',
+      action: 'upsert',
       companyId,
       data: {
-        produit_nom: 'Engrais NPK Sync',
-        unite: 'SAC',
-        quantite: 20,
-        date: testDate,
-        tiers: 'Fournisseur Test',
-        idempotencyKey: 'idem_stock_test_unique_1',
+        endpoint: '/api/stock/entree',
+        payload: {
+          produit_id: stockProduitId,
+          produit_nom: 'Engrais NPK Sync',
+          unite: 'SAC',
+          quantite: 20,
+          date: testDate,
+          tiers: 'Fournisseur Test',
+          idempotencyKey: 'idem_stock_test_unique_1',
+        },
       },
     });
     const syncIdemReport = await globalSync.syncBidirectionalAll({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -600,7 +651,9 @@ async function runTests() {
       headers: { Authorization: 'Bearer dev_admin_token', 'x-company-id': companyId },
     });
     const stockJson = await stockCheckRes.json();
-    const npkProd = (stockJson.produits || []).find((p: any) => p.nom === 'Engrais NPK Sync');
+    const npkProd = (stockJson.produits || []).find(
+      (p: any) => (p.produit?.nom || p.nom) === 'ENGRAIS NPK SYNC'
+    );
     assert.ok(npkProd, 'Produit stock présent sur serveur');
     assert.equal(npkProd.stock_actuel, 20, 'IdempotencyKey doit empêcher la double incrémentation du stock');
 
@@ -636,15 +689,15 @@ async function runTests() {
     // =========================================================================
     const deviceBStore: Record<string, string> = {};
     switchDeviceStorage(deviceBStore);
-    // Simuler un appareil neuf contenant uniquement des ouvriers par défaut provisoires avant hydratation
-    storage.saveOuvrier(companyId, { id: 'ouv_1', numero: 1, nom: 'Mohammed Amine', actif: true });
+    // Simuler un appareil neuf contenant uniquement les ouvriers démo provisoires via initStorage() avant hydratation
+    storage.initStorage();
     storage.setActiveCompanyId(companyId);
     storage.setCurrentUser(adminUser);
 
     const hydrateReport = await globalSync.hydrateFreshDeviceFromRemote({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -658,9 +711,12 @@ async function runTests() {
     assert.ok(!bOuvriers.some((o) => o.id === 'ouv_1' && o.nom === 'Mohammed Amine'), 'Ouvrier démo provisoire écarté');
     assert.ok(storage.getPointages(companyId, testDate).some((p) => p.ouvrier_id === 'ouv_sync_101'), 'Pointage matin restauré');
     assert.ok(storage.getHeuresSupplementaires(companyId, testDate).some((h) => h.numero_ouvrier === 101), 'Heures supp restaurées');
-    assert.ok(storage.getTachesSupplementaires(companyId, testDate).some((t) => t.nom_tache === 'Désherbage Allée'), 'Tâches supp restaurées');
+    assert.ok(
+      storage.getTachesSupplementaires(companyId, testDate).some((t) => (t.nom_tache || '').toUpperCase() === 'DÉSHERBAGE ALLÉE'),
+      'Tâches supp restaurées'
+    );
     assert.equal(storage.calculerStockGazoil(companyId).stockActuel, 455, 'Calcul Gazoil 500 - 45 = 455L restauré sur Appareil B');
-    assert.equal(paiementExp.loadPaiementTariffs(companyId).tauxHoraireNormal, 12.5, 'Tarifs Paiement restaurés sur Appareil B');
+    assert.equal(paiementExp.loadPaiementTariffs(companyId).travailNormalJour, 125, 'Tarifs Paiement restaurés sur Appareil B');
     assert.equal(paiementExp.loadPaiementExportHistory(companyId).length, 1, 'Historique snapshot figé restauré sur Appareil B');
     assert.equal(paiementExp.loadHoursOverridesForDate(companyId, testDate).rk_101?.heureDeb, '07:30', 'Overrides horaires restaurés sur Appareil B');
 
@@ -695,7 +751,7 @@ async function runTests() {
     const syncAfterRestart = await globalSync.syncBidirectionalAll({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl: baseUrl2,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -714,7 +770,7 @@ async function runTests() {
     const failedRun = await globalSync.syncBidirectionalAll({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl: baseUrl2,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -730,7 +786,7 @@ async function runTests() {
     const recoveredRun = await globalSync.syncBidirectionalAll({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl: baseUrl2,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -749,7 +805,7 @@ async function runTests() {
     await globalSync.syncBidirectionalAll({
       companyId,
       user: adminUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl: baseUrl2,
       accessToken: 'dev_admin_token',
       ignoreNavigatorOnline: true,
@@ -779,6 +835,7 @@ async function runTests() {
         numero: 109,
         nom: 'DISTANT PLUS RECENT',
         actif: true,
+        createdAt: '2026-11-18T11:05:00Z',
         updated_at: '2026-11-18T11:05:00Z',
       },
     ]);
@@ -786,7 +843,7 @@ async function runTests() {
     assert.equal(winner?.nom, 'DISTANT PLUS RECENT', 'La version horodatée la plus récente doit gagner');
     const conflicts = syncOutbox.getSyncConflicts(companyId);
     assert.ok(
-      conflicts.some((c) => c.table === 'ouvriers' && c.entityId === 'ouv_conflict_1' && c.winner === 'remote'),
+      conflicts.some((c) => c.table === 'ouvriers' && c.entityId === 'ouv_conflict_1' && c.resolvedWinner === 'remote'),
       'La version locale évincée doit être tracée dans le journal des conflits'
     );
 
@@ -818,7 +875,7 @@ async function runTests() {
     const tariqReport = await globalSync.syncBidirectionalAll({
       companyId,
       user: tariqUser,
-      supabaseClient: mockSupabase,
+      supabaseClient: mockSupabase as any,
       baseUrl: baseUrl2,
       accessToken: 'dev_contractuel_token',
       ignoreNavigatorOnline: true,

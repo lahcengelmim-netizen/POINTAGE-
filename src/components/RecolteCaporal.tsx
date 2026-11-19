@@ -305,6 +305,10 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
     return Math.round(grandTotal * 10) / 10;
   }, [totalBySerre]);
 
+  const workersMissingCaisses = useMemo(() => {
+    return selectedWorkersList.filter((w) => (totalByWorker[w.id] || 0) <= 0);
+  }, [selectedWorkersList, totalByWorker]);
+
   // --------------------------------------------------------------------------
   // ENREGISTREMENT ET CONFIRMATION
   // --------------------------------------------------------------------------
@@ -318,6 +322,15 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
   const handleSaveAllRecolte = async () => {
     if (isSubmitting) return;
     setFeedback(null);
+
+    if (workersMissingCaisses.length > 0) {
+      const names = workersMissingCaisses.map((w) => `#${w.numero} ${w.nom}`).join(', ');
+      setFeedback({
+        type: 'error',
+        text: `Saisie individuelle des caisses obligatoire (> 0) pour chaque ouvrier sélectionné. Manquant(s) : ${names}`,
+      });
+      return;
+    }
 
     // Préparer les enregistrements uniquement pour les quantités > 0
     const entriesToSave: Array<{
@@ -1030,15 +1043,22 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
                           </div>
                         </div>
 
-                        {/* Cumul total pour cet ouvrier si plusieurs serres */}
-                        {selectedSerresList.length > 1 && (
-                          <div className="text-right">
-                            <span className="text-[10px] text-slate-400 font-bold uppercase block">Total Ouvrier</span>
-                            <span className="font-mono font-black text-slate-900 text-xs">
-                              {workerTotalAllSerres} c.
+                        {/* Badge obligatoire ou cumul total pour cet ouvrier */}
+                        <div className="text-right flex flex-col items-end gap-1">
+                          {workerTotalAllSerres <= 0 && (
+                            <span className="text-[10px] font-black text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-md">
+                              Caisses obligatoires (&gt; 0)
                             </span>
-                          </div>
-                        )}
+                          )}
+                          {selectedSerresList.length > 1 && (
+                            <div>
+                              <span className="text-[10px] text-slate-400 font-bold uppercase block">Total Ouvrier</span>
+                              <span className="font-mono font-black text-slate-900 text-xs">
+                                {workerTotalAllSerres} c.
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       </div>
 
                       {/* BLOC BOUTONS + ET - GÉANTS SANS CLAVIER (PAVÉ TACTILE D'EXPLOITATION) */}
@@ -1123,11 +1143,18 @@ export const RecolteCaporal: React.FC<RecolteCaporalProps> = ({
                   </div>
                 </div>
 
+                {workersMissingCaisses.length > 0 && (
+                  <div className="rounded-2xl bg-red-950/70 border border-red-500/60 p-2.5 text-[11px] font-bold text-red-200">
+                    Saisie individuelle requise (&gt; 0 caisse) pour :{' '}
+                    {workersMissingCaisses.map((w) => `#${w.numero} ${w.nom}`).join(', ')}
+                  </div>
+                )}
+
                 {/* GROS BOUTON ENREGISTRER LA RÉCOLTE */}
                 <button
                   type="button"
                   onClick={handleSaveAllRecolte}
-                  disabled={isSubmitting || grandTotalCaisses <= 0}
+                  disabled={isSubmitting || grandTotalCaisses <= 0 || workersMissingCaisses.length > 0}
                   className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-600 text-slate-950 font-black py-4 rounded-2xl text-xs uppercase tracking-wider shadow-lg transition active:scale-98 flex items-center justify-center gap-2"
                 >
                   {isSubmitting ? (

@@ -20,6 +20,7 @@ export interface Ouvrier {
   telephone?: string;
   notes?: string;
   createdAt: string;
+  updated_at?: string;
 }
 
 export interface Tache {
@@ -31,6 +32,10 @@ export interface Tache {
   domaine_id?: string; // Domaine optionnel rattaché
   description?: string;
   couleur?: string;
+  remuneration_mode?: string;
+  unite_metrique?: string;
+  tarif_unitaire?: number;
+  tarif_heure?: number;
   // 'tous' signifie accessible à tous les ouvriers, ou tableau d'ids d'ouvriers autorisés
   ouvriers_autorises: 'tous' | string[];
   createdAt: string;
@@ -476,6 +481,7 @@ export interface ContractuelPointage {
   validated_by_nom?: string | null;
   validated_at?: string | null;
   motif_refus?: string | null;
+  motif_rejet?: string | null;
   historique_validations?: ContractuelHistoriqueEntry[];
   activites?: ContractuelActivite[];
   montant_total_jour: number; // Montant officiel validé (0 si non validé ou absent)

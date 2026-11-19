@@ -328,8 +328,8 @@ async function executeBidirectionalSync(options: GlobalSyncOptions): Promise<Glo
         ignoreNavigatorOnline: options.ignoreNavigatorOnline,
       });
       report.pushed.recolte = recRes.syncedCount || 0;
-      if (recRes.success && Array.isArray(recRes.allEntries)) {
-        report.pulled.recolte = recRes.allEntries.length;
+      if (recRes.success) {
+        report.pulled.recolte = recRes.receivedCount || 0;
       } else if (recRes.error) {
         errors.push({ module: 'recolte', error: recRes.error });
       }
@@ -546,9 +546,10 @@ export function getGlobalPendingSyncSummary(companyId?: string): {
 } {
   const counts = getAllPendingOutboxCounts();
   const conflicts = getSyncConflicts(companyId);
+  const totalPending = Object.values(counts).reduce((sum, n) => sum + (Number(n) || 0), 0);
   return {
     counts,
-    totalPending: counts.total,
+    totalPending,
     conflicts,
   };
 }

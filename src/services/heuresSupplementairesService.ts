@@ -128,6 +128,7 @@ export async function syncAndFetchHeuresSupplementairesServer(
 export async function createHeureSupplementaireServer(data: {
   ouvrier_id: string;
   numero_ouvrier: number;
+  nom_ouvrier?: string | null;
   date: string;
   heure_debut?: string | null;
   heure_fin?: string | null;
@@ -292,6 +293,9 @@ export async function updateHeureSupplementaireServer(
         const updated: HeureSupplementaire = {
           ...existing,
           ...data,
+          duree_heures: Number(
+            data.duree_heures ?? data.heures ?? data.quantite ?? existing.duree_heures ?? 0
+          ),
           updated_at: now.toISOString(),
           timestamp: now.getTime(),
         };

@@ -876,7 +876,7 @@ export interface SaveOuvrierResult {
 
 export function saveOuvrier(
   companyId: string,
-  ouvrierData: { id?: string; numero: number; nom: string; actif?: boolean; telephone?: string }
+  ouvrierData: { id?: string; numero: number; nom: string; actif?: boolean; telephone?: string; updated_at?: string }
 ): SaveOuvrierResult {
   const allRaw = localStorage.getItem(STORAGE_KEYS.OUVRIERS);
   const all: Ouvrier[] = allRaw ? JSON.parse(allRaw) : [];
@@ -912,6 +912,7 @@ export function saveOuvrier(
     actif: ouvrierData.actif !== undefined ? ouvrierData.actif : true,
     telephone: ouvrierData.telephone?.trim() || undefined,
     createdAt: existingIdx >= 0 ? all[existingIdx].createdAt : new Date().toISOString(),
+    updated_at: ouvrierData.updated_at || new Date().toISOString(),
   };
 
   if (existingIdx >= 0) {
@@ -1041,6 +1042,11 @@ export function saveTache(
     code?: string;
     nom: string;
     couleur?: string;
+    actif?: boolean;
+    remuneration_mode?: string;
+    unite_metrique?: string;
+    tarif_unitaire?: number;
+    tarif_heure?: number;
     ouvriers_autorises?: 'tous' | string[];
   }
 ): { success: boolean; tache?: Tache; error?: string } {
@@ -1088,7 +1094,11 @@ export function saveTache(
     code: codeClean,
     nom: nomNettoye,
     couleur: tacheData.couleur || '#16a34a',
-    actif: true,
+    actif: tacheData.actif !== undefined ? tacheData.actif : true,
+    remuneration_mode: tacheData.remuneration_mode ?? (existingIdx >= 0 ? all[existingIdx].remuneration_mode : undefined),
+    unite_metrique: tacheData.unite_metrique ?? (existingIdx >= 0 ? all[existingIdx].unite_metrique : undefined),
+    tarif_unitaire: tacheData.tarif_unitaire ?? (existingIdx >= 0 ? all[existingIdx].tarif_unitaire : undefined),
+    tarif_heure: tacheData.tarif_heure ?? (existingIdx >= 0 ? all[existingIdx].tarif_heure : undefined),
     ouvriers_autorises: tacheData.ouvriers_autorises || 'tous',
     createdAt: existingIdx >= 0 ? all[existingIdx].createdAt : new Date().toISOString(),
   };
@@ -3421,16 +3431,29 @@ export function saveSerre(
   let resultSerre: Serre;
 
   if (data.id) {
-    const idx = all.findIndex((s) => s.id === data.id);
-    if (idx === -1) return { success: false, error: 'Serre introuvable.' };
-    resultSerre = {
-      ...all[idx],
-      code: codeClean,
-      nom: nomClean,
-      actif: data.actif ?? all[idx].actif,
-      domaine_id: data.domaine_id !== undefined ? data.domaine_id : all[idx].domaine_id,
-    };
-    all[idx] = resultSerre;
+    const idx = all.findIndex((s) => s.id === data.id && (s.company_id === companyId || !s.company_id));
+    if (idx === -1) {
+      resultSerre = {
+        id: data.id,
+        company_id: companyId,
+        code: codeClean,
+        nom: nomClean,
+        actif: data.actif ?? true,
+        ordre: all.length + 1,
+        domaine_id: data.domaine_id ?? null,
+      };
+      all.push(resultSerre);
+    } else {
+      resultSerre = {
+        ...all[idx],
+        company_id: all[idx].company_id || companyId,
+        code: codeClean,
+        nom: nomClean,
+        actif: data.actif ?? all[idx].actif,
+        domaine_id: data.domaine_id !== undefined ? data.domaine_id : all[idx].domaine_id,
+      };
+      all[idx] = resultSerre;
+    }
   } else {
     resultSerre = {
       id: `serre_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,

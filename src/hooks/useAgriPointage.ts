@@ -471,7 +471,7 @@ export function useAgriPointage() {
   // Gestion des domaines
   const saveDomaine = useCallback((dom: { id?: string; nom: string; ordre?: number }) => {
     const res = storage.saveDomaine(dom);
-    if (res.success) syncReferentielsQueueToSupabase().catch(() => {});
+    if (res?.id) syncReferentielsQueueToSupabase().catch(() => {});
     return res;
   }, []);
 

@@ -6,6 +6,7 @@ import * as storage from '../services/storage';
 interface UserContextType {
   user: UserAccount | null;
   loading: boolean;
+  isReadOnly: boolean;
   login: (usernameOrEmail: string, code: string) => Promise<UserAccount>;
   loginWithBiometrics: (userId?: string) => Promise<UserAccount>;
   logout: () => Promise<void>;
@@ -18,7 +19,27 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   // Récupère le profil strictement depuis public.profiles sans auto-création ni mutation DB
-  const fetchProfile = async (userId: string, authUser?: any): Promise<UserAccount | null> => {
+  const fetchProfile = async (
+    userId: string,
+    authUser?: any,
+    allowOfflineCache = false
+  ): Promise<UserAccount | null> => {
+    const tryCachedOfflineProfile = (reasonMessage: string): UserAccount | null => {
+      if (!allowOfflineCache) return null;
+      const isOfflineOrNetworkError =
+        (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+        /failed to fetch|network|timeout|abort|load failed|offline|err_internet/i.test(reasonMessage);
+      if (!isOfflineOrNetworkError) return null;
+
+      const cached = storage.getCurrentUser();
+      const cachedCompId = (cached?.company_id || '').trim();
+      if (cached && cached.id === userId && cached.actif !== false && cachedCompId) {
+        storage.setActiveCompanyId(cachedCompId);
+        return cached;
+      }
+      return null;
+    };
+
     try {
       const { data: profile, error } = await supabase
         .from('profiles')
@@ -28,6 +49,10 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (error) {
         console.warn('Erreur lecture profil Supabase:', error.message);
+        const recovered = tryCachedOfflineProfile(error.message || '');
+        if (recovered) {
+          return recovered;
+        }
       }
 
       if (!profile || profile.actif === false) {
@@ -73,8 +98,12 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       storage.setActiveCompanyId(userCompId);
       storage.setCurrentUser(userAcc);
       return userAcc;
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erreur fetchProfile:', err);
+      const recovered = tryCachedOfflineProfile(String(err?.message || err || ''));
+      if (recovered) {
+        return recovered;
+      }
       return null;
     }
   };
@@ -84,7 +113,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (session) {
-          const profile = await fetchProfile(session.user.id, session.user);
+          const profile = await fetchProfile(session.user.id, session.user, true);
           if (profile) {
             setUser(profile);
           } else {
@@ -101,7 +130,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session) {
-        const profile = await fetchProfile(session.user.id, session.user);
+        const profile = await fetchProfile(session.user.id, session.user, true);
         setUser(profile);
       } else {
         setUser(null);
@@ -126,7 +155,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error(`Identifiant ou mot de passe incorrect (${error?.message || 'Échec session'})`);
     }
 
-    const profile = await fetchProfile(data.session.user.id, data.session.user);
+    const profile = await fetchProfile(data.session.user.id, data.session.user, false);
     if (!profile) {
       throw new Error('Authentification réussie, mais profil introuvable ou compte désactivé.');
     }
@@ -144,7 +173,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Lecture biométrique validée, mais aucune session active correspondante. Veuillez vous reconnecter par e-mail.');
     }
 
-    const profile = await fetchProfile(session.user.id, session.user);
+    const profile = await fetchProfile(session.user.id, session.user, true);
     if (!profile) {
       throw new Error('Profil introuvable ou compte désactivé. Veuillez vous reconnecter par e-mail.');
     }
@@ -159,8 +188,10 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
     storage.logoutUser();
   };
 
+  const isReadOnly = user?.role === 'lecteur';
+
   return (
-    <UserContext.Provider value={{ user, loading, login, loginWithBiometrics, logout }}>
+    <UserContext.Provider value={{ user, loading, isReadOnly, login, loginWithBiometrics, logout }}>
       {children}
     </UserContext.Provider>
   );

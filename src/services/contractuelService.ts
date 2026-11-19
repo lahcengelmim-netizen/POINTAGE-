@@ -16,6 +16,7 @@ import {
   ContractuelActivite,
   ContractuelFilter,
   ModeRemuneration,
+  StatutValidationContractuel,
 } from '../types';
 import {
   OUTBOX_KEYS,
@@ -354,7 +355,7 @@ export async function getContractuelOuvriers(
     baseUrl?: string;
     ignoreNavigatorOnline?: boolean;
   }
-): Promise<{ success: boolean; ouvriers: ContractuelOuvrier[]; error?: string }> {
+): Promise<{ success: boolean; ouvriers: ContractuelOuvrier[]; fromCache?: boolean; error?: string }> {
   const companyId = options?.companyId || getActiveCompanyId();
   try {
     if (!options?.ignoreNavigatorOnline && typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -395,7 +396,7 @@ export async function getContractuelOuvriers(
       if (filter?.domaineId && filter.domaineId !== 'ALL') {
         result = result.filter((o) => o.domaine_id === filter.domaineId);
       }
-      return { success: true, ouvriers: result };
+      return { success: true, ouvriers: result, fromCache: false };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des ouvriers contractuels.');
@@ -407,7 +408,7 @@ export async function getContractuelOuvriers(
     if (companyId) list = list.filter((o) => !o.company_id || o.company_id === companyId);
     if (filter?.actif) list = list.filter((o) => o.actif);
     if (filter?.domaineId && filter.domaineId !== 'ALL') list = list.filter((o) => o.domaine_id === filter.domaineId);
-    return { success: true, ouvriers: list };
+    return { success: true, ouvriers: list, fromCache: true };
   }
 }
 
@@ -612,6 +613,7 @@ export async function getContractuelPointages(
   success: boolean;
   pointages: ContractuelPointage[];
   activites?: ContractuelActivite[];
+  fromCache?: boolean;
   error?: string;
 }> {
   const companyId = options?.companyId || getActiveCompanyId();
@@ -680,7 +682,7 @@ export async function getContractuelPointages(
       }
       if (filter?.ouvrier_id) viewPointages = viewPointages.filter((p) => p.ouvrier_id === filter.ouvrier_id);
 
-      return { success: true, pointages: viewPointages, activites: serverActs };
+      return { success: true, pointages: viewPointages, activites: serverActs, fromCache: false };
     }
 
     throw new Error(data.error || 'Erreur lors de la récupération des pointages contractuels.');
@@ -696,7 +698,7 @@ export async function getContractuelPointages(
     }
     if (filter?.domaine_id && filter.domaine_id !== 'ALL') listP = listP.filter((p) => p.domaine_id === filter.domaine_id);
     if (filter?.ouvrier_id) listP = listP.filter((p) => p.ouvrier_id === filter.ouvrier_id);
-    return { success: true, pointages: listP };
+    return { success: true, pointages: listP, fromCache: true };
   }
 }
 
@@ -707,13 +709,29 @@ export async function saveContractuelPointage(payload: {
   date: string;
   present: boolean;
   domaine_id?: string;
+  tarif_initial?: number;
+  montant_propose?: number;
+  motif_modification?: string | null;
+  statut_validation?: StatutValidationContractuel;
   montant_total_jour?: number;
   serre_id?: string | null;
   serres_ids?: string[];
   serres_noms?: string[];
   serres_texte?: string | null;
+  taches_ids?: string[];
+  taches_noms?: string[];
+  taches_texte?: string | null;
+  heure_debut?: string | null;
+  heure_fin?: string | null;
+  duree_heures?: number | null;
   activites?: Partial<ContractuelActivite>[];
-}): Promise<{ success: boolean; pointage?: ContractuelPointage; message?: string; error?: string }> {
+}): Promise<{
+  success: boolean;
+  pointage?: ContractuelPointage;
+  queuedOffline?: boolean;
+  message?: string;
+  error?: string;
+}> {
   const companyId = getActiveCompanyId() || 'cie_lahcen_pointeur';
   const nowIso = new Date().toISOString();
   let lastStatus: number | undefined;
@@ -791,6 +809,16 @@ export async function saveContractuelPointage(payload: {
         serres_ids: payload.serres_ids,
         serres_noms: payload.serres_noms,
         serres_texte: payload.serres_texte ?? null,
+        taches_ids: payload.taches_ids,
+        taches_noms: payload.taches_noms,
+        taches_texte: payload.taches_texte ?? null,
+        heure_debut: payload.heure_debut ?? null,
+        heure_fin: payload.heure_fin ?? null,
+        duree_heures: payload.duree_heures ?? null,
+        tarif_initial: payload.tarif_initial,
+        montant_propose: payload.montant_propose,
+        motif_modification: payload.motif_modification ?? null,
+        statut_validation: payload.statut_validation || 'BROUILLON',
         activites: builtActs,
         montant_total_jour:
           payload.montant_total_jour ??
@@ -814,6 +842,7 @@ export async function saveContractuelPointage(payload: {
       return {
         success: true,
         pointage: localPointage,
+        queuedOffline: true,
         message: 'Enregistré localement (synchronisation en attente).',
       };
     }
@@ -978,14 +1007,15 @@ export async function flushContractuelsSyncQueue(options?: {
         continue;
       }
 
-      const resJson = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        if (response.status === 404 && op.action === 'delete') {
+      const res = await fetch(url, { method, headers, body });
+      const resJson = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 404 && op.action === 'delete') {
           confirmedIds.push(op.opId);
           resSummary.syncedCount += 1;
           continue;
         }
-        throw new Error(resJson.error || `HTTP ${response.status}`);
+        throw new Error(resJson.error || `HTTP ${res.status}`);
       }
 
       // Réconcilier l'ID provisoire hors ligne vers l'ID serveur canonique dans le cache local
@@ -1477,3 +1507,125 @@ export function exportContractuellesExcel(params: {
   const fileName = `contractuelles-lahcen-${dateFormatted}.xlsx`;
   XLSX.writeFile(wb, fileName);
 }
+
+export async function getContractuelTaches(companyId?: string) {
+  const cid = companyId || getActiveCompanyId() || 'cie_lahcen_pointeur';
+  const res = await getContractuelContrats({ actif: true }, { companyId: cid });
+  const taches = res.contrats.map((c) => ({
+    id: c.id,
+    company_id: c.company_id || cid,
+    code: c.code,
+    nom: c.designation,
+    tarif_unitaire: c.prix_unitaire,
+    remuneration_mode: c.mode_remuneration,
+    unite_metrique: c.unite,
+    domaine_id: c.domaine_id,
+    actif: c.actif ?? true,
+    ouvriers_autorises: 'tous' as const,
+    createdAt: c.created_at || '',
+  }));
+  return { success: true, taches };
+}
+
+export async function validateContractuelPointage(
+  pointageId: string,
+  payload: {
+    statut?: string;
+    decision?: 'VALIDE' | 'REFUSE' | string;
+    montant_valide?: number;
+    motif?: string;
+    motif_rejet?: string;
+  },
+  _options?: any
+): Promise<{ success: boolean; pointage?: ContractuelPointage; error?: string }> {
+  try {
+    const list = readLocalList<ContractuelPointage>(STORAGE_KEYS_CONTRACTUELS.POINTAGES);
+    const idx = list.findIndex((p) => p.id === pointageId);
+    const targetStatut = (payload.decision || payload.statut || 'VALIDE') as any;
+    const motifText = payload.motif_rejet ?? payload.motif ?? null;
+    if (idx >= 0) {
+      const nextMontantValide =
+        payload.montant_valide !== undefined
+          ? payload.montant_valide
+          : targetStatut === 'REFUSE'
+          ? 0
+          : list[idx].montant_valide ?? list[idx].montant_propose ?? list[idx].montant_total_jour;
+      list[idx] = {
+        ...list[idx],
+        statut_validation: targetStatut,
+        montant_valide: nextMontantValide,
+        montant_total_jour: targetStatut === 'VALIDE' ? Number(nextMontantValide || 0) : list[idx].montant_total_jour,
+        motif_rejet: motifText,
+        motif_refus: targetStatut === 'REFUSE' ? motifText : list[idx].motif_refus ?? null,
+        updated_at: new Date().toISOString(),
+      };
+      writeLocalList(STORAGE_KEYS_CONTRACTUELS.POINTAGES, list);
+    }
+    return { success: true, pointage: idx >= 0 ? list[idx] : undefined };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function validateContractuelPointagesBatch(
+  items: Array<{
+    id: string;
+    statut?: string;
+    decision?: 'VALIDE' | 'REFUSE' | string;
+    montant_valide?: number;
+    motif?: string;
+    motif_rejet?: string;
+  }>,
+  options?: any
+): Promise<{
+  success: boolean;
+  pointages: ContractuelPointage[];
+  count: number;
+  updatedCount: number;
+  error?: string;
+}> {
+  try {
+    const updatedPointages: ContractuelPointage[] = [];
+    for (const item of items) {
+      const res = await validateContractuelPointage(
+        item.id,
+        {
+          statut: item.statut,
+          decision: item.decision,
+          montant_valide: item.montant_valide,
+          motif: item.motif,
+          motif_rejet: item.motif_rejet,
+        },
+        options
+      );
+      if (res.pointage) {
+        updatedPointages.push(res.pointage);
+      }
+    }
+    return {
+      success: true,
+      pointages: updatedPointages,
+      count: updatedPointages.length,
+      updatedCount: items.length,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      pointages: [],
+      count: 0,
+      updatedCount: 0,
+      error: err.message || 'Erreur lors de la validation en lot.',
+    };
+  }
+}
+
+export async function syncPendingContractuelPointages(options?: any) {
+  return await flushContractuelsSyncQueue(options);
+}
+
+export function getPendingContractuelPointagesCount(): number {
+  const ops = getOutboxOps(OUTBOX_KEYS.CONTRACTUELS);
+  return ops.length;
+}
+
+
